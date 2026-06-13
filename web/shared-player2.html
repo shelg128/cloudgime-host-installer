@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <title>Player 2 Companion Pad</title>
+    <style>
+        :root {
+            color-scheme: dark;
+            --bg: #0c1117;
+            --panel: rgba(17, 25, 33, 0.94);
+            --panel-border: rgba(105, 201, 178, 0.26);
+            --muted: #8fb9b3;
+            --text: #f3f7f8;
+            --accent: #59d0b3;
+            --accent-soft: rgba(89, 208, 179, 0.16);
+            --warn: #ffd166;
+            --danger: #ff7b7b;
+        }
+
+        html, body {
+            margin: 0;
+            min-height: 100%;
+            background:
+                radial-gradient(circle at top, rgba(71, 151, 134, 0.18), transparent 32%),
+                linear-gradient(180deg, #0d1318 0%, #081015 100%);
+            color: var(--text);
+            font-family: "Segoe UI", Tahoma, sans-serif;
+        }
+
+        body {
+            display: grid;
+            place-items: center;
+            padding: 18px;
+            box-sizing: border-box;
+        }
+
+        main {
+            width: min(94vw, 560px);
+            padding: 24px;
+            border-radius: 22px;
+            background: var(--panel);
+            border: 1px solid var(--panel-border);
+            box-shadow: 0 24px 50px rgba(0, 0, 0, 0.34);
+        }
+
+        h1 {
+            margin: 0 0 10px;
+            font-size: 22px;
+            line-height: 1.2;
+        }
+
+        p {
+            margin: 0 0 12px;
+            line-height: 1.5;
+        }
+
+        .muted {
+            color: var(--muted);
+        }
+
+        .status {
+            margin: 18px 0 0;
+            padding: 14px 16px;
+            border-radius: 16px;
+            background: var(--accent-soft);
+            border: 1px solid rgba(89, 208, 179, 0.22);
+        }
+
+        .status strong {
+            display: block;
+            margin-bottom: 6px;
+            color: var(--accent);
+            font-size: 13px;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+
+        .status.warn strong {
+            color: var(--warn);
+        }
+
+        .status.error strong {
+            color: var(--danger);
+        }
+
+        .actions {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-top: 18px;
+        }
+
+        button {
+            min-height: 46px;
+            padding: 0 18px;
+            border-radius: 999px;
+            border: 1px solid rgba(89, 208, 179, 0.28);
+            background: rgba(89, 208, 179, 0.14);
+            color: var(--text);
+            font-size: 15px;
+            font-weight: 700;
+        }
+
+        button[disabled] {
+            opacity: 0.55;
+        }
+    </style>
+    <script>
+        (() => {
+            const url = new URL(window.location.href);
+            const sharedInviteToken = (url.searchParams.get("sharedInviteToken") || url.searchParams.get("shared_invite_token") || "").trim();
+            const STREAM_CONTROLLER_TYPE = { UNKNOWN: 0, XBOX: 1, PLAYSTATION: 2, NINTENDO: 3 };
+            const STREAM_CONTROLLER_BUTTON = {
+                BUTTON_UP: 1,
+                BUTTON_DOWN: 2,
+                BUTTON_LEFT: 4,
+                BUTTON_RIGHT: 8,
+                BUTTON_PLAY: 16,
+                BUTTON_BACK: 32,
+                BUTTON_LS_CLK: 64,
+                BUTTON_RS_CLK: 128,
+                BUTTON_LB: 256,
+                BUTTON_RB: 512,
+                BUTTON_SPECIAL: 1024,
+                BUTTON_A: 4096,
+                BUTTON_B: 8192,
+                BUTTON_X: 16384,
+                BUTTON_Y: 32768,
+                BUTTON_TOUCHPAD: 1048576,
+            };
+            const STREAM_CONTROLLER_CAPABILITIES = {
+                CAPABILITY_TOUCHPAD: 8,
+            };
+            const STANDARD_BUTTONS = [
+                STREAM_CONTROLLER_BUTTON.BUTTON_B,
+                STREAM_CONTROLLER_BUTTON.BUTTON_A,
+                STREAM_CONTROLLER_BUTTON.BUTTON_Y,
+                STREAM_CONTROLLER_BUTTON.BUTTON_X,
+                STREAM_CONTROLLER_BUTTON.BUTTON_LB,
+                STREAM_CONTROLLER_BUTTON.BUTTON_RB,
+                null,
+                null,
+                STREAM_CONTROLLER_BUTTON.BUTTON_BACK,
+                STREAM_CONTROLLER_BUTTON.BUTTON_PLAY,
+                STREAM_CONTROLLER_BUTTON.BUTTON_LS_CLK,
+                STREAM_CONTROLLER_BUTTON.BUTTON_RS_CLK,
+                STREAM_CONTROLLER_BUTTON.BUTTON_UP,
+                STREAM_CONTROLLER_BUTTON.BUTTON_DOWN,
+                STREAM_CONTROLLER_BUTTON.BUTTON_LEFT,
+                STREAM_CONTROLLER_BUTTON.BUTTON_RIGHT,
+                STREAM_CONTROLLER_BUTTON.BUTTON_SPECIAL,
+            ];
+            const SUPPORTED_BUTTONS =
+                STREAM_CONTROLLER_BUTTON.BUTTON_A |
+                STREAM_CONTROLLER_BUTTON.BUTTON_B |
+                STREAM_CONTROLLER_BUTTON.BUTTON_X |
+                STREAM_CONTROLLER_BUTTON.BUTTON_Y |
+                STREAM_CONTROLLER_BUTTON.BUTTON_UP |
+                STREAM_CONTROLLER_BUTTON.BUTTON_DOWN |
+                STREAM_CONTROLLER_BUTTON.BUTTON_LEFT |
+                STREAM_CONTROLLER_BUTTON.BUTTON_RIGHT |
+                STREAM_CONTROLLER_BUTTON.BUTTON_LB |
+                STREAM_CONTROLLER_BUTTON.BUTTON_RB |
+                STREAM_CONTROLLER_BUTTON.BUTTON_PLAY |
+                STREAM_CONTROLLER_BUTTON.BUTTON_BACK |
+                STREAM_CONTROLLER_BUTTON.BUTTON_LS_CLK |
+                STREAM_CONTROLLER_BUTTON.BUTTON_RS_CLK |
+                STREAM_CONTROLLER_BUTTON.BUTTON_SPECIAL;
+            const SUPPORTED_BUTTONS_WITH_TOUCHPAD =
+                SUPPORTED_BUTTONS | STREAM_CONTROLLER_BUTTON.BUTTON_TOUCHPAD;
+            const I16_MAX = 32767;
+            const DEADZONE = 0.08;
+
+            let invite = null;
+            let ws = null;
+            let reconnectTimer = 0;
+            let heartbeatTimer = 0;
+            let gamepadLoopHandle = 0;
+            let pageClosing = false;
+            let wsReady = false;
+            let advertisedGamepadIndex = null;
+            let lastStateSignature = "";
+
+            const statusEl = () => document.getElementById("status");
+            const detailEl = () => document.getElementById("detail");
+            const controllerEl = () => document.getElementById("controller");
+            const reconnectButton = () => document.getElementById("reconnect");
+
+            const setPanelState = (kind) => {
+                const panel = document.getElementById("status-panel");
+                if (!panel) {
+                    return;
+                }
+                panel.className = `status ${kind || ""}`.trim();
+            };
+
+            const setStatus = (message, kind = "") => {
+                setPanelState(kind);
+                const element = statusEl();
+                if (element) {
+                    element.textContent = message;
+                }
+            };
+
+            const setDetail = (message) => {
+                const element = detailEl();
+                if (element) {
+                    element.textContent = message;
+                }
+            };
+
+            const setController = (message) => {
+                const element = controllerEl();
+                if (element) {
+                    element.textContent = message;
+                }
+            };
+
+            const buildSharedInviteConsumeUrl = () => {
+                return new URL("./api/android-native/shared-session/consume-invite", url).toString();
+            };
+
+            const toWebSocketUrl = (input) => {
+                const nextUrl = new URL(input, url);
+                nextUrl.protocol = nextUrl.protocol === "https:" ? "wss:" : "ws:";
+                return nextUrl.toString();
+            };
+
+            const buildPlayer2WsUrl = () => {
+                const nextUrl = new URL("./api/android-native/shared-session/player2/ws", url);
+                nextUrl.searchParams.set("inviteToken", sharedInviteToken);
+                return toWebSocketUrl(nextUrl.toString());
+            };
+
+            const readSharedInviteError = async (response) => {
+                const text = await response.text().catch(() => "");
+                if (response.status === 404) {
+                    return "Shared session invite tidak ditemukan.";
+                }
+                if (response.status === 401) {
+                    return "Shared session invite sudah kedaluwarsa.";
+                }
+                return text || `Shared session invite gagal diproses (HTTP ${response.status}).`;
+            };
+
+            const consumeSharedInvite = async () => {
+                const response = await fetch(buildSharedInviteConsumeUrl(), {
+                    method: "POST",
+                    cache: "no-store",
+                    credentials: "include",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({
+                        invite_token: sharedInviteToken,
+                    }),
+                });
+
+                if (!response.ok) {
+                    throw new Error(await readSharedInviteError(response));
+                }
+
+                const payload = await response.json();
+                return payload?.invite || null;
+            };
+
+            const send = (message) => {
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    return false;
+                }
+                ws.send(JSON.stringify(message));
+                return true;
+            };
+
+            const stopHeartbeat = () => {
+                if (heartbeatTimer) {
+                    window.clearInterval(heartbeatTimer);
+                    heartbeatTimer = 0;
+                }
+            };
+
+            const startHeartbeat = () => {
+                stopHeartbeat();
+                heartbeatTimer = window.setInterval(() => {
+                    send({ type: "heartbeat" });
+                }, 2000);
+            };
+
+            const cancelReconnect = () => {
+                if (reconnectTimer) {
+                    window.clearTimeout(reconnectTimer);
+                    reconnectTimer = 0;
+                }
+            };
+
+            const scheduleReconnect = () => {
+                if (pageClosing || reconnectTimer || !invite?.attach_available) {
+                    return;
+                }
+                reconnectTimer = window.setTimeout(() => {
+                    reconnectTimer = 0;
+                    connectWebSocket();
+                }, 1800);
+            };
+
+            const normalizeAxis = (value) => {
+                const clamped = Math.max(-1, Math.min(1, Number(value || 0)));
+                return Math.abs(clamped) < DEADZONE ? 0 : clamped;
+            };
+
+            const normalizeTrigger = (value) => {
+                const clamped = Math.max(0, Math.min(1, Number(value || 0)));
+                return Math.round(clamped * 255);
+            };
+
+            const normalizeStick = (value) => {
+                return Math.round(normalizeAxis(value) * I16_MAX);
+            };
+
+            const convertStandardButton = (buttonIndex) => {
+                return STANDARD_BUTTONS[buttonIndex] ?? null;
+            };
+
+            const inferControllerTypeFromId = (gamepadId) => {
+                const normalized = String(gamepadId || "").toLowerCase();
+                if (/(dualshock|dualsense|playstation|sony|ps3|ps4|ps5)/i.test(normalized)) {
+                    return STREAM_CONTROLLER_TYPE.PLAYSTATION;
+                }
+                if (/(nintendo|switch|joy-con|joycon|pro controller)/i.test(normalized)) {
+                    return STREAM_CONTROLLER_TYPE.NINTENDO;
+                }
+                if (/(xbox|xinput|x360|microsoft)/i.test(normalized)) {
+                    return STREAM_CONTROLLER_TYPE.XBOX;
+                }
+                return STREAM_CONTROLLER_TYPE.UNKNOWN;
+            };
+
+            const getGamepadAdvertisement = (gamepad) => {
+                const type = inferControllerTypeFromId(gamepad?.id || "");
+                if (type === STREAM_CONTROLLER_TYPE.PLAYSTATION) {
+                    return {
+                        controller_type: type,
+                        supported_buttons: SUPPORTED_BUTTONS_WITH_TOUCHPAD,
+                        capabilities: STREAM_CONTROLLER_CAPABILITIES.CAPABILITY_TOUCHPAD,
+                    };
+                }
+                return {
+                    controller_type: type,
+                    supported_buttons: SUPPORTED_BUTTONS,
+                    capabilities: 0,
+                };
+            };
+
+            const extractGamepadState = (gamepad) => {
+                let buttonFlags = 0;
+                for (let index = 0; index < gamepad.buttons.length; index++) {
+                    const buttonFlag = convertStandardButton(index);
+                    if (buttonFlag !== null && gamepad.buttons[index]?.pressed) {
+                        buttonFlags |= buttonFlag;
+                    }
+                }
+
+                return {
+                    button_flags: buttonFlags >>> 0,
+                    left_trigger: normalizeTrigger(gamepad.buttons[6]?.value),
+                    right_trigger: normalizeTrigger(gamepad.buttons[7]?.value),
+                    left_stick_x: normalizeStick(gamepad.axes[0]),
+                    left_stick_y: normalizeStick(-(gamepad.axes[1] ?? 0)),
+                    right_stick_x: normalizeStick(gamepad.axes[2]),
+                    right_stick_y: normalizeStick(-(gamepad.axes[3] ?? 0)),
+                };
+            };
+
+            const stateSignature = (state) => {
+                return [
+                    state.button_flags,
+                    state.left_trigger,
+                    state.right_trigger,
+                    state.left_stick_x,
+                    state.left_stick_y,
+                    state.right_stick_x,
+                    state.right_stick_y,
+                ].join(":");
+            };
+
+            const getActiveGamepad = () => {
+                const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+                for (const gamepad of gamepads) {
+                    if (gamepad && gamepad.connected) {
+                        return gamepad;
+                    }
+                }
+                return null;
+            };
+
+            const sendControllerDisconnect = () => {
+                if (advertisedGamepadIndex === null) {
+                    return;
+                }
+                send({ type: "controller_disconnected" });
+                advertisedGamepadIndex = null;
+                lastStateSignature = "";
+                setController("No controller attached.");
+            };
+
+            const ensureAdvertisedController = () => {
+                if (!wsReady) {
+                    return;
+                }
+
+                const gamepad = getActiveGamepad();
+                if (!gamepad) {
+                    sendControllerDisconnect();
+                    return;
+                }
+
+                if (advertisedGamepadIndex === gamepad.index) {
+                    return;
+                }
+
+                sendControllerDisconnect();
+                advertisedGamepadIndex = gamepad.index;
+                lastStateSignature = "";
+                setController(`Controller active: ${gamepad.id || "Gamepad"} (slot 2).`);
+                send({
+                    type: "controller_connected",
+                    ...getGamepadAdvertisement(gamepad),
+                });
+            };
+
+            const pumpGamepad = () => {
+                ensureAdvertisedController();
+
+                if (wsReady && advertisedGamepadIndex !== null && navigator.getGamepads) {
+                    const gamepad = navigator.getGamepads()[advertisedGamepadIndex];
+                    if (gamepad && gamepad.connected) {
+                        const state = extractGamepadState(gamepad);
+                        const signature = stateSignature(state);
+                        if (signature !== lastStateSignature) {
+                            lastStateSignature = signature;
+                            send({
+                                type: "controller_state",
+                                ...state,
+                            });
+                        }
+                    } else {
+                        sendControllerDisconnect();
+                    }
+                }
+
+                gamepadLoopHandle = window.requestAnimationFrame(pumpGamepad);
+            };
+
+            const stopGamepadLoop = () => {
+                if (gamepadLoopHandle) {
+                    window.cancelAnimationFrame(gamepadLoopHandle);
+                    gamepadLoopHandle = 0;
+                }
+            };
+
+            const connectWebSocket = () => {
+                cancelReconnect();
+                stopHeartbeat();
+
+                if (!invite?.attach_available) {
+                    setStatus("Player 2 lane is not ready yet.", "warn");
+                    return;
+                }
+
+                if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+                    return;
+                }
+
+                wsReady = false;
+                setStatus("Connecting Player 2 pad link...", "");
+                setDetail("This second device will send controller slot 2 only. Video stays on the owner device.");
+
+                try {
+                    ws = new WebSocket(buildPlayer2WsUrl());
+                } catch (error) {
+                    console.error(error);
+                    setStatus("Failed to create Player 2 connection.", "error");
+                    scheduleReconnect();
+                    return;
+                }
+
+                ws.addEventListener("open", () => {
+                    wsReady = true;
+                    startHeartbeat();
+                    ensureAdvertisedController();
+                    setStatus("Player 2 pad connected.", "");
+                    if (advertisedGamepadIndex === null) {
+                        setController("Connect one Bluetooth or USB controller on this device.");
+                    }
+                    const button = reconnectButton();
+                    if (button) {
+                        button.disabled = false;
+                    }
+                });
+
+                ws.addEventListener("message", (event) => {
+                    try {
+                        const payload = JSON.parse(event.data);
+                        if (payload?.type === "ready") {
+                            setStatus("Player 2 pad ready.", "");
+                        } else if (payload?.type === "status") {
+                            setDetail(payload.message || "");
+                        } else if (payload?.type === "error") {
+                            setStatus(payload.message || "Player 2 pad error.", "error");
+                        }
+                    } catch (error) {
+                        console.error(error);
+                    }
+                });
+
+                ws.addEventListener("close", () => {
+                    wsReady = false;
+                    stopHeartbeat();
+                    sendControllerDisconnect();
+                    setStatus("Player 2 connection closed. Reconnecting...", "warn");
+                    scheduleReconnect();
+                });
+
+                ws.addEventListener("error", () => {
+                    setStatus("Player 2 connection error. Retrying...", "warn");
+                });
+            };
+
+            window.addEventListener("gamepadconnected", () => {
+                ensureAdvertisedController();
+            });
+
+            window.addEventListener("gamepaddisconnected", () => {
+                ensureAdvertisedController();
+            });
+
+            window.addEventListener("beforeunload", () => {
+                pageClosing = true;
+                cancelReconnect();
+                stopHeartbeat();
+                try {
+                    sendControllerDisconnect();
+                    ws?.close();
+                } catch (_error) {
+                }
+            });
+
+            window.addEventListener("DOMContentLoaded", async () => {
+                const button = reconnectButton();
+                if (button) {
+                    button.addEventListener("click", () => {
+                        connectWebSocket();
+                    });
+                }
+
+                if (!sharedInviteToken) {
+                    setStatus("Missing shared invite token.", "error");
+                    setDetail("Open this page from a valid Player 2 share link.");
+                    return;
+                }
+
+                if (!("WebSocket" in window) || !navigator.getGamepads) {
+                    setStatus("This browser does not support the controller companion page.", "error");
+                    setDetail("Use a modern Chrome or Edge browser on the second device.");
+                    return;
+                }
+
+                setStatus("Checking Player 2 invite...", "");
+                setDetail("Owner display authority stays on the first device.");
+                setController("Searching for a connected controller...");
+
+                try {
+                    invite = await consumeSharedInvite();
+                } catch (error) {
+                    console.error(error);
+                    setStatus(error?.message || "Shared session invite failed.", "error");
+                    setDetail("Ask the owner to create a fresh Player 2 link.");
+                    return;
+                }
+
+                if (!invite || String(invite.role || "").toLowerCase() !== "player2") {
+                    setStatus("This share link is not a Player 2 invite.", "error");
+                    setDetail("Use a Player 2 share link from the owner session.");
+                    return;
+                }
+
+                const expiresAt = invite.expires_at_unix_ms
+                    ? new Date(invite.expires_at_unix_ms).toLocaleString()
+                    : "unknown";
+                setDetail(`Invite active until ${expiresAt}. Controller input from this page goes to slot 2 only.`);
+
+                if (!invite.attach_available) {
+                    setStatus(invite.status_message || "Player 2 lane is still preparing.", "warn");
+                    setController("Wait until the owner stream is fully connected, then reopen the share link.");
+                    return;
+                }
+
+                connectWebSocket();
+                pumpGamepad();
+            });
+
+            window.addEventListener("pagehide", () => {
+                pageClosing = true;
+                stopGamepadLoop();
+                stopHeartbeat();
+            });
+        })();
+    </script>
+</head>
+<body>
+    <main>
+        <h1>Player 2 Companion Pad</h1>
+        <p class="muted">Halaman ini tidak membuka video. Device ini hanya menambahkan controller slot 2 ke sesi owner yang sedang live.</p>
+        <div id="status-panel" class="status">
+            <strong>Status</strong>
+            <p id="status">Checking Player 2 invite...</p>
+            <p id="detail" class="muted">Owner display authority stays on the first device.</p>
+            <p id="controller" class="muted">Searching for a connected controller...</p>
+        </div>
+        <div class="actions">
+            <button id="reconnect" type="button">Reconnect Pad Link</button>
+        </div>
+    </main>
+</body>
+</html>

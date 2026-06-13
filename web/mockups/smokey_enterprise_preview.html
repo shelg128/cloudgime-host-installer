@@ -1,0 +1,1095 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smokey Glasses Enterprise Preview</title>
+    <link rel="stylesheet" href="../styles/smokey_enterprise_preview.css?v=20260320p12">
+</head>
+<body class="smokey-preview" data-preview-mode="desktop">
+<main class="preview-shell">
+    <header class="preview-hero">
+        <div class="preview-kicker">Smokey Glasses Enterprise</div>
+        <h1>Stream-first device preview.</h1>
+        <p>
+            Pick one mode at a time. The active device mock shows a large stream canvas first, then
+            route, sidebar, bridge, and quick-pad as real overlay chrome around it.
+        </p>
+
+        <div class="preview-modebar">
+            <span class="preview-mode-label">Preview mode</span>
+            <button class="preview-mode-toggle is-active" data-preview-mode="desktop" type="button">Desktop Mode</button>
+            <button class="preview-mode-toggle" data-preview-mode="mobile" type="button">Mobile Mode</button>
+            <span class="preview-mode-note">Only the selected device mock is shown.</span>
+        </div>
+
+        <div class="preview-scenebar">
+            <span class="preview-mode-label">Scene</span>
+            <button class="preview-scene-toggle is-active" data-scene-mode="desktop" data-preview-scene="desktop-main" type="button">Desktop Main</button>
+            <button class="preview-scene-toggle" data-scene-mode="desktop" data-preview-scene="desktop-game" type="button">Game HUD</button>
+            <button class="preview-scene-toggle" data-scene-mode="desktop" data-preview-scene="desktop-dense" type="button">Dense Sidebar</button>
+            <button class="preview-scene-toggle" data-scene-mode="desktop" data-preview-scene="desktop-debug" type="button">Debug & Recovery</button>
+            <button class="preview-scene-toggle" data-scene-mode="desktop" data-preview-scene="desktop-heavy" type="button">Heavy Import</button>
+            <button class="preview-scene-toggle" data-scene-mode="mobile" data-preview-scene="mobile-bridge" type="button">Mobile Bridge</button>
+            <button class="preview-scene-toggle" data-scene-mode="mobile" data-preview-scene="mobile-quickpad" type="button">Mobile QuickPad</button>
+            <button class="preview-scene-toggle" data-scene-mode="mobile" data-preview-scene="mobile-game" type="button">Mobile Game HUD</button>
+            <button class="preview-scene-toggle" data-scene-mode="mobile" data-preview-scene="mobile-debug" type="button">Mobile Debug</button>
+            <button class="preview-scene-toggle" data-scene-mode="mobile" data-preview-scene="mobile-heavy" type="button">Mobile Heavy</button>
+            <span class="preview-mode-note">Each scene shows a different product state, not just a different zoom.</span>
+        </div>
+    </header>
+
+    <section class="device-preview-shell">
+        <article class="device-preview preview-mode-panel-desktop">
+            <div class="desktop-device">
+                <div class="desktop-bezel">
+                    <div class="desktop-display">
+                        <div class="device-topline">
+                            <div class="device-brand">
+                                <span class="device-brand-dot"></span>
+                                <span>Smokey Enterprise</span>
+                            </div>
+                            <div class="device-meta">
+                                <span class="mini-pill">Mac-style monitor mock</span>
+                                <span class="mini-pill">16:9 stream-first canvas</span>
+                            </div>
+                        </div>
+
+                        <div class="stream-canvas desktop-canvas">
+                            <button class="route-badge" type="button" data-icon="route" data-info-title="Route badge" data-info-body="Shared route state. In the real UI this sits above the video canvas, not inside the content being streamed.">
+                                <span class="route-badge-title">Direct P2P</span>
+                                <span class="route-badge-note">Shared route state</span>
+                            </button>
+
+                            <div class="canvas-right-rail">
+                                <button class="canvas-sidebar-trigger is-active" type="button" data-icon="arrowleft" data-toggle-panel="desktop-sidebar" data-info-title="Sidebar trigger" data-info-body="Dedicated sidebar handle on the right edge. In the live shell this stays visible even when the sidebar is tucked away." aria-label="Toggle desktop sidebar"></button>
+                                <div class="canvas-actions" data-action-menu>
+                                    <button class="action-gear" type="button" data-icon="gear" data-action-menu-toggle data-info-title="Desktop tools" data-info-body="Collapsed utility menu. The real stream keeps secondary desktop actions behind one gear trigger so the canvas stays clean." aria-label="Toggle desktop tools"></button>
+                                    <div class="action-menu-panel" data-action-menu-panel>
+                                        <div class="action-menu-head">
+                                            <div class="action-menu-kicker">System Utilities</div>
+                                            <div class="action-menu-note">Secondary overlays only. Main controls stay in the sidebar.</div>
+                                        </div>
+                                        <button class="action-chip is-active" type="button" data-icon="bridge" data-toggle-panel="desktop-bridge" data-info-title="Bridge overlay" data-info-body="Floating Android bridge style controls. This mock keeps it separate from the video canvas and sized for fast actions only.">Bridge</button>
+                                        <button class="action-chip" type="button" data-icon="stats" data-toggle-panel="desktop-stats" data-info-title="Stats panel" data-info-body="Stats should be present but quiet. In the final UI it should open as a utility overlay, not compete with primary controls.">Stats</button>
+                                        <button class="action-chip" type="button" data-icon="debug" data-toggle-panel="desktop-debug" data-info-title="Debug panel" data-info-body="Recovery and debug belong in the utility layer, not inside the main sidebar stack.">Debug</button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="canvas-window">
+                                <div class="canvas-window-bar" data-scene-list="desktop-main desktop-dense desktop-debug desktop-heavy">
+                                    <span class="canvas-window-dot"></span>
+                                    <span class="canvas-window-title">Moonlight stream canvas</span>
+                                </div>
+                                <div class="canvas-window-body" data-scene-list="desktop-main desktop-dense desktop-debug desktop-heavy desktop-game">
+                                    <div class="canvas-workbench" data-scene-list="desktop-main desktop-dense desktop-debug desktop-heavy">
+                                        <div class="canvas-rail">
+                                            <span class="rail-app rail-app-active"></span>
+                                            <span class="rail-app"></span>
+                                            <span class="rail-app"></span>
+                                            <span class="rail-app rail-app-faint"></span>
+                                        </div>
+                                        <div class="canvas-main">
+                                            <div class="canvas-toolbar">
+                                                <div class="toolbar-group">
+                                                    <span class="toolbar-pill">Workspace</span>
+                                                    <span class="toolbar-pill toolbar-pill-active">Moonlight Host</span>
+                                                    <span class="toolbar-pill">Desktop</span>
+                                                </div>
+                                                <div class="toolbar-group toolbar-group-end">
+                                                    <span class="toolbar-pill">1080p</span>
+                                                    <span class="toolbar-pill toolbar-pill-live">LIVE</span>
+                                                </div>
+                                            </div>
+                                            <div class="canvas-grid">
+                                                <div class="stream-panel stream-panel-editor">
+                                                    <div class="stream-panel-head">
+                                                        <span class="stream-panel-title">Editor.ts</span>
+                                                        <span class="stream-panel-meta">TypeScript</span>
+                                                    </div>
+                                                    <div class="code-lines">
+                                                        <span class="code-line code-line-accent"></span>
+                                                        <span class="code-line"></span>
+                                                        <span class="code-line code-line-short"></span>
+                                                        <span class="code-line"></span>
+                                                        <span class="code-line code-line-medium"></span>
+                                                        <span class="code-line code-line-short"></span>
+                                                    </div>
+                                                </div>
+                                                <div class="stream-panel stream-panel-preview">
+                                                    <div class="stream-panel-head">
+                                                        <span class="stream-panel-title">Live Preview</span>
+                                                        <span class="stream-panel-meta">Chrome</span>
+                                                    </div>
+                                                    <div class="preview-surface">
+                                                        <div class="preview-surface-hero"></div>
+                                                        <div class="preview-surface-row">
+                                                            <span></span>
+                                                            <span></span>
+                                                            <span></span>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <div class="stream-panel stream-panel-terminal">
+                                                    <div class="stream-panel-head">
+                                                        <span class="stream-panel-title">Terminal</span>
+                                                        <span class="stream-panel-meta">PowerShell</span>
+                                                    </div>
+                                                    <div class="terminal-lines">
+                                                        <span class="terminal-line terminal-line-prompt"></span>
+                                                        <span class="terminal-line"></span>
+                                                        <span class="terminal-line terminal-line-prompt"></span>
+                                                        <span class="terminal-line terminal-line-medium"></span>
+                                                    </div>
+                                                </div>
+                                                <div class="stream-panel stream-panel-dashboard">
+                                                    <div class="stream-panel-head">
+                                                        <span class="stream-panel-title">Session Cards</span>
+                                                        <span class="stream-panel-meta">Stats</span>
+                                                    </div>
+                                                    <div class="dashboard-cards">
+                                                        <span class="dashboard-card"></span>
+                                                        <span class="dashboard-card dashboard-card-tall"></span>
+                                                        <span class="dashboard-card"></span>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="canvas-inspector" data-scene-list="desktop-main desktop-dense desktop-debug desktop-heavy">
+                                        <div class="inspector-card">
+                                            <span class="inspector-kicker">Host</span>
+                                            <strong>Sunshine / Desktop</strong>
+                                            <span>Session healthy</span>
+                                        </div>
+                                        <div class="inspector-card inspector-card-accent">
+                                            <span class="inspector-kicker">Route</span>
+                                            <strong>Direct P2P</strong>
+                                            <span>17 ms avg</span>
+                                        </div>
+                                        <div class="inspector-card">
+                                            <span class="inspector-kicker">Scene</span>
+                                            <strong>Design review</strong>
+                                            <span>Fake streamed desktop</span>
+                                        </div>
+                                    </div>
+                                    <div class="game-stream-layout is-hidden" data-scene-list="desktop-game">
+                                        <div class="game-stream-art">
+                                            <div class="game-scorebar">
+                                                <span class="game-team game-team-blue">ALPHA 2</span>
+                                                <span class="game-timer">12:48</span>
+                                                <span class="game-team game-team-red">OMEGA 1</span>
+                                            </div>
+                                            <div class="game-objective-card">
+                                                <span class="game-objective-kicker">Objective</span>
+                                                <strong>Hold sector B and protect uplink</strong>
+                                            </div>
+                                            <div class="game-crosshair"></div>
+                                            <div class="game-feed">
+                                                <span>Cloudgime_01 captured zone B</span>
+                                                <span>Support drone deployed</span>
+                                                <span>Ultimate ready</span>
+                                            </div>
+                                            <div class="game-minimap">
+                                                <span class="game-minimap-ring"></span>
+                                                <span class="game-minimap-ring game-minimap-ring-inner"></span>
+                                                <span class="game-minimap-dot game-minimap-dot-blue"></span>
+                                                <span class="game-minimap-dot game-minimap-dot-red"></span>
+                                                <span class="game-minimap-sweep"></span>
+                                            </div>
+                                            <div class="game-player-hud">
+                                                <div class="game-player-main">
+                                                    <span class="game-player-name">Astra Vanguard</span>
+                                                    <span class="game-player-state">Pulse rifle / 42 rounds</span>
+                                                </div>
+                                                <div class="game-bars">
+                                                    <span class="game-bar game-bar-health"></span>
+                                                    <span class="game-bar game-bar-armor"></span>
+                                                </div>
+                                                <div class="game-abilities">
+                                                    <span class="game-ability game-ability-live">Q</span>
+                                                    <span class="game-ability">E</span>
+                                                    <span class="game-ability">Shift</span>
+                                                    <span class="game-ability game-ability-ultimate">ULT</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="canvas-taskbar" data-scene-list="desktop-main desktop-dense desktop-debug desktop-heavy">
+                                    <span class="taskbar-app taskbar-app-active"></span>
+                                    <span class="taskbar-app"></span>
+                                    <span class="taskbar-app"></span>
+                                    <span class="taskbar-app"></span>
+                                    <span class="taskbar-spacer"></span>
+                                    <span class="taskbar-status">19:30</span>
+                                </div>
+                            </div>
+
+                            <aside class="overlay-panel overlay-bridge" data-panel-id="desktop-bridge" data-bridge-mode="compact">
+                                <div class="overlay-head">
+                                    <span class="overlay-kicker">Bridge</span>
+                                    <button class="overlay-close" data-toggle-panel="desktop-bridge" type="button">Hide</button>
+                                </div>
+                                <div class="overlay-title">Enterprise Bridge</div>
+                                <div class="bridge-modebar">
+                                    <button class="mode-chip is-active" type="button" data-bridge-mode-target="desktop-bridge" data-bridge-mode="compact">Compact</button>
+                                    <button class="mode-chip" type="button" data-bridge-mode-target="desktop-bridge" data-bridge-mode="full">Full</button>
+                                </div>
+                                <div class="overlay-grid overlay-grid-2">
+                                    <button class="overlay-btn" type="button" data-icon="menu" data-info-title="Menu action" data-info-body="Primary bridge action. Intended for opening the main command surface without leaving the stream.">Menu</button>
+                                    <button class="overlay-btn" type="button" data-icon="keyboard" data-info-title="Keyboard action" data-info-body="Keyboard shortcut. In the real UI this would open the software keyboard or command entry.">Keyboard</button>
+                                    <button class="overlay-btn" type="button" data-icon="layout" data-info-title="Pad layout" data-info-body="Quick cycle for compact, balanced, and wide pad layouts without opening the full sidebar.">Pad Bal</button>
+                                    <button class="overlay-btn" type="button" data-icon="touch" data-info-title="Touch preset" data-info-body="Switches between desktop-like and mobile-like touch handling while keeping the stream visible.">Touch Mob</button>
+                                </div>
+                                <div class="overlay-grid overlay-grid-2 bridge-extended is-hidden" data-bridge-extra>
+                                    <button class="overlay-btn" type="button" data-icon="click" data-info-title="Click action" data-info-body="Fast desktop click action for one-hand control on mobile-derived layouts.">Click</button>
+                                    <button class="overlay-btn" type="button" data-icon="expand" data-info-title="More action" data-info-body="Expands the bridge to its fuller control console.">More</button>
+                                    <button class="overlay-btn" type="button" data-icon="volume" data-info-title="Mute action" data-info-body="Fast audio access kept inside the bridge for one-hand session control.">Mute</button>
+                                    <button class="overlay-btn" type="button" data-icon="refresh" data-info-title="Reconnect action" data-info-body="Fast recovery action to reconnect the session without leaving the stream surface.">Reconnect</button>
+                                </div>
+                            </aside>
+
+                            <aside class="overlay-panel overlay-sidebar" data-panel-id="desktop-sidebar">
+                                <div class="overlay-head">
+                                    <span class="overlay-kicker">Sidebar</span>
+                                    <button class="overlay-close" data-toggle-panel="desktop-sidebar" type="button">Hide</button>
+                                </div>
+                                <div class="overlay-title">Main</div>
+                                <div class="overlay-section">
+                                    <div class="overlay-section-head">
+                                        <span>Connection</span>
+                                        <span class="overlay-note">Core first</span>
+                                    </div>
+                                    <div class="overlay-grid overlay-grid-compact">
+                                        <button class="overlay-btn is-hero" type="button" data-icon="route" data-info-title="Connection card" data-info-body="Primary operational state. This should always be quick to scan before secondary utility cards.">Direct P2P</button>
+                                        <button class="overlay-btn" type="button" data-icon="quality" data-info-title="Quality card" data-info-body="Quick quality preset attached to connection state.">Balanced</button>
+                                        <button class="overlay-btn" type="button" data-icon="volume" data-info-title="Audio card" data-info-body="Primary audio state kept near connection for faster operation.">Audio On</button>
+                                    </div>
+                                </div>
+                                <div class="overlay-section">
+                                    <div class="overlay-section-head">
+                                        <span>Essentials</span>
+                                        <span class="overlay-note">High frequency</span>
+                                    </div>
+                                    <div class="overlay-list">
+                                        <button class="overlay-line" type="button" data-icon="desktop" data-info-title="Desktop actions" data-info-body="Desktop-level shortcuts stay grouped here instead of taking over the whole sidebar.">Desktop Actions</button>
+                                        <button class="overlay-line" type="button" data-icon="keys" data-info-title="Quick keys" data-info-body="Clipboard, enter, escape, and other fast keys belong in the essentials tier.">Quick Keys</button>
+                                        <button class="overlay-line" type="button" data-icon="mouse" data-info-title="Mouse actions" data-info-body="Mouse clicks and movement helpers stay available but visually secondary to the stream.">Mouse Actions</button>
+                                        <button class="overlay-line" type="button" data-icon="text" data-info-title="Text tools" data-info-body="Editing helpers remain discoverable without making the sidebar feel like a wall of identical chips.">Text Tools</button>
+                                    </div>
+                                </div>
+                                <div class="overlay-section is-hidden" data-scene-list="desktop-dense desktop-heavy">
+                                    <div class="overlay-section-head">
+                                        <span>Dense groups</span>
+                                        <span class="overlay-note">Closer to live UI</span>
+                                    </div>
+                                    <div class="overlay-list">
+                                        <button class="overlay-line" type="button" data-icon="desktop" data-info-title="Desktop / Browser / Coding" data-info-body="This scene packs the higher-density desktop/browser/coding actions that already exist in the live stream UI.">Desktop / Browser / Coding</button>
+                                        <button class="overlay-line" type="button" data-icon="gamepad" data-info-title="Gamepad section" data-info-body="The actual UI has a larger Gamepad tab with quick-pad tuning, presets, deadzones, and touchpad behavior.">Gamepad / QuickPad</button>
+                                        <button class="overlay-line" type="button" data-icon="touch" data-info-title="Touch section" data-info-body="Touch tuning and mobile gesture recovery live here in the real stream UI.">Touch / Profiles</button>
+                                        <button class="overlay-line" type="button" data-icon="stats" data-info-title="Advanced section" data-info-body="Recovery, stats, transport detail, and debug live deeper in the real product, and this dense scene previews that hierarchy.">Advanced / Debug</button>
+                                    </div>
+                                </div>
+                            </aside>
+
+                            <aside class="overlay-panel overlay-quickpad" data-panel-id="desktop-quickpad">
+                                <div class="overlay-head">
+                                    <span class="overlay-kicker">Quick-pad</span>
+                                    <button class="overlay-close" data-toggle-panel="desktop-quickpad" type="button">Hide</button>
+                                </div>
+                                <div class="quickpad-strip">
+                                    <div class="quickpad-stick"></div>
+                                    <div class="quickpad-dpad">
+                                        <span></span>
+                                        <span></span>
+                                        <span></span>
+                                        <span></span>
+                                    </div>
+                                    <div class="quickpad-track" data-icon="track" data-info-title="Track area" data-info-body="Track area handles tap, drag, double-click, and right-click gestures while staying small enough not to hide the stream.">Track</div>
+                                </div>
+                            </aside>
+
+                            <aside class="overlay-panel overlay-stats is-hidden" data-panel-id="desktop-stats">
+                                <div class="overlay-head">
+                                    <span class="overlay-kicker">Stats</span>
+                                    <button class="overlay-close" data-toggle-panel="desktop-stats" type="button">Hide</button>
+                                </div>
+                                <div class="overlay-title">Quiet utility panel</div>
+                                <div class="stats-list">
+                                    <span>Video: 1080p / 60</span>
+                                    <span>Latency: 17 ms</span>
+                                    <span>Route: Direct P2P</span>
+                                </div>
+                            </aside>
+
+                            <aside class="overlay-panel overlay-debug is-hidden" data-panel-id="desktop-debug">
+                                <div class="overlay-head">
+                                    <span class="overlay-kicker">Debug</span>
+                                    <button class="overlay-close" data-toggle-panel="desktop-debug" type="button">Hide</button>
+                                </div>
+                                <div class="overlay-title">Touch + Recovery snapshot</div>
+                                <div class="stats-list">
+                                    <span>Gesture: hold-drag / 2F-right / double-tap</span>
+                                    <span>Lifecycle: visible -> blur -> pageshow</span>
+                                    <span>Auto snapshot: route change, mobile resume</span>
+                                    <span>Recovery: reconnect pending</span>
+                                </div>
+                            </aside>
+
+                            <aside class="overlay-panel overlay-heavy is-hidden" data-panel-id="desktop-heavy">
+                                <div class="overlay-head">
+                                    <span class="overlay-kicker">Heavy parity</span>
+                                    <button class="overlay-close" data-toggle-panel="desktop-heavy" type="button">Hide</button>
+                                </div>
+                                <div class="overlay-title">Legacy import board</div>
+                                <div class="overlay-list">
+                                    <button class="overlay-line" type="button" data-icon="gamepad" data-info-title="Full virtual controller" data-info-body="Full controller parity is not in the live UI yet. This heavy scene reserves how it could sit beside the main stream chrome.">Full virtual controller</button>
+                                    <button class="overlay-line" type="button" data-icon="layout" data-info-title="TAK layout editor" data-info-body="Layout editing and drag/drop pad authoring need their own heavier surface. This scene shows the reserved product space for it.">TAK layout editor</button>
+                                    <button class="overlay-line" type="button" data-icon="keys" data-info-title="Per-game bindings" data-info-body="Per-game or per-layout bindings are still pending. The heavy scene previews where advanced mappings could live.">Per-game bindings</button>
+                                </div>
+                            </aside>
+
+                            <div class="device-info">
+                                <div class="device-info-head">
+                                    <span class="device-info-kicker">Canvas Info</span>
+                                    <span class="device-info-size">Desktop</span>
+                                </div>
+                                <div class="device-info-title">Hover any chrome</div>
+                                <div class="device-info-body">
+                                    Hover or click route badge, bridge, sidebar, and quick-pad to inspect why each piece is placed around the stream.
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="desktop-stand"></div>
+                <div class="desktop-base"></div>
+            </div>
+        </article>
+
+        <article class="device-preview preview-mode-panel-mobile">
+            <div class="mobile-device">
+                <div class="mobile-camera-bar"></div>
+                <div class="mobile-display">
+                    <div class="device-topline mobile-topline">
+                        <div class="device-brand">
+                            <span class="device-brand-dot"></span>
+                            <span>Android landscape stream</span>
+                        </div>
+                        <div class="device-meta">
+                            <span class="mini-pill">Landscape canvas</span>
+                        </div>
+                    </div>
+
+                    <div class="stream-canvas mobile-canvas">
+                        <button class="route-badge mobile-route" type="button" data-icon="route" data-info-title="Mobile route" data-info-body="Same route model as desktop, but sized to float over the mobile landscape canvas without blocking too much video.">
+                            <span class="route-badge-title">Direct P2P</span>
+                            <span class="route-badge-note">Landscape mobile</span>
+                        </button>
+
+                        <div class="canvas-actions mobile-actions">
+                            <button class="action-chip is-active" type="button" data-icon="bridge" data-toggle-panel="mobile-bridge" data-info-title="Mobile bridge" data-info-body="The mobile bridge is optimized for one-hand use and should stay as a slim overlay along the screen edge.">Bridge</button>
+                            <button class="action-chip is-active" type="button" data-icon="gamepad" data-toggle-panel="mobile-quickpad" data-info-title="Mobile quick-pad" data-info-body="Quick-pad remains visible as a compact support surface in landscape, not a giant wall over the video.">QuickPad</button>
+                            <button class="action-chip" type="button" data-icon="stats" data-toggle-panel="mobile-stats" data-info-title="Mobile stats" data-info-body="Stats remain optional and should open only when needed.">Stats</button>
+                        </div>
+
+                            <div class="mobile-window">
+                                <div class="mobile-window-shell">
+                                    <div class="mobile-window-topbar" data-scene-list="mobile-bridge mobile-quickpad mobile-debug mobile-heavy">
+                                        <span class="mobile-window-chip">Moonlight Host</span>
+                                        <span class="mobile-window-chip mobile-window-chip-live">LIVE</span>
+                                    </div>
+                                    <div class="mobile-window-stage" data-scene-list="mobile-bridge mobile-quickpad mobile-debug mobile-heavy">
+                                        <div class="mobile-window-main">
+                                            <div class="mobile-stage-hero">
+                                                <div class="mobile-hero-head">
+                                                    <span>Workspace</span>
+                                                <span>LIVE</span>
+                                            </div>
+                                            <div class="mobile-hero-lines">
+                                                <span></span>
+                                                <span></span>
+                                                <span></span>
+                                            </div>
+                                        </div>
+                                        <div class="mobile-stage-grid">
+                                            <span></span>
+                                            <span></span>
+                                            <span></span>
+                                        </div>
+                                    </div>
+                                    <div class="mobile-window-side">
+                                        <span class="mobile-side-card mobile-side-card-accent"></span>
+                                            <span class="mobile-side-card"></span>
+                                            <span class="mobile-side-card"></span>
+                                        </div>
+                                    </div>
+                                    <div class="mobile-window-nav" data-scene-list="mobile-bridge mobile-quickpad mobile-debug mobile-heavy">
+                                        <span></span>
+                                        <span></span>
+                                        <span></span>
+                                        <span class="mobile-nav-time">19:30</span>
+                                    </div>
+                                    <div class="mobile-game-shell is-hidden" data-scene-list="mobile-game">
+                                        <div class="mobile-game-scorebar">
+                                            <span class="game-team game-team-blue">2</span>
+                                            <span class="game-timer">08:17</span>
+                                            <span class="game-team game-team-red">1</span>
+                                        </div>
+                                        <div class="mobile-game-art">
+                                            <div class="mobile-game-objective">Escort payload to the uplink</div>
+                                            <div class="game-crosshair mobile-crosshair"></div>
+                                            <div class="mobile-game-minimap">
+                                                <span class="game-minimap-ring"></span>
+                                                <span class="game-minimap-dot game-minimap-dot-blue"></span>
+                                                <span class="game-minimap-dot game-minimap-dot-red"></span>
+                                            </div>
+                                            <div class="mobile-game-hud">
+                                                <div class="mobile-game-bars">
+                                                    <span class="game-bar game-bar-health"></span>
+                                                    <span class="game-bar game-bar-armor"></span>
+                                                </div>
+                                                <div class="game-abilities mobile-game-abilities">
+                                                    <span class="game-ability game-ability-live">Q</span>
+                                                    <span class="game-ability">E</span>
+                                                    <span class="game-ability">R</span>
+                                                    <span class="game-ability game-ability-ultimate">ULT</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="mobile-window-nav mobile-game-nav">
+                                            <span></span>
+                                            <span></span>
+                                            <span></span>
+                                            <span class="mobile-nav-time">19:30</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                        <aside class="overlay-panel mobile-bridge-panel" data-panel-id="mobile-bridge" data-bridge-mode="compact">
+                            <div class="overlay-head">
+                                <span class="overlay-kicker">Bridge</span>
+                                <button class="overlay-close" data-toggle-panel="mobile-bridge" type="button">Hide</button>
+                            </div>
+                            <div class="bridge-modebar bridge-modebar-compact">
+                                <button class="mode-chip is-active" type="button" data-bridge-mode-target="mobile-bridge" data-bridge-mode="compact">Compact</button>
+                                <button class="mode-chip" type="button" data-bridge-mode-target="mobile-bridge" data-bridge-mode="full">Full</button>
+                            </div>
+                            <div class="overlay-grid overlay-grid-stack">
+                                <button class="overlay-btn" type="button" data-icon="menu" data-info-title="Menu action" data-info-body="Main overlay control for mobile.">Menu</button>
+                                <button class="overlay-btn" type="button" data-icon="keyboard" data-info-title="Keyboard action" data-info-body="Fast access to keyboard while staying inside stream mode.">Keyboard</button>
+                                <button class="overlay-btn" type="button" data-icon="layout" data-info-title="Pad layout" data-info-body="Cycles quick-pad size to fit wider landscape grip.">Pad Bal</button>
+                                <button class="overlay-btn" type="button" data-icon="touch" data-info-title="Touch preset" data-info-body="Switches touch behavior for mobile without exposing too many settings at once.">Touch Mob</button>
+                            </div>
+                            <div class="overlay-grid overlay-grid-stack bridge-extended is-hidden" data-bridge-extra>
+                                <button class="overlay-btn" type="button" data-icon="click" data-info-title="Click action" data-info-body="Fast click action for one-hand mobile control.">Click</button>
+                                <button class="overlay-btn" type="button" data-icon="volume" data-info-title="Mute action" data-info-body="Quick audio action that does not need the full sidebar.">Mute</button>
+                            </div>
+                        </aside>
+
+                        <aside class="overlay-panel mobile-quickpad-panel" data-panel-id="mobile-quickpad">
+                            <div class="overlay-head">
+                                <span class="overlay-kicker">Quick-pad</span>
+                                <button class="overlay-close" data-toggle-panel="mobile-quickpad" type="button">Hide</button>
+                            </div>
+                            <div class="mobile-quickpad-strip">
+                                <div class="quickpad-stick"></div>
+                                <div class="quickpad-track small" data-icon="track" data-info-title="Landscape track area" data-info-body="Landscape mobile still keeps the track area shallow so the stream remains visible above it.">Track</div>
+                                <div class="mobile-face-buttons">
+                                    <span>A</span>
+                                    <span>B</span>
+                                    <span>X</span>
+                                    <span>Y</span>
+                                </div>
+                            </div>
+                        </aside>
+
+                        <aside class="overlay-panel overlay-stats is-hidden" data-panel-id="mobile-stats">
+                            <div class="overlay-head">
+                                <span class="overlay-kicker">Stats</span>
+                                <button class="overlay-close" data-toggle-panel="mobile-stats" type="button">Hide</button>
+                            </div>
+                            <div class="stats-list">
+                                <span>Video: 1080p / 60</span>
+                                <span>Latency: 22 ms</span>
+                                <span>Route: Direct P2P</span>
+                            </div>
+                        </aside>
+
+                        <aside class="overlay-panel mobile-debug-panel is-hidden" data-panel-id="mobile-debug">
+                            <div class="overlay-head">
+                                <span class="overlay-kicker">Debug</span>
+                                <button class="overlay-close" data-toggle-panel="mobile-debug" type="button">Hide</button>
+                            </div>
+                            <div class="overlay-title">Android touch report</div>
+                            <div class="stats-list">
+                                <span>Track: tap / hold-drag / 2F-right</span>
+                                <span>Bridge: compact -> full</span>
+                                <span>Resume recovery: armed</span>
+                                <span>Dbg: live / snap / share</span>
+                            </div>
+                        </aside>
+
+                        <aside class="overlay-panel mobile-heavy-panel is-hidden" data-panel-id="mobile-heavy">
+                            <div class="overlay-head">
+                                <span class="overlay-kicker">Heavy parity</span>
+                                <button class="overlay-close" data-toggle-panel="mobile-heavy" type="button">Hide</button>
+                            </div>
+                            <div class="overlay-title">Landscape heavy concepts</div>
+                            <div class="overlay-list">
+                                <button class="overlay-line" type="button" data-icon="gamepad" data-info-title="Full controller mock" data-info-body="A future full controller scene on mobile will need a larger action surface than the current quick-pad light.">Full controller</button>
+                                <button class="overlay-line" type="button" data-icon="bridge" data-info-title="Advanced Android bridge" data-info-body="The legacy bridge has deeper parity than the current live version. This scene preserves space for that complexity.">Advanced bridge</button>
+                                <button class="overlay-line" type="button" data-icon="desktop" data-info-title="Low-end parity" data-info-body="Low-end UI variants and stronger profile switching still need a dedicated, heavier product treatment.">Low-end profile</button>
+                            </div>
+                        </aside>
+
+                        <div class="device-info mobile-info">
+                            <div class="device-info-head">
+                                <span class="device-info-kicker">Canvas Info</span>
+                                <span class="device-info-size">Mobile</span>
+                            </div>
+                            <div class="device-info-title">Inspect mobile chrome</div>
+                            <div class="device-info-body">
+                                Hover or tap mobile bridge, quick-pad, and route badge to inspect how landscape chrome stays out of the stream's way.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </article>
+    </section>
+
+    <section class="legacy-board">
+        <div class="legacy-card">
+            <div class="legacy-kicker">Imported baseline</div>
+            <h2>Already carried into the current stream UI</h2>
+            <div class="legacy-list">
+                <button class="preview-chip preview-chip-secondary preview-chip-sm" type="button" data-icon="sidebar" data-static-info="Shell sidebar">Shell sidebar</button>
+                <button class="preview-chip preview-chip-secondary preview-chip-sm" type="button" data-icon="bridge" data-static-info="Android bridge">Android bridge</button>
+                <button class="preview-chip preview-chip-secondary preview-chip-sm" type="button" data-icon="gamepad" data-static-info="Quick-pad light">Quick-pad light</button>
+                <button class="preview-chip preview-chip-secondary preview-chip-sm" type="button" data-icon="touch" data-static-info="Touch tuning">Touch tuning</button>
+                <button class="preview-chip preview-chip-secondary preview-chip-sm" type="button" data-icon="stats" data-static-info="Debug stack">Debug stack</button>
+                <button class="preview-chip preview-chip-secondary preview-chip-sm" type="button" data-icon="quality" data-static-info="Audio and quality cards">Audio + quality cards</button>
+            </div>
+        </div>
+        <div class="legacy-card legacy-card-pending">
+            <div class="legacy-kicker">Pending heavy parity</div>
+            <h2>Old-project items still staged for later import</h2>
+            <div class="legacy-list">
+                <button class="preview-chip preview-chip-utility preview-chip-sm" type="button" data-icon="gamepad" data-static-info="Full virtual controller">Full virtual controller</button>
+                <button class="preview-chip preview-chip-utility preview-chip-sm" type="button" data-icon="layout" data-static-info="TAK layout editor">TAK layout editor</button>
+                <button class="preview-chip preview-chip-utility preview-chip-sm" type="button" data-icon="keys" data-static-info="Per-game bindings">Per-game bindings</button>
+                <button class="preview-chip preview-chip-utility preview-chip-sm" type="button" data-icon="bridge" data-static-info="Advanced Android bridge parity">Advanced Android bridge parity</button>
+                <button class="preview-chip preview-chip-utility preview-chip-sm" type="button" data-icon="desktop" data-static-info="Low-end parity">Full low-end profile parity</button>
+            </div>
+        </div>
+    </section>
+</main>
+
+<script>
+(() => {
+    const root = document.body;
+    const storageKey = "ml_preview_mode";
+    const storageKeyDesktopScene = "ml_preview_scene_desktop";
+    const storageKeyMobileScene = "ml_preview_scene_mobile";
+    const modeButtons = Array.from(document.querySelectorAll(".preview-mode-toggle"));
+    const sceneButtons = Array.from(document.querySelectorAll(".preview-scene-toggle"));
+    const defaultInfoByCanvas = new WeakMap();
+    const modeDefaultScene = {
+        desktop: "desktop-main",
+        mobile: "mobile-bridge"
+    };
+    const scenePanelVisibility = {
+        "desktop-main": ["desktop-bridge", "desktop-sidebar", "desktop-quickpad"],
+        "desktop-game": ["desktop-bridge", "desktop-quickpad", "desktop-stats"],
+        "desktop-dense": ["desktop-bridge", "desktop-sidebar", "desktop-quickpad", "desktop-stats"],
+        "desktop-debug": ["desktop-sidebar", "desktop-stats", "desktop-debug"],
+        "desktop-heavy": ["desktop-sidebar", "desktop-heavy"],
+        "mobile-bridge": ["mobile-bridge"],
+        "mobile-quickpad": ["mobile-bridge", "mobile-quickpad"],
+        "mobile-game": ["mobile-bridge", "mobile-quickpad", "mobile-stats"],
+        "mobile-debug": ["mobile-bridge", "mobile-stats", "mobile-debug"],
+        "mobile-heavy": ["mobile-bridge", "mobile-heavy"]
+    };
+    const sceneInfo = {
+        "desktop-main": {
+            canvas: "desktop",
+            title: "Desktop main scene",
+            body: "Core route, bridge, sidebar, and quick-pad are visible together. This is the cleanest enterprise view for normal desktop streaming."
+        },
+        "desktop-game": {
+            canvas: "desktop",
+            title: "Desktop game HUD scene",
+            body: "This scene previews a real game-stream direction: objective bar, minimap, combat feed, and player HUD are inside the streamed image while Moonlight chrome still floats above it."
+        },
+        "desktop-dense": {
+            canvas: "desktop",
+            title: "Dense sidebar scene",
+            body: "This scene previews the higher-density sidebar reality: more groups, more utilities, and stats on screen without shrinking the canvas itself."
+        },
+        "desktop-debug": {
+            canvas: "desktop",
+            title: "Debug and recovery scene",
+            body: "This scene is for troubleshooting. Stats and debug sit above the stream, but the canvas still stays dominant and the tooling remains clearly subordinate."
+        },
+        "desktop-heavy": {
+            canvas: "desktop",
+            title: "Heavy import scene",
+            body: "This scene reserves space for the old-project heavy modules such as full virtual controller, TAK layout editing, and per-game bindings."
+        },
+        "mobile-bridge": {
+            canvas: "mobile",
+            title: "Mobile bridge scene",
+            body: "This is the clean Android landscape state: slim bridge on the side, route badge above, and the stream canvas still doing most of the work."
+        },
+        "mobile-quickpad": {
+            canvas: "mobile",
+            title: "Mobile quick-pad scene",
+            body: "This scene emphasizes one-hand or two-thumb control. Quick-pad support surfaces grow, but still stay inside a landscape-first canvas."
+        },
+        "mobile-game": {
+            canvas: "mobile",
+            title: "Mobile game HUD scene",
+            body: "This scene previews a landscape game stream on phone: score bar, objective, minimap, and compact ability HUD while quick-pad support remains available above the stream."
+        },
+        "mobile-debug": {
+            canvas: "mobile",
+            title: "Mobile debug scene",
+            body: "Android touch debugging, recovery, and route/status review are shown here. It is meant for diagnosis, not the everyday default stream surface."
+        },
+        "mobile-heavy": {
+            canvas: "mobile",
+            title: "Mobile heavy parity scene",
+            body: "This scene previews the space required for future heavy parity work like a fuller controller layer, deeper Android bridge parity, and low-end profile controls."
+        }
+    };
+    const iconMap = {
+        route: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6h6"/><path d="M13 6l2-2"/><path d="M13 6l2 2"/><path d="M19 18h-6"/><path d="M11 18l-2-2"/><path d="M11 18l-2 2"/><path d="M8 6a6 6 0 0 0 0 12h8"/></svg>',
+        gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2.9"/><path d="M12 3.7v2.1"/><path d="M12 18.2v2.1"/><path d="M20.3 12h-2.1"/><path d="M5.8 12H3.7"/><path d="m17.9 6.1-1.5 1.5"/><path d="m7.6 16.4-1.5 1.5"/><path d="m17.9 17.9-1.5-1.5"/><path d="m7.6 7.6-1.5-1.5"/></svg>',
+        arrowleft: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>',
+        bridge: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="3"/><path d="M9 10h.01"/><path d="M15 10h.01"/><path d="M12 13v3"/><path d="M9 16h6"/></svg>',
+        sidebar: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="3"/><path d="M9 5v14"/><path d="M13 10h4"/><path d="M13 14h3"/></svg>',
+        gamepad: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 9h10a4 4 0 0 1 3.8 5.2l-1 3A2.5 2.5 0 0 1 17.4 19h-.2a2.5 2.5 0 0 1-1.8-.8L13.7 16h-3.4l-1.7 2.2a2.5 2.5 0 0 1-1.8.8h-.2A2.5 2.5 0 0 1 4.2 17.2l-1-3A4 4 0 0 1 7 9Z"/><path d="M8 12v3"/><path d="M6.5 13.5h3"/><path d="M16.5 12.5h.01"/><path d="M18 14h.01"/></svg>',
+        stats: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19V9"/><path d="M12 19V5"/><path d="M19 19v-7"/></svg>',
+        menu: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 8h12"/><path d="M6 12h12"/><path d="M6 16h8"/></svg>',
+        keyboard: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="6" width="17" height="12" rx="2.5"/><path d="M6.5 10h.01"/><path d="M9.5 10h.01"/><path d="M12.5 10h.01"/><path d="M15.5 10h.01"/><path d="M6.5 13h7"/><path d="M15.5 13h2"/></svg>',
+        layout: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="3"/><path d="M8.5 9.5h7"/><path d="M8.5 14.5h3"/><path d="M15.5 14.5h.01"/></svg>',
+        touch: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 18V9a1.5 1.5 0 0 0-3 0v5"/><path d="M9 14V8.5a1.5 1.5 0 0 0-3 0V14"/><path d="M12 12.5a1.5 1.5 0 0 1 3 0V16"/><path d="M15 13.5a1.5 1.5 0 0 1 3 0v2.2a4 4 0 0 1-1.2 2.8L15.8 19H9.7a4 4 0 0 1-2.8-1.2L5.6 16.5"/></svg>',
+        click: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v8"/><path d="M4 7h6"/><path d="M12 5l7 7-4 1-1 4-7-7Z"/></svg>',
+        expand: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4H4v4"/><path d="M4 4l6 6"/><path d="M16 20h4v-4"/><path d="M20 20l-6-6"/></svg>',
+        volume: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 6 8 9H5v6h3l3 3z"/><path d="M16.5 9.5a4 4 0 0 1 0 5"/><path d="M18.5 7a7 7 0 0 1 0 10"/></svg>',
+        refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0 2 5.3"/><path d="M20 4v7h-7"/></svg>',
+        quality: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m5 15 4-4 3 3 7-7"/><path d="M19 10V7h-3"/></svg>',
+        desktop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="11" rx="2.5"/><path d="M10 19h4"/><path d="M12 16v3"/></svg>',
+        keys: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="5" height="5" rx="1.4"/><rect x="10" y="7" width="10" height="5" rx="1.4"/><rect x="4" y="13" width="16" height="4" rx="1.4"/></svg>',
+        mouse: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="3.5" width="10" height="17" rx="5"/><path d="M12 3.5v6"/></svg>',
+        text: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6h14"/><path d="M12 6v12"/><path d="M8 18h8"/></svg>',
+        track: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="6" width="16" height="12" rx="4"/><path d="M10 12h4"/></svg>'
+    };
+
+    function updateSceneButtonVisibility(mode) {
+        sceneButtons.forEach((button) => {
+            const buttonMode = button.dataset.sceneMode;
+            button.classList.toggle("is-hidden", buttonMode !== mode);
+        });
+    }
+
+    function updateSceneInfo(scene) {
+        const info = sceneInfo[scene];
+        if (!info) {
+            return;
+        }
+        const canvas = document.querySelector(`.${info.canvas}-canvas`);
+        if (canvas instanceof HTMLElement) {
+            updateCanvasInfo(canvas, info.title, info.body);
+            defaultInfoByCanvas.set(canvas, { title: info.title, body: info.body });
+        }
+    }
+
+    function applyScene(scene) {
+        root.dataset.previewScene = scene;
+        document.querySelectorAll("[data-action-menu]").forEach((menu) => {
+            setActionMenuOpen(menu, false);
+        });
+        sceneButtons.forEach((button) => {
+            button.classList.toggle("is-active", button.dataset.previewScene === scene);
+        });
+
+        const visiblePanels = new Set(scenePanelVisibility[scene] || []);
+        document.querySelectorAll("[data-panel-id]").forEach((panel) => {
+            const panelId = panel.getAttribute("data-panel-id");
+            panel.classList.toggle("is-hidden", !panelId || !visiblePanels.has(panelId));
+        });
+
+        document.querySelectorAll("[data-toggle-panel]").forEach((toggle) => {
+            const panelId = toggle.getAttribute("data-toggle-panel");
+            toggle.classList.toggle("is-active", !!panelId && visiblePanels.has(panelId));
+        });
+
+        document.querySelectorAll("[data-scene-list]").forEach((element) => {
+            const scenes = (element.getAttribute("data-scene-list") || "").split(/\s+/).filter(Boolean);
+            element.classList.toggle("is-hidden", !scenes.includes(scene));
+        });
+
+        if (scene === "desktop-dense") {
+            applyBridgeMode("desktop-bridge", "full");
+        } else if (scene === "desktop-main" || scene === "desktop-heavy" || scene === "desktop-game") {
+            applyBridgeMode("desktop-bridge", "compact");
+        }
+
+        if (scene === "mobile-heavy") {
+            applyBridgeMode("mobile-bridge", "full");
+        } else if (scene === "mobile-bridge" || scene === "mobile-quickpad" || scene === "mobile-debug" || scene === "mobile-game") {
+            applyBridgeMode("mobile-bridge", "compact");
+        }
+
+        updateSceneInfo(scene);
+        try {
+            if (scene.startsWith("desktop")) {
+                localStorage.setItem(storageKeyDesktopScene, scene);
+            } else if (scene.startsWith("mobile")) {
+                localStorage.setItem(storageKeyMobileScene, scene);
+            }
+        } catch (_error) {
+        }
+
+        syncAllDesktopRightRails();
+    }
+
+    function getStoredSceneForMode(mode) {
+        try {
+            const queryScene = new URLSearchParams(window.location.search).get("scene");
+            if (queryScene && queryScene.startsWith(mode)) {
+                return queryScene;
+            }
+            if (mode === "desktop") {
+                const stored = localStorage.getItem(storageKeyDesktopScene);
+                if (stored && stored.startsWith("desktop")) {
+                    return stored;
+                }
+            }
+            if (mode === "mobile") {
+                const stored = localStorage.getItem(storageKeyMobileScene);
+                if (stored && stored.startsWith("mobile")) {
+                    return stored;
+                }
+            }
+        } catch (_error) {
+        }
+        return modeDefaultScene[mode];
+    }
+
+    function applyMode(mode) {
+        root.dataset.previewMode = mode;
+        modeButtons.forEach((button) => {
+            button.classList.toggle("is-active", button.dataset.previewMode === mode);
+        });
+        updateSceneButtonVisibility(mode);
+        applyScene(getStoredSceneForMode(mode));
+        try {
+            localStorage.setItem(storageKey, mode);
+        } catch (_error) {
+        }
+    }
+
+    function updateCanvasInfo(canvas, title, body) {
+        const titleNode = canvas.querySelector(".device-info-title");
+        const bodyNode = canvas.querySelector(".device-info-body");
+        if (titleNode) {
+            titleNode.textContent = title;
+        }
+        if (bodyNode) {
+            bodyNode.textContent = body;
+        }
+    }
+
+    function setCanvasInspecting(canvas, active) {
+        if (!canvas) {
+            return;
+        }
+        canvas.classList.toggle("is-inspecting", active);
+    }
+
+    function shouldKeepDesktopRightRailVisible(canvas) {
+        if (!(canvas instanceof HTMLElement)) {
+            return false;
+        }
+
+        const sidebarPanel = canvas.querySelector('[data-panel-id="desktop-sidebar"]');
+        const actionMenu = canvas.querySelector("[data-action-menu]");
+        const rail = canvas.querySelector(".canvas-right-rail");
+        const actionMenuOpen = actionMenu instanceof HTMLElement && actionMenu.classList.contains("is-open");
+        const sidebarVisible = sidebarPanel instanceof HTMLElement && !sidebarPanel.classList.contains("is-hidden");
+        const focusInsideRail = rail instanceof HTMLElement && rail.contains(document.activeElement);
+
+        return actionMenuOpen || sidebarVisible || focusInsideRail;
+    }
+
+    function setDesktopRightRailVisible(canvas, visible) {
+        if (!(canvas instanceof HTMLElement)) {
+            return;
+        }
+        canvas.classList.toggle("is-right-rail-visible", visible);
+    }
+
+    function syncDesktopRightRail(canvas, pointerX, pointerY) {
+        if (!(canvas instanceof HTMLElement)) {
+            return;
+        }
+
+        if (shouldKeepDesktopRightRailVisible(canvas)) {
+            setDesktopRightRailVisible(canvas, true);
+            return;
+        }
+
+        if (typeof pointerX === "number" && typeof pointerY === "number") {
+            const rect = canvas.getBoundingClientRect();
+            const rail = canvas.querySelector(".canvas-right-rail");
+            const railRect = rail instanceof HTMLElement ? rail.getBoundingClientRect() : null;
+            const nearRightEdge = pointerX >= (rect.right - 72) && pointerX <= (rect.right + 20);
+            const bandTop = railRect ? (railRect.top - 28) : (rect.top - 24);
+            const bandBottom = railRect ? (railRect.bottom + 28) : (rect.bottom + 24);
+            const insideVerticalBand = pointerY >= bandTop && pointerY <= bandBottom;
+            setDesktopRightRailVisible(canvas, nearRightEdge && insideVerticalBand);
+            return;
+        }
+
+        setDesktopRightRailVisible(canvas, false);
+    }
+
+    function syncAllDesktopRightRails(pointerX, pointerY) {
+        document.querySelectorAll(".desktop-canvas").forEach((canvas) => {
+            syncDesktopRightRail(canvas, pointerX, pointerY);
+        });
+    }
+
+    document.querySelectorAll(".stream-canvas").forEach((canvas) => {
+        const titleNode = canvas.querySelector(".device-info-title");
+        const bodyNode = canvas.querySelector(".device-info-body");
+        defaultInfoByCanvas.set(canvas, {
+            title: titleNode ? titleNode.textContent : "Canvas info",
+            body: bodyNode ? bodyNode.textContent : ""
+        });
+    });
+
+    document.querySelectorAll("[data-icon]").forEach((element) => {
+        if (element.querySelector(".chrome-icon")) {
+            return;
+        }
+        const iconName = element.dataset.icon;
+        const markup = iconMap[iconName];
+        if (!markup) {
+            return;
+        }
+        const iconWrap = document.createElement("span");
+        iconWrap.className = "chrome-icon";
+        iconWrap.setAttribute("aria-hidden", "true");
+        iconWrap.innerHTML = markup;
+        element.classList.add("has-icon");
+        element.prepend(iconWrap);
+    });
+
+    function setActionMenuOpen(menu, open) {
+        if (!(menu instanceof HTMLElement)) {
+            return;
+        }
+        menu.classList.toggle("is-open", open);
+        const toggle = menu.querySelector("[data-action-menu-toggle]");
+        if (toggle instanceof HTMLElement) {
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+        }
+        syncAllDesktopRightRails();
+    }
+
+    document.querySelectorAll("[data-action-menu]").forEach((menu) => {
+        const toggle = menu.querySelector("[data-action-menu-toggle]");
+        if (!(toggle instanceof HTMLElement)) {
+            return;
+        }
+
+        setActionMenuOpen(menu, false);
+
+        toggle.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            setActionMenuOpen(menu, !menu.classList.contains("is-open"));
+        });
+
+        menu.querySelectorAll(".action-menu-panel [data-toggle-panel]").forEach((button) => {
+            button.addEventListener("click", () => {
+                setActionMenuOpen(menu, false);
+            });
+        });
+    });
+
+    document.querySelectorAll(".desktop-canvas").forEach((canvas) => {
+        const rail = canvas.querySelector(".canvas-right-rail");
+        rail?.addEventListener("pointerenter", () => {
+            setDesktopRightRailVisible(canvas, true);
+        });
+        rail?.addEventListener("pointerleave", () => {
+            syncDesktopRightRail(canvas);
+        });
+        canvas.addEventListener("pointerleave", () => {
+            syncDesktopRightRail(canvas);
+        });
+        canvas.addEventListener("focusin", () => {
+            syncDesktopRightRail(canvas);
+        });
+        canvas.addEventListener("focusout", () => {
+            window.setTimeout(() => syncDesktopRightRail(canvas), 0);
+        });
+    });
+
+    document.addEventListener("click", (event) => {
+        document.querySelectorAll("[data-action-menu]").forEach((menu) => {
+            if (!(menu instanceof HTMLElement) || menu.contains(event.target)) {
+                return;
+            }
+            setActionMenuOpen(menu, false);
+        });
+    });
+
+    document.addEventListener("pointermove", (event) => {
+        syncAllDesktopRightRails(event.clientX, event.clientY);
+    }, { passive: true });
+
+    try {
+        const queryMode = new URLSearchParams(window.location.search).get("mode");
+        if (queryMode === "desktop" || queryMode === "mobile") {
+            applyMode(queryMode);
+        } else {
+            const storedMode = localStorage.getItem(storageKey);
+            if (storedMode === "desktop" || storedMode === "mobile") {
+                applyMode(storedMode);
+            }
+        }
+    } catch (_error) {
+    }
+
+    modeButtons.forEach((button) => {
+        button.addEventListener("click", () => {
+            const mode = button.dataset.previewMode;
+            if (mode === "desktop" || mode === "mobile") {
+                applyMode(mode);
+            }
+        });
+    });
+
+    sceneButtons.forEach((button) => {
+        button.addEventListener("click", () => {
+            const scene = button.dataset.previewScene;
+            if (scene) {
+                applyScene(scene);
+            }
+        });
+    });
+
+    document.querySelectorAll("[data-toggle-panel]").forEach((button) => {
+        button.addEventListener("click", () => {
+            const panelId = button.dataset.togglePanel;
+            if (!panelId) {
+                return;
+            }
+
+            const device = button.closest(".stream-canvas");
+            if (!device) {
+                return;
+            }
+
+            const panel = device.querySelector(`[data-panel-id="${panelId}"]`);
+            if (!panel) {
+                return;
+            }
+
+            const nextHidden = !panel.classList.contains("is-hidden");
+            panel.classList.toggle("is-hidden", nextHidden);
+
+            document.querySelectorAll(`[data-toggle-panel="${panelId}"]`).forEach((toggle) => {
+                toggle.classList.toggle("is-active", !nextHidden);
+            });
+
+            syncAllDesktopRightRails();
+        });
+    });
+
+    function applyBridgeMode(panelId, mode) {
+        const panel = document.querySelector(`[data-panel-id="${panelId}"]`);
+        if (!panel) {
+            return;
+        }
+        panel.dataset.bridgeMode = mode;
+        const extras = panel.querySelectorAll("[data-bridge-extra]");
+        extras.forEach((extra) => {
+            extra.classList.toggle("is-hidden", mode !== "full");
+        });
+        document.querySelectorAll(`[data-bridge-mode-target="${panelId}"]`).forEach((toggle) => {
+            toggle.classList.toggle("is-active", toggle.dataset.bridgeMode === mode);
+        });
+    }
+
+    document.querySelectorAll("[data-bridge-mode-target]").forEach((button) => {
+        button.addEventListener("click", () => {
+            const panelId = button.dataset.bridgeModeTarget;
+            const mode = button.dataset.bridgeMode;
+            if (!panelId || !mode) {
+                return;
+            }
+            applyBridgeMode(panelId, mode);
+        });
+    });
+
+    document.querySelectorAll("[data-panel-id][data-bridge-mode]").forEach((panel) => {
+        const panelId = panel.dataset.panelId;
+        const mode = panel.dataset.bridgeMode || "compact";
+        if (panelId) {
+            applyBridgeMode(panelId, mode);
+        }
+    });
+
+    document.querySelectorAll("[data-info-title]").forEach((element) => {
+        const showInfo = () => {
+            const canvas = element.closest(".stream-canvas");
+            if (!canvas) {
+                return;
+            }
+
+            const title = element.dataset.infoTitle || "Info";
+            const body = element.dataset.infoBody || "";
+            setCanvasInspecting(canvas, true);
+            updateCanvasInfo(canvas, title, body);
+        };
+
+        element.addEventListener("mouseenter", showInfo);
+        element.addEventListener("focus", showInfo);
+        element.addEventListener("click", showInfo);
+        element.addEventListener("mouseleave", () => {
+            const canvas = element.closest(".stream-canvas");
+            if (!canvas) {
+                return;
+            }
+            const defaults = defaultInfoByCanvas.get(canvas);
+            if (defaults) {
+                setCanvasInspecting(canvas, false);
+                updateCanvasInfo(canvas, defaults.title, defaults.body);
+            }
+        });
+        element.addEventListener("blur", () => {
+            const canvas = element.closest(".stream-canvas");
+            if (!canvas) {
+                return;
+            }
+            const defaults = defaultInfoByCanvas.get(canvas);
+            if (defaults) {
+                setCanvasInspecting(canvas, false);
+                updateCanvasInfo(canvas, defaults.title, defaults.body);
+            }
+        });
+    });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <title>Open Native Stream</title>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            min-height: 100%;
+            background: #0f1115;
+            color: #f5f7fb;
+            font-family: sans-serif;
+        }
+        body {
+            display: grid;
+            place-items: center;
+        }
+        main {
+            width: min(92vw, 560px);
+            padding: 24px;
+            border-radius: 18px;
+            background: rgba(28, 32, 40, 0.92);
+            box-shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
+        }
+        h1 {
+            margin: 0 0 12px;
+            font-size: 20px;
+        }
+        p {
+            margin: 0 0 12px;
+            line-height: 1.45;
+        }
+        #status {
+            color: #8fc5ff;
+        }
+        a {
+            color: #8fc5ff;
+        }
+        .actions {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-top: 16px;
+        }
+        .button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 44px;
+            padding: 0 16px;
+            border-radius: 12px;
+            border: 1px solid rgba(143, 197, 255, 0.32);
+            background: rgba(143, 197, 255, 0.14);
+            color: #f5f7fb;
+            text-decoration: none;
+            font-weight: 600;
+        }
+    </style>
+    <script>
+        (() => {
+            const url = new URL(window.location.href);
+            const KEEPER_TUNNEL_PATH_MARKER = "/api/v1/keeper-tunnel/";
+            const ANDROID_NATIVE_PACKAGE = "id.cloudgime.moonlightnative.legacycursor";
+            const ANDROID_NATIVE_COMPONENT = `${ANDROID_NATIVE_PACKAGE}/com.limelight.cloudgime.NativeLaunchActivity`;
+            const isAndroid = /Android/i.test(navigator.userAgent || "");
+            const isWindows = /Windows NT/i.test(navigator.userAgent || "");
+            const nativeShell = isAndroid ? "android" : "windows";
+            const sharedInviteToken = (url.searchParams.get("sharedInviteToken") || url.searchParams.get("shared_invite_token") || "").trim();
+            const keeperTunnelSessionToken = (url.searchParams.get("kt_session") || "").trim();
+            const hasNativeParams = () => {
+                return !!(url.searchParams.get("hostId") && url.searchParams.get("appId"));
+            };
+            const statusText = () => document.getElementById("status");
+            const detailText = () => document.getElementById("detail");
+            const setStatus = (value) => {
+                const element = statusText();
+                if (element) {
+                    element.textContent = value;
+                }
+            };
+            const setDetail = (value) => {
+                const element = detailText();
+                if (element) {
+                    element.textContent = value;
+                }
+            };
+            const setTitle = (value) => {
+                const element = document.getElementById("title");
+                if (element) {
+                    element.textContent = value;
+                }
+            };
+            const setActionsVisible = (visible) => {
+                const element = document.getElementById("actions");
+                if (element) {
+                    element.style.display = visible ? "flex" : "none";
+                }
+            };
+
+            const navigateTopLevel = (nextUrl, { replace = false } = {}) => {
+                const targetUrl = String(nextUrl || "").trim();
+                if (!targetUrl) {
+                    return false;
+                }
+
+                const assignTo = (targetWindow) => {
+                    if (!targetWindow?.location) {
+                        return false;
+                    }
+
+                    try {
+                        if (replace && typeof targetWindow.location.replace === "function") {
+                            targetWindow.location.replace(targetUrl);
+                        } else {
+                            targetWindow.location.href = targetUrl;
+                        }
+                        return true;
+                    } catch {
+                        return false;
+                    }
+                };
+
+                if (window.top && window.top !== window && assignTo(window.top)) {
+                    return true;
+                }
+
+                if (replace) {
+                    window.location.replace(targetUrl);
+                } else {
+                    window.location.href = targetUrl;
+                }
+                return true;
+            };
+
+            const buildRelativeStreamUrl = () => {
+                if (!hasNativeParams()) {
+                    return null;
+                }
+
+                const streamUrl = new URL("./stream.html", url);
+                for (const [key, value] of url.searchParams.entries()) {
+                    if (key === "stream_url" || key === "url" || key === "target") {
+                        continue;
+                    }
+                    streamUrl.searchParams.set(key, value);
+                }
+                return streamUrl.toString();
+            };
+
+            const isKeeperTunnelScopedPage = () => {
+                return url.pathname.includes(KEEPER_TUNNEL_PATH_MARKER) || !!keeperTunnelSessionToken;
+            };
+
+            const appendKeeperTunnelSession = (targetUrl) => {
+                const trimmed = String(targetUrl || "").trim();
+                if (!trimmed || !keeperTunnelSessionToken) {
+                    return trimmed;
+                }
+
+                try {
+                    const parsed = new URL(trimmed, url);
+                    if (!parsed.searchParams.has("kt_session")) {
+                        parsed.searchParams.set("kt_session", keeperTunnelSessionToken);
+                    }
+                    return parsed.toString();
+                } catch {
+                    return trimmed;
+                }
+            };
+
+            const buildLaunchTokenUrl = () => {
+                const endpoint = isKeeperTunnelScopedPage()
+                    ? "./api/android-native/launch-token-from-tunnel"
+                    : "./api/android-native/launch-token";
+                return appendKeeperTunnelSession(new URL(endpoint, url).toString());
+            };
+            const buildSharedInviteConsumeUrl = () => {
+                return new URL("./api/android-native/shared-session/consume-invite", url).toString();
+            };
+
+            const buildAbsoluteUrl = (path) => {
+                return new URL(path, url).toString();
+            };
+
+            const buildWebBaseUrl = () => {
+                return new URL("./", url).toString();
+            };
+
+            const buildChoicePageUrl = () => {
+                const choiceUrl = new URL(url.toString());
+                choiceUrl.searchParams.delete("mode");
+                choiceUrl.searchParams.delete("launch");
+                return choiceUrl.toString();
+            };
+            const buildSharedPlayer2PadUrl = () => {
+                const nextUrl = new URL("./shared-player2.html", url);
+                nextUrl.searchParams.set("sharedInviteToken", sharedInviteToken);
+                return nextUrl.toString();
+            };
+
+            const buildNativeSchemeUrl = (launchToken) => {
+                const nativeUrl = new URL("moonlightnative://stream");
+                nativeUrl.searchParams.set("hostId", url.searchParams.get("hostId") || "");
+                nativeUrl.searchParams.set("appId", url.searchParams.get("appId") || "");
+                nativeUrl.searchParams.set("appName", url.searchParams.get("appName") || "");
+                nativeUrl.searchParams.set("appHdr", url.searchParams.get("appHdr") || "");
+                nativeUrl.searchParams.set("launchToken", launchToken);
+                nativeUrl.searchParams.set("webBaseUrl", buildWebBaseUrl());
+                nativeUrl.searchParams.set("nativeShell", nativeShell);
+                if (keeperTunnelSessionToken) {
+                    nativeUrl.searchParams.set("kt_session", keeperTunnelSessionToken);
+                }
+                return nativeUrl.toString();
+            };
+
+            const buildIntentUrl = (launchToken, fallbackUrl) => {
+                if (!isAndroid) {
+                    return buildNativeSchemeUrl(launchToken);
+                }
+
+                const intent = new URL("intent://stream");
+                const nativeUrl = new URL(buildNativeSchemeUrl(launchToken));
+                for (const [key, value] of nativeUrl.searchParams.entries()) {
+                    intent.searchParams.set(key, value);
+                }
+
+                intent.hash = [
+                    "Intent",
+                    "scheme=moonlightnative",
+                    `package=${ANDROID_NATIVE_PACKAGE}`,
+                    `component=${ANDROID_NATIVE_COMPONENT}`,
+                    "action=android.intent.action.VIEW",
+                    `S.browser_fallback_url=${encodeURIComponent(fallbackUrl)}`,
+                    "end",
+                ].join(";");
+                return intent.toString();
+            };
+
+            const existingLaunchToken = (url.searchParams.get("launchToken") || "").trim();
+            const target = url.searchParams.get("stream_url")
+                || url.searchParams.get("url")
+                || url.searchParams.get("target")
+                || buildRelativeStreamUrl();
+            const choicePageUrl = buildChoicePageUrl();
+            const shouldAutoLaunchApp = () => {
+                return isAndroid && (url.searchParams.get("launch") === "app" || url.searchParams.get("mode") === "native-auto");
+            };
+            if (!target) {
+                if (sharedInviteToken) {
+                    // shared invite mode resolves itself after DOMContentLoaded
+                } else {
+                    setStatus("Missing hostId/appId or fallback stream target.");
+                    return;
+                }
+            }
+
+            let hidden = false;
+            let intentUrl = null;
+            let launchRefreshPromise = null;
+            document.addEventListener("visibilitychange", () => {
+                if (document.visibilityState === "hidden") {
+                    hidden = true;
+                }
+            }, { once: true });
+
+            const issueLaunchToken = async () => {
+                if (!hasNativeParams()) {
+                    return null;
+                }
+
+                const response = await fetch(buildLaunchTokenUrl(), {
+                    method: "POST",
+                    cache: "no-store",
+                    credentials: "include",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({
+                        host_id: Number(url.searchParams.get("hostId")),
+                        app_id: Number(url.searchParams.get("appId")),
+                        native_shell: nativeShell,
+                        client_os: nativeShell,
+                        client_platform: nativeShell,
+                    }),
+                });
+
+                if (!response.ok) {
+                    throw new Error(`launch-token failed status=${response.status}`);
+                }
+
+                return await response.json();
+            };
+
+            const openNativeApp = (intentUrl) => {
+                if (!intentUrl) {
+                    return;
+                }
+                navigateTopLevel(intentUrl);
+            };
+
+            const buildExistingIntentUrl = () => {
+                if (!existingLaunchToken) {
+                    return null;
+                }
+                return buildIntentUrl(existingLaunchToken, choicePageUrl);
+            };
+
+            const syncLinks = () => {
+                const openAppLink = document.getElementById("open-app");
+                const openWebLink = document.getElementById("open-web");
+
+                if (openAppLink) {
+                    openAppLink.setAttribute("href", intentUrl || "#");
+                    openAppLink.setAttribute("aria-disabled", intentUrl ? "false" : "true");
+                }
+
+                if (openWebLink) {
+                    openWebLink.setAttribute("href", target);
+                    openWebLink.setAttribute("aria-disabled", "false");
+                }
+            };
+
+            const refreshNativeLaunch = async (statusLabel) => {
+                if (!hasNativeParams()) {
+                    intentUrl = null;
+                    syncLinks();
+                    return null;
+                }
+
+                const existingIntentUrl = buildExistingIntentUrl();
+                if (existingIntentUrl) {
+                    intentUrl = existingIntentUrl;
+                    syncLinks();
+                    return existingIntentUrl;
+                }
+
+                if (launchRefreshPromise) {
+                    return launchRefreshPromise;
+                }
+
+                setStatus(statusLabel);
+                launchRefreshPromise = (async () => {
+                    const tokenResponse = await issueLaunchToken();
+                    const freshIntentUrl = tokenResponse?.launch_token
+                        ? buildIntentUrl(tokenResponse.launch_token, choicePageUrl)
+                        : null;
+                    intentUrl = freshIntentUrl;
+                    syncLinks();
+                    return freshIntentUrl;
+                })();
+
+                try {
+                    return await launchRefreshPromise;
+                } finally {
+                    launchRefreshPromise = null;
+                }
+            };
+
+            const readSharedInviteError = async (response) => {
+                const text = await response.text().catch(() => "");
+                if (response.status === 404) {
+                    return "Shared session invite tidak ditemukan.";
+                }
+                if (response.status === 401) {
+                    return "Shared session invite sudah kedaluwarsa.";
+                }
+                return text || `Shared session invite gagal diproses (HTTP ${response.status}).`;
+            };
+
+            const humanizeSharedRole = (role) => {
+                const value = String(role || "").trim().toLowerCase();
+                if (value === "player2") return "Player 2";
+                if (value === "helper") return "Helper";
+                if (value === "admin_assist") return "Admin Assist";
+                if (value === "viewer") return "Viewer";
+                return role || "Shared session";
+            };
+
+            const consumeSharedInvite = async () => {
+                const response = await fetch(buildSharedInviteConsumeUrl(), {
+                    method: "POST",
+                    cache: "no-store",
+                    credentials: "include",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({
+                        invite_token: sharedInviteToken,
+                    }),
+                });
+
+                if (!response.ok) {
+                    throw new Error(await readSharedInviteError(response));
+                }
+
+                const payload = await response.json();
+                return payload?.invite || null;
+            };
+
+            window.addEventListener("DOMContentLoaded", async () => {
+                const openAppLink = document.getElementById("open-app");
+                const openWebLink = document.getElementById("open-web");
+                let launchInProgress = false;
+
+                if (openAppLink) {
+                    openAppLink.textContent = "Open App";
+                    openAppLink.style.display = "";
+                }
+                if (openWebLink) {
+                    openWebLink.textContent = "Open Player 2 Pad";
+                    openWebLink.style.display = "none";
+                }
+
+                if (sharedInviteToken) {
+                    setTitle("Shared session link");
+                    setActionsVisible(false);
+                    setStatus("Checking shared session invite...");
+                    setDetail("Owner display authority tetap dijaga di sisi host.");
+
+                    try {
+                        const invite = await consumeSharedInvite();
+                        if (!invite) {
+                            setStatus("Shared session invite tidak valid.");
+                            setDetail("Link ini tidak bisa dipakai.");
+                            return;
+                        }
+
+                        setStatus(invite.status_message || "Shared session invite is ready.");
+                        const expiresAt = invite.expires_at_unix_ms
+                            ? new Date(invite.expires_at_unix_ms).toLocaleString()
+                            : "unknown";
+                        setDetail(`Role: ${humanizeSharedRole(invite.role)}. Expires: ${expiresAt}.`);
+
+                        if (String(invite.role || "").toLowerCase() === "player2") {
+                            if (invite.attach_available) {
+                                setTitle("Player 2 companion pad");
+                                setDetail(`Role: Player 2. Expires: ${expiresAt}. This link adds controller slot 2 only and does not open video.`);
+                                if (openAppLink) {
+                                    openAppLink.style.display = "none";
+                                }
+                                if (openWebLink) {
+                                    openWebLink.textContent = "Open Player 2 Pad";
+                                    openWebLink.setAttribute("href", buildSharedPlayer2PadUrl());
+                                    openWebLink.setAttribute("aria-disabled", "false");
+                                }
+                                setActionsVisible(true);
+                            } else {
+                                setActionsVisible(false);
+                            }
+                        }
+                    } catch (error) {
+                        console.error(error);
+                        setStatus(error?.message || "Shared session invite failed.");
+                        setDetail("Minta owner membuat link share baru bila perlu.");
+                    }
+                    return;
+                }
+
+                syncLinks();
+
+                if (existingLaunchToken) {
+                    intentUrl = buildExistingIntentUrl();
+                    syncLinks();
+                    setStatus(isWindows ? "Aplikasi Windows siap dibuka." : "Aplikasi siap dibuka.");
+                } else {
+                    setStatus("Menyiapkan sesi aplikasi...");
+                }
+
+                if (!existingLaunchToken) {
+                    try {
+                        const freshIntentUrl = await refreshNativeLaunch("Menyiapkan sesi aplikasi...");
+                        if (freshIntentUrl) {
+                            setStatus(isWindows
+                                ? "Aplikasi Windows siap. Tekan Open App untuk lanjut."
+                                : "Aplikasi siap. Tekan Open App untuk lanjut.");
+                        } else {
+                            setStatus("Aplikasi native belum siap.");
+                        }
+                    } catch (error) {
+                        console.error(error);
+                        intentUrl = null;
+                        syncLinks();
+                        setStatus("Sesi aplikasi belum berhasil disiapkan.");
+                    }
+                }
+
+                if (openAppLink) {
+                    openAppLink.addEventListener("click", async (event) => {
+                        event.preventDefault();
+                        if (launchInProgress) {
+                            return;
+                        }
+                        launchInProgress = true;
+                        try {
+                            const freshIntentUrl = await refreshNativeLaunch(existingLaunchToken
+                                ? "Membuka aplikasi Cloudgime..."
+                                : "Menyiapkan sesi aplikasi...");
+                            if (!freshIntentUrl) {
+                                setStatus("Aplikasi belum siap.");
+                                return;
+                            }
+                            setStatus("Membuka aplikasi Cloudgime...");
+                            openNativeApp(freshIntentUrl);
+                        } catch (error) {
+                            console.error(error);
+                            setStatus("Sesi aplikasi belum berhasil diperbarui.");
+                        } finally {
+                            launchInProgress = false;
+                        }
+                    });
+                }
+                if (openWebLink) {
+                    openWebLink.addEventListener("click", (event) => {
+                        event.preventDefault();
+                        navigateTopLevel(target);
+                    });
+                }
+
+                if (!shouldAutoLaunchApp() || !intentUrl) {
+                    return;
+                }
+
+                setStatus("Membuka aplikasi Cloudgime...");
+                openNativeApp(intentUrl);
+                window.setTimeout(() => {
+                    if (hidden) {
+                        return;
+                    }
+                    setStatus(isWindows
+                        ? "Aplikasi belum muncul di depan. Tekan Open App lagi atau pastikan aplikasinya sudah terpasang."
+                        : "Aplikasi belum muncul di depan. Tekan Open App lagi.");
+                }, 1600);
+            });
+
+            window.addEventListener("pageshow", (event) => {
+                if (!event.persisted) {
+                    return;
+                }
+                refreshNativeLaunch(existingLaunchToken
+                    ? "Sesi aplikasi dipulihkan."
+                    : "Menyiapkan sesi aplikasi...")
+                    .then((freshIntentUrl) => {
+                        if (freshIntentUrl) {
+                            setStatus(existingLaunchToken
+                                ? "Aplikasi siap. Pilih Open App."
+                                : "Sesi aplikasi siap. Pilih Open App.");
+                        } else {
+                            setStatus("Aplikasi native belum siap.");
+                        }
+                    })
+                    .catch((error) => {
+                        console.error(error);
+                        setStatus("Sesi aplikasi belum berhasil diperbarui.");
+                    });
+            });
+        })();
+    </script>
+</head>
+<body>
+    <main>
+        <h1 id="title">Membuka aplikasi Cloudgime</h1>
+        <p id="status">Menyiapkan sesi aplikasi...</p>
+        <p id="detail">Halaman ini khusus handoff ke aplikasi native Cloudgime di Android atau Windows.</p>
+        <div id="actions" class="actions">
+            <a id="open-app" class="button" href="#">Open App</a>
+            <a id="open-web" class="button hidden" href="#" aria-disabled="true">Open Player 2 Pad</a>
+        </div>
+    </main>
+</body>
+</html>

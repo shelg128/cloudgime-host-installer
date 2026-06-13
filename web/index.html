@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>Cloudgime Stream</title>
+    <link rel="icon" href="resources/cloudgime.svg" sizes="any" type="image/svg+xml">
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+    <meta name="description" content="Cloudgime Stream for cloud PC streaming." />
+    <link rel="manifest" href="manifest.json">
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Cloudgime Stream">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <style>
+        :root {
+            color-scheme: dark;
+            --bg-a: #0a0f17;
+            --bg-b: #111b2c;
+            --panel: rgba(17, 25, 38, 0.84);
+            --panel-border: rgba(255, 255, 255, 0.08);
+            --text: #edf3ff;
+            --muted: rgba(237, 243, 255, 0.72);
+            --accent: #45c2ff;
+            --accent-strong: #7fe7ff;
+            --accent-soft: rgba(69, 194, 255, 0.18);
+            --ok: #6ce3a4;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html,
+        body {
+            margin: 0;
+            min-height: 100%;
+            background:
+                radial-gradient(circle at top left, rgba(69, 194, 255, 0.18), transparent 34%),
+                radial-gradient(circle at bottom right, rgba(24, 118, 242, 0.18), transparent 36%),
+                linear-gradient(145deg, var(--bg-a), var(--bg-b));
+            color: var(--text);
+            font-family: "Segoe UI", system-ui, sans-serif;
+        }
+
+        body {
+            display: grid;
+            place-items: center;
+            padding: 24px;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        .quick-shell {
+            width: min(92vw, 560px);
+            padding: 24px;
+            border-radius: 20px;
+            background: var(--panel);
+            border: 1px solid var(--panel-border);
+            backdrop-filter: blur(14px);
+            box-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+        }
+
+        .eyebrow {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            background: var(--accent-soft);
+            border: 1px solid rgba(69, 194, 255, 0.24);
+            color: var(--accent-strong);
+            font-size: 0.78rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        h1 {
+            margin: 16px 0 10px;
+            font-size: clamp(1.9rem, 3.8vw, 2.4rem);
+            line-height: 1.08;
+        }
+
+        p {
+            margin: 0;
+            color: var(--muted);
+            line-height: 1.5;
+        }
+
+        .target-card {
+            margin-top: 18px;
+            padding: 14px 16px;
+            border-radius: 16px;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .target-label {
+            color: var(--muted);
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+
+        .target-value {
+            margin-top: 8px;
+            font-size: 1.02rem;
+            font-weight: 700;
+        }
+
+        .status {
+            margin-top: 16px;
+            min-height: 1.5rem;
+            color: var(--accent-strong);
+            font-size: 0.96rem;
+        }
+
+        .status.is-error {
+            color: #ff9b9b;
+        }
+
+        .status.is-ready {
+            color: var(--ok);
+        }
+
+        .actions {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 12px;
+            margin-top: 18px;
+        }
+
+        .button {
+            appearance: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 50px;
+            border-radius: 14px;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            text-decoration: none;
+            color: var(--text);
+            font-weight: 700;
+            background: rgba(255, 255, 255, 0.05);
+            transition: transform 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+            cursor: pointer;
+        }
+
+        .button:hover {
+            transform: translateY(-1px);
+            border-color: rgba(127, 231, 255, 0.34);
+        }
+
+        .button.primary {
+            border-color: rgba(69, 194, 255, 0.38);
+            background: linear-gradient(135deg, rgba(31, 152, 241, 0.26), rgba(48, 221, 255, 0.22));
+        }
+
+        .button[aria-disabled="true"] {
+            pointer-events: none;
+            opacity: 0.55;
+        }
+
+        .footer-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 14px;
+        }
+
+        .footer-link {
+            color: var(--muted);
+            font-size: 0.92rem;
+            text-decoration: none;
+            border-bottom: 1px solid transparent;
+        }
+
+        .footer-link:hover {
+            color: var(--text);
+            border-color: rgba(255, 255, 255, 0.28);
+        }
+
+        #full-shell {
+            width: 100%;
+        }
+    </style>
+    <script>
+        (() => {
+            const url = new URL(window.location.href);
+            const wantsFullApp = url.searchParams.get("view") === "full";
+            window.__cloudgimeQuickLandingMode = wantsFullApp ? "full" : "quick";
+        })();
+    </script>
+</head>
+
+<body>
+    <main id="quick-shell" class="quick-shell hidden">
+        <div class="eyebrow">Cloudgime Stream</div>
+        <h1>Open stream faster</h1>
+        <p id="quick-copy">Preparing the fastest way to open your host.</p>
+        <div class="target-card">
+            <div class="target-label">Default target</div>
+            <div id="target-value" class="target-value">Loading host and app…</div>
+        </div>
+        <div id="status" class="status">Checking host and app…</div>
+        <div class="actions">
+            <a id="open-app" class="button primary" href="#" aria-disabled="true">Open App</a>
+        </div>
+        <div class="footer-actions">
+            <a id="browse-hosts" class="footer-link" href="?view=full">Browse full library</a>
+            <a id="open-native-page" class="footer-link hidden" href="#">Native handoff page</a>
+        </div>
+    </main>
+
+    <div id="full-shell" class="hidden">
+        <div id="modal-overlay" class="modal-background modal-disabled">
+            <div id="modal-parent" class="modal-content"></div>
+        </div>
+        <div id="context-menu" class="context-menu-background context-menu-disabled"></div>
+        <div id="error-list"></div>
+        <div id="root" class="root"></div>
+    </div>
+
+    <script>
+        (() => {
+            const mode = window.__cloudgimeQuickLandingMode;
+            const url = new URL(window.location.href);
+            const getScopedRootPath = () => {
+                const match = url.pathname.match(/^(.*\/)h\/[^/]+\/?$/i);
+                const basePath = match && match[1] ? match[1] : url.pathname;
+                return basePath.endsWith("/") ? basePath : `${basePath}/`;
+            };
+            const scopedRootPath = getScopedRootPath();
+            const buildScopedUrl = (relativePath) => new URL(relativePath.replace(/^\.\//, ""), `${url.origin}${scopedRootPath}`).toString();
+            const readRequestedHostId = () => {
+                const queryHostId = url.searchParams.get("hostId") || url.searchParams.get("host_id");
+                if (queryHostId) {
+                    return queryHostId;
+                }
+                const pathMatch = url.pathname.match(/\/h\/([^/]+)\/?$/i);
+                return pathMatch && pathMatch[1] ? decodeURIComponent(pathMatch[1]) : "";
+            };
+            const requestedHostId = readRequestedHostId();
+            const requestedAppId = (url.searchParams.get("appId") || url.searchParams.get("app_id") || "").trim();
+            const requestedAppName = (url.searchParams.get("appName") || url.searchParams.get("app_name") || "").trim();
+            const requestedLaunchToken = (url.searchParams.get("launchToken") || url.searchParams.get("launch_token") || "").trim();
+            const keeperTunnelSessionToken = (url.searchParams.get("kt_session") || "").trim();
+            const requestedAppHdr = (() => {
+                const raw = (url.searchParams.get("appHdr") || url.searchParams.get("app_hdr") || "").trim().toLowerCase();
+                return raw === "1" || raw === "true";
+            })();
+
+            const loadFullApp = () => {
+                const quickShell = document.getElementById("quick-shell");
+                const fullShell = document.getElementById("full-shell");
+                quickShell?.classList.add("hidden");
+                fullShell?.classList.remove("hidden");
+
+                if (!url.searchParams.has("launch")) {
+                    url.searchParams.set("launch", "choose");
+                    if (requestedHostId) {
+                        url.searchParams.set("hostId", requestedHostId);
+                    }
+                    url.pathname = scopedRootPath;
+                    history.replaceState({}, "", url.toString());
+                }
+
+                const style = document.createElement("link");
+                style.rel = "stylesheet";
+                style.href = buildScopedUrl("styles/standard.css");
+                style.id = "style";
+                document.head.appendChild(style);
+
+                const styleScript = document.createElement("script");
+                styleScript.type = "module";
+                styleScript.src = buildScopedUrl("styles/index.js");
+                document.head.appendChild(styleScript);
+
+                const appScript = document.createElement("script");
+                appScript.type = "module";
+                appScript.src = buildScopedUrl("index.js");
+                appScript.defer = true;
+                document.head.appendChild(appScript);
+            };
+
+            if (mode === "full") {
+                loadFullApp();
+                return;
+            }
+
+            const quickShell = document.getElementById("quick-shell");
+            const targetValue = document.getElementById("target-value");
+            const status = document.getElementById("status");
+            const openApp = document.getElementById("open-app");
+            const openWeb = document.getElementById("open-web");
+            const openNativePage = document.getElementById("open-native-page");
+            const browseHosts = document.getElementById("browse-hosts");
+            const requestedLaunchMode = (() => {
+                const rawMode = String(url.searchParams.get("launch") || "").trim().toLowerCase();
+                return rawMode === "app" ? rawMode : "";
+            })();
+            const shouldAutoLaunch = requestedLaunchMode === "app";
+
+            quickShell?.classList.remove("hidden");
+            let currentTarget = null;
+
+            const cacheKey = "cloudgimeQuickLaunchTargetV2";
+            const cacheVersion = "20260417-live-target";
+
+            const setStatus = (text, kind = "") => {
+                if (!status) return;
+                status.textContent = text;
+                status.className = `status${kind ? ` ${kind}` : ""}`;
+            };
+
+            const navigateTopLevel = (nextUrl, { replace = true } = {}) => {
+                const targetUrl = String(nextUrl || "").trim();
+                if (!targetUrl) {
+                    return false;
+                }
+
+                const assignTo = (targetWindow) => {
+                    if (!targetWindow?.location) {
+                        return false;
+                    }
+
+                    try {
+                        if (replace && typeof targetWindow.location.replace === "function") {
+                            targetWindow.location.replace(targetUrl);
+                        } else {
+                            targetWindow.location.href = targetUrl;
+                        }
+                        return true;
+                    } catch {
+                        return false;
+                    }
+                };
+
+                if (window.top && window.top !== window && assignTo(window.top)) {
+                    return true;
+                }
+
+                if (replace) {
+                    window.location.replace(targetUrl);
+                } else {
+                    window.location.href = targetUrl;
+                }
+                return true;
+            };
+
+            const setButtonsDisabled = (disabled) => {
+                for (const button of [openApp]) {
+                    if (!button) continue;
+                    if (disabled) {
+                        button.setAttribute("aria-disabled", "true");
+                        button.setAttribute("href", "#");
+                    } else {
+                        button.removeAttribute("aria-disabled");
+                    }
+                }
+            };
+
+            const readCachedTarget = () => {
+                try {
+                    const raw = localStorage.getItem(cacheKey);
+                    const target = raw ? JSON.parse(raw) : null;
+                    return target?.cacheVersion === cacheVersion ? target : null;
+                } catch {
+                    return null;
+                }
+            };
+
+            const saveCachedTarget = (target) => {
+                try {
+                    localStorage.setItem(cacheKey, JSON.stringify({
+                        ...target,
+                        cacheVersion,
+                    }));
+                } catch { }
+            };
+
+            const buildQuery = (target) => {
+                const query = new URLSearchParams({
+                    hostId: String(target.hostId),
+                    appId: String(target.appId),
+                    appName: target.appTitle || "Desktop",
+                    appHdr: target.appHdr ? "1" : "0",
+                });
+                const launchToken = String(target.launchToken || "").trim();
+                if (launchToken) {
+                    query.set("launchToken", launchToken);
+                }
+                return query;
+            };
+
+            const withKeeperTunnelSession = (targetUrl) => {
+                const trimmed = String(targetUrl || "").trim();
+                if (!trimmed || !keeperTunnelSessionToken) {
+                    return trimmed;
+                }
+
+                try {
+                    const parsed = new URL(trimmed, url);
+                    if (!parsed.searchParams.has("kt_session")) {
+                        parsed.searchParams.set("kt_session", keeperTunnelSessionToken);
+                    }
+                    return parsed.toString();
+                } catch {
+                    return trimmed;
+                }
+            };
+
+            const buildNativeSchemeUrl = (target) => {
+                const launchToken = String(target?.launchToken || "").trim();
+                if (!launchToken) {
+                    return "";
+                }
+
+                const nativeUrl = new URL("moonlightnative://stream");
+                nativeUrl.searchParams.set("hostId", String(target.hostId));
+                nativeUrl.searchParams.set("appId", String(target.appId));
+                nativeUrl.searchParams.set("launchToken", launchToken);
+                nativeUrl.searchParams.set("webBaseUrl", buildScopedUrl(""));
+                nativeUrl.searchParams.set("nativeShell", "windows");
+                if (keeperTunnelSessionToken) {
+                    nativeUrl.searchParams.set("kt_session", keeperTunnelSessionToken);
+                }
+                return nativeUrl.toString();
+            };
+
+            const resolveTargetUrls = (target) => {
+                const query = buildQuery(target);
+                const streamUrl = withKeeperTunnelSession(
+                    target.webStreamPath
+                        ? new URL(target.webStreamPath, url).toString()
+                        : buildScopedUrl(`stream.html?${query.toString()}`)
+                );
+                const nativeChoiceUrl = withKeeperTunnelSession(
+                    target.openNativePath
+                        ? new URL(target.openNativePath, url).toString()
+                        : buildScopedUrl(`open-native.html?${query.toString()}`)
+                );
+                const generatedNativeUrl = buildNativeSchemeUrl(target);
+                let nativeSchemeUrl = target.nativeSchemeUrl
+                    ? String(target.nativeSchemeUrl)
+                    : generatedNativeUrl || (() => {
+                        const nativeAppUrl = new URL(nativeChoiceUrl);
+                        nativeAppUrl.searchParams.set("launch", "app");
+                        return nativeAppUrl.toString();
+                    })();
+
+                if (nativeSchemeUrl) {
+                    try {
+                        const parsedNativeUrl = new URL(nativeSchemeUrl);
+                        const nativeQuery = parsedNativeUrl.searchParams;
+                        const serverWebBaseUrl = nativeQuery.get("webBaseUrl");
+                        if (serverWebBaseUrl) {
+                            const parsedWebBase = new URL(serverWebBaseUrl);
+                            const host = parsedWebBase.hostname.toLowerCase();
+                            const isLocal = host === "127.0.0.1"
+                                || host === "localhost"
+                                || host === "::1"
+                                || host === "[::1]"
+                                || host.startsWith("10.")
+                                || host.startsWith("192.168.")
+                                || host.startsWith("172.16.")
+                                || host.startsWith("172.17.")
+                                || host.startsWith("172.18.")
+                                || host.startsWith("172.19.")
+                                || host.startsWith("172.20.")
+                                || host.startsWith("172.21.")
+                                || host.startsWith("172.22.")
+                                || host.startsWith("172.23.")
+                                || host.startsWith("172.24.")
+                                || host.startsWith("172.25.")
+                                || host.startsWith("172.26.")
+                                || host.startsWith("172.27.")
+                                || host.startsWith("172.28.")
+                                || host.startsWith("172.29.")
+                                || host.startsWith("172.30.")
+                                || host.startsWith("172.31.");
+                            if (isLocal) {
+                                const publicWebBase = buildScopedUrl("");
+                                nativeQuery.set("webBaseUrl", publicWebBase);
+                                nativeSchemeUrl = parsedNativeUrl.toString();
+                            }
+                        }
+                    } catch (e) {
+                        console.error("Failed to parse/rewrite nativeSchemeUrl", e);
+                    }
+                }
+
+                const nativeUrl = withKeeperTunnelSession(nativeSchemeUrl);
+                return {
+                    streamUrl,
+                    nativeChoiceUrl,
+                    nativeUrl,
+                };
+            };
+
+            const attemptAutoLaunch = ({ nativeUrl }) => {
+                if (!shouldAutoLaunch) {
+                    return false;
+                }
+
+                const statusText = requestedLaunchMode === "app"
+                    ? "Opening native stream app…"
+                    : "Opening web stream…";
+                setStatus(statusText, "is-ready");
+                navigateTopLevel(nativeUrl);
+                return true;
+            };
+
+            const applyTarget = (target, statusText) => {
+                const { nativeChoiceUrl, nativeUrl } = resolveTargetUrls(target);
+                currentTarget = target;
+
+                if (targetValue) {
+                    targetValue.textContent = `${target.hostName || "Host"} • ${target.appTitle || "Desktop"}`;
+                }
+                if (openApp) {
+                    openApp.setAttribute("href", nativeUrl);
+                }
+                if (openNativePage) {
+                    if (shouldAutoLaunch) {
+                        openNativePage.classList.add("hidden");
+                    } else {
+                        openNativePage.classList.remove("hidden");
+                        openNativePage.setAttribute("href", nativeChoiceUrl);
+                    }
+                }
+                if (browseHosts) {
+                    const browseUrl = new URL(`${url.origin}${scopedRootPath}`);
+                    browseUrl.searchParams.set("view", "full");
+                    if (requestedHostId) {
+                        browseUrl.searchParams.set("hostId", requestedHostId);
+                    }
+                    browseHosts.setAttribute("href", browseUrl.toString());
+                }
+                setButtonsDisabled(false);
+                setStatus(statusText, "is-ready");
+                attemptAutoLaunch({ nativeUrl });
+            };
+
+            const parseHostsPayload = (raw) => {
+                const firstLine = raw.split(/\r?\n/).find(Boolean);
+                if (!firstLine) {
+                    throw new Error("Host list is empty.");
+                }
+                const firstPayload = JSON.parse(firstLine);
+                if (Array.isArray(firstPayload.hosts)) {
+                    return firstPayload.hosts;
+                }
+                if (Array.isArray(firstPayload)) {
+                    return firstPayload;
+                }
+                return [firstPayload];
+            };
+
+            const chooseDefaultHost = (hosts) => {
+                return hosts.find(host => host.server_state === "Free")
+                    || hosts.find(host => host.paired === "Paired")
+                    || hosts[0]
+                    || null;
+            };
+
+            const chooseDefaultApp = (apps) => {
+                return apps.find(app => /desktop/i.test(app.title || ""))
+                    || apps[0]
+                    || null;
+            };
+
+            const readTargetFromQuery = () => {
+                if (!requestedHostId || !requestedAppId) {
+                    return null;
+                }
+
+                return {
+                    hostId: requestedHostId,
+                    hostName: requestedHostId.startsWith("PC-") ? requestedHostId : `PC ${requestedHostId}`,
+                    appId: requestedAppId,
+                    appTitle: requestedAppName || "Desktop",
+                    appHdr: requestedAppHdr,
+                    launchToken: requestedLaunchToken,
+                };
+            };
+
+            const fetchDefaultTargetLegacy = async () => {
+                const hostsResponse = await fetch(buildScopedUrl("api/hosts"), { credentials: "include" });
+                if (!hostsResponse.ok) {
+                    throw new Error(`Host list failed (${hostsResponse.status}).`);
+                }
+                const hosts = parseHostsPayload(await hostsResponse.text());
+                const host = chooseDefaultHost(hosts);
+                if (!host?.host_id) {
+                    throw new Error("No host is ready.");
+                }
+
+                const appsResponse = await fetch(
+                    buildScopedUrl(`api/apps?host_id=${encodeURIComponent(host.host_id)}`),
+                    { credentials: "include" }
+                );
+                if (!appsResponse.ok) {
+                    throw new Error(`App list failed (${appsResponse.status}).`);
+                }
+                const appsPayload = await appsResponse.json();
+                const apps = Array.isArray(appsPayload?.apps) ? appsPayload.apps : [];
+                const app = chooseDefaultApp(apps);
+                if (!app?.app_id) {
+                    throw new Error("No stream app is available.");
+                }
+
+                return {
+                    hostId: host.host_id,
+                    hostName: host.name,
+                    appId: app.app_id,
+                    appTitle: app.title,
+                    appHdr: !!app.is_hdr_supported,
+                };
+            };
+
+            const fetchDefaultTarget = async () => {
+                const quickTargetUrl = new URL("api/quick-launch-target", `${url.origin}${scopedRootPath}`);
+                if (requestedHostId) {
+                    quickTargetUrl.searchParams.set("hostId", requestedHostId);
+                }
+
+                const response = await fetch(quickTargetUrl.toString(), { credentials: "include" });
+                if (response.ok) {
+                    const target = await response.json();
+                    return {
+                        hostId: target.host_id,
+                        hostName: target.host_name,
+                        appId: target.app_id,
+                        appTitle: target.app_title,
+                        appHdr: !!target.is_hdr_supported,
+                        nativeSchemeUrl: target.native_scheme_url,
+                        openNativePath: target.open_native_path,
+                        webStreamPath: target.web_stream_path,
+                    };
+                }
+
+                if (response.status !== 404 && response.status !== 405) {
+                    throw new Error(`Quick launch target failed (${response.status}).`);
+                }
+
+                return await fetchDefaultTargetLegacy();
+            };
+
+            const targetFromQuery = readTargetFromQuery();
+            if (targetFromQuery?.hostId && targetFromQuery?.appId) {
+                currentTarget = targetFromQuery;
+                applyTarget(
+                    targetFromQuery,
+                    shouldAutoLaunch ? "Preparing stream…" : "Session target is ready."
+                );
+                return;
+            }
+
+            const cachedTarget = readCachedTarget();
+            if (cachedTarget?.hostId && cachedTarget?.appId) {
+                currentTarget = cachedTarget;
+                if (targetValue) {
+                    targetValue.textContent = `${cachedTarget.hostName || "Host"} • ${cachedTarget.appTitle || "Desktop"}`;
+                }
+                setButtonsDisabled(true);
+                setStatus(shouldAutoLaunch ? "Preparing stream…" : "Checking latest host target…");
+            } else {
+                setButtonsDisabled(true);
+                setStatus(shouldAutoLaunch ? "Preparing stream…" : "Checking host and app…");
+            }
+
+            fetchDefaultTarget()
+                .then((target) => {
+                    saveCachedTarget(target);
+                    applyTarget(target, "Ready. Open App.");
+                })
+                .catch((error) => {
+                    console.error(error);
+                    if (cachedTarget?.hostId && cachedTarget?.appId) {
+                        applyTarget(cachedTarget, "Host API sedang tidak stabil. Menggunakan target terakhir yang masih valid.");
+                        setStatus(error?.message || "Quick launch memakai target cadangan.", "is-error");
+                        return;
+                    }
+
+                    if (targetValue) {
+                        targetValue.textContent = "Host or app is not ready.";
+                    }
+                    setButtonsDisabled(true);
+                    setStatus(error?.message || "Quick launch is unavailable.", "is-error");
+                });
+
+            const bindTopLevelNavigation = (element, useReplace = false) => {
+                if (!element) {
+                    return;
+                }
+
+                element.addEventListener("click", (event) => {
+                    const href = element.getAttribute("href");
+                    if (!href || href === "#") {
+                        return;
+                    }
+                    event.preventDefault();
+                    navigateTopLevel(href, { replace: useReplace });
+                });
+            };
+
+            bindTopLevelNavigation(openApp);
+            bindTopLevelNavigation(openNativePage);
+            bindTopLevelNavigation(browseHosts);
+        })();
+    </script>
+</body>
+
+</html>

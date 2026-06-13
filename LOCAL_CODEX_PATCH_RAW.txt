@@ -1,0 +1,23 @@
+diff --git a/cloudgime host/README.md b/cloudgime host/README.md
+index 1234567..89abcde 100644
+--- a/cloudgime host/README.md
++++ b/cloudgime host/README.md
+@@ -1,6 +1,8 @@
+ # Moonlight Web
+ 
++This project provides a web-based interface for managing and controlling remote systems via the Cloudgime Host platform.
++
+ An unofficial [Moonlight Client](https://moonlight-stream.org/) allowing you to stream your pc to the Web. It hosts a Web Server which will forward [Sunshine](https://docs.lizardbyte.dev/projects/sunshine/latest/) traffic to a Browser using the [WebRTC Api](https://webrtc.org/).
+ 
+ ## Features
+```
+
+---
+
+### Summary of Changes
+
+- A new sentence has been added at the beginning of the README file to provide a concise overview of the project's purpose.
+- The existing content remains untouched and intact.
+- The added sentence:  
+  **"This project provides a web-based interface for managing and controlling remote systems via the Cloudgime Host platform."**  
+  aligns with the context of the file and introduces the project's primary function clearly.

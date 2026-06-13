@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Cloudgime Gate Motion</title>
+    <style>
+        :root {
+            color-scheme: dark;
+            font-family: "Segoe UI", sans-serif;
+        }
+        html, body {
+            margin: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background:
+                radial-gradient(circle at 20% 20%, rgba(48, 137, 255, 0.35), transparent 28%),
+                radial-gradient(circle at 80% 25%, rgba(72, 255, 176, 0.22), transparent 24%),
+                radial-gradient(circle at 40% 80%, rgba(255, 193, 61, 0.18), transparent 26%),
+                linear-gradient(160deg, #07111f 0%, #09182c 45%, #050b15 100%);
+        }
+        body {
+            position: relative;
+        }
+        .hud {
+            position: absolute;
+            top: 24px;
+            left: 24px;
+            right: 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            color: #f5f8ff;
+            z-index: 2;
+            text-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
+        }
+        .title {
+            font-size: 22px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        .meta {
+            font-size: 15px;
+            opacity: 0.9;
+        }
+        .ticker {
+            position: absolute;
+            left: 24px;
+            right: 24px;
+            bottom: 24px;
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 14px;
+            z-index: 2;
+        }
+        .card {
+            padding: 14px 16px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 16px;
+            background: rgba(7, 13, 25, 0.42);
+            backdrop-filter: blur(12px);
+            color: #eff5ff;
+            box-shadow: 0 12px 30px rgba(0, 0, 0, 0.18);
+        }
+        .card-label {
+            font-size: 11px;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            opacity: 0.72;
+        }
+        .card-value {
+            margin-top: 8px;
+            font-size: 28px;
+            font-weight: 700;
+        }
+        .grid {
+            position: absolute;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+            background-size: 52px 52px;
+            mask-image: radial-gradient(circle at center, black 45%, transparent 100%);
+            animation: drift 12s linear infinite;
+            opacity: 0.35;
+        }
+        @keyframes drift {
+            from { transform: translate3d(0, 0, 0); }
+            to { transform: translate3d(-52px, -52px, 0); }
+        }
+        canvas {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+    <div class="grid"></div>
+    <canvas id="scene"></canvas>
+    <div class="hud">
+        <div>
+            <div class="title">Cloudgime Gate Motion</div>
+            <div class="meta" id="phase">warming up</div>
+        </div>
+        <div class="meta" id="clock">--:--:--</div>
+    </div>
+    <div class="ticker">
+        <div class="card">
+            <div class="card-label">Signal</div>
+            <div class="card-value" id="signal">0%</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Motion</div>
+            <div class="card-value" id="motion">0 px/s</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Frame</div>
+            <div class="card-value" id="frame">0</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Load</div>
+            <div class="card-value" id="load">0%</div>
+        </div>
+    </div>
+    <script>
+        const canvas = document.getElementById("scene");
+        const ctx = canvas.getContext("2d", { alpha: true });
+        const phase = document.getElementById("phase");
+        const clock = document.getElementById("clock");
+        const signal = document.getElementById("signal");
+        const motion = document.getElementById("motion");
+        const frame = document.getElementById("frame");
+        const load = document.getElementById("load");
+
+        const particles = Array.from({ length: 22 }, (_, index) => ({
+            x: Math.random(),
+            y: Math.random(),
+            dx: (Math.random() * 0.004 + 0.0015) * (index % 2 === 0 ? 1 : -1),
+            dy: (Math.random() * 0.0035 + 0.0012) * (index % 3 === 0 ? -1 : 1),
+            radius: 10 + Math.random() * 22,
+            hue: 180 + index * 8,
+        }));
+
+        let width = 0;
+        let height = 0;
+        let frameCount = 0;
+        let lastTime = performance.now();
+
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
+            canvas.width = Math.floor(width * dpr);
+            canvas.height = Math.floor(height * dpr);
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        }
+
+        function drawBars(timeMs) {
+            const barCount = 18;
+            const barWidth = width / (barCount * 1.7);
+            for (let index = 0; index < barCount; index += 1) {
+                const progress = timeMs * 0.0016 + index * 0.38;
+                const amplitude = 0.22 + ((Math.sin(progress) + 1) * 0.5 * 0.52);
+                const barHeight = height * amplitude;
+                const x = 48 + index * barWidth * 1.35;
+                const y = height * 0.62 - barHeight * 0.5;
+                ctx.fillStyle = `hsla(${205 + index * 4}, 85%, 58%, 0.30)`;
+                ctx.fillRect(x, y, barWidth, barHeight);
+            }
+        }
+
+        function drawParticles(timeMs) {
+            let totalVelocity = 0;
+            for (const item of particles) {
+                item.x += item.dx;
+                item.y += item.dy;
+                if (item.x < 0.05 || item.x > 0.95) {
+                    item.dx *= -1;
+                }
+                if (item.y < 0.08 || item.y > 0.86) {
+                    item.dy *= -1;
+                }
+                totalVelocity += Math.hypot(item.dx, item.dy);
+                const px = item.x * width;
+                const py = item.y * height;
+                const glow = 14 + Math.sin(timeMs * 0.002 + item.radius) * 6;
+                const gradient = ctx.createRadialGradient(px, py, 0, px, py, item.radius + glow);
+                gradient.addColorStop(0, `hsla(${item.hue}, 96%, 70%, 0.85)`);
+                gradient.addColorStop(1, `hsla(${item.hue + 16}, 96%, 52%, 0)`);
+                ctx.fillStyle = gradient;
+                ctx.beginPath();
+                ctx.arc(px, py, item.radius + glow, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            motion.textContent = `${Math.round(totalVelocity * 100000)} px/s`;
+        }
+
+        function render(timeMs) {
+            frameCount += 1;
+            const deltaMs = Math.max(1, timeMs - lastTime);
+            lastTime = timeMs;
+            ctx.clearRect(0, 0, width, height);
+
+            drawBars(timeMs);
+            drawParticles(timeMs);
+
+            const sweep = ((timeMs * 0.00018) % 1);
+            const sweepX = sweep * (width + 280) - 140;
+            const sweepGradient = ctx.createLinearGradient(sweepX - 160, 0, sweepX + 160, height);
+            sweepGradient.addColorStop(0, "rgba(255,255,255,0)");
+            sweepGradient.addColorStop(0.5, "rgba(255,255,255,0.08)");
+            sweepGradient.addColorStop(1, "rgba(255,255,255,0)");
+            ctx.fillStyle = sweepGradient;
+            ctx.fillRect(0, 0, width, height);
+
+            const wave = ((Math.sin(timeMs * 0.0012) + 1) * 0.5);
+            const loadValue = 42 + Math.round(wave * 46);
+            const signalValue = 55 + Math.round(((Math.cos(timeMs * 0.0015) + 1) * 0.5) * 44);
+            const phaseValue = wave > 0.7
+                ? "sustained motion"
+                : wave > 0.35
+                    ? "active sampling"
+                    : "frame pacing";
+
+            const now = new Date();
+            clock.textContent = now.toLocaleTimeString("en-GB", { hour12: false });
+            phase.textContent = `${phaseValue} · ${Math.round(1000 / deltaMs)} fps anim`;
+            signal.textContent = `${signalValue}%`;
+            frame.textContent = String(frameCount);
+            load.textContent = `${loadValue}%`;
+
+            requestAnimationFrame(render);
+        }
+
+        window.addEventListener("resize", resize);
+        resize();
+        requestAnimationFrame(render);
+    </script>
+</body>
+</html>

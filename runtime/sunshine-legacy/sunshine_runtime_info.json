@@ -1,0 +1,9 @@
+{
+    "runtime_version":  "0.20.0",
+    "requires_bundled_ffmpeg":  true,
+    "display_name":  "Cloudgime Compatibility Runtime",
+    "auto_select":  true,
+    "startup_validation_status":  "pending",
+    "startup_validation_reason":  "runtime_start_validation_required",
+    "startup_validation_checked_at":  null
+}

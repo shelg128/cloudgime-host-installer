@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cloudgime Host Control</title>
+    <style>
+      html,
+      body,
+      #root {
+        margin: 0;
+        width: 100%;
+        min-height: 100%;
+        background:
+          radial-gradient(circle at 18% 22%, rgba(92, 177, 255, 0.18), transparent 24%),
+          radial-gradient(circle at 72% 18%, rgba(126, 103, 255, 0.16), transparent 28%),
+          radial-gradient(circle at 82% 78%, rgba(0, 224, 181, 0.12), transparent 30%),
+          linear-gradient(135deg, #081019 0%, #0c1524 48%, #090f18 100%);
+        color: #edf4ff;
+      }
+
+      body {
+        overflow: hidden;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

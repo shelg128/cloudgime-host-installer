@@ -1,0 +1,24 @@
+{
+  "description": "Clean Windows 10 SYMO fallback audio package. Copy to package.json after you add the installer payload.",
+  "package_source": "symo-production-signed",
+  "signing_mode": "production-signed",
+  "installer": "payload\\SET_ME.exe",
+  "legacy_hardware_id": "ROOT\\SET_ME",
+  "arguments": [
+    "/S"
+  ],
+  "post_install_delay_seconds": 8,
+  "verify_timeout_seconds": 30,
+  "verify_poll_interval_seconds": 2,
+  "expected_audio_endpoints": [
+    {
+      "direction": "output",
+      "name": "SYMO Virtual Audio Output"
+    },
+    {
+      "direction": "input",
+      "name": "SYMO Virtual Audio Input"
+    }
+  ],
+  "signing_metadata": "payload\\SET_ME\\signing-import.json"
+}

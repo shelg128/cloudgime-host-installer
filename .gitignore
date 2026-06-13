@@ -1,0 +1,62 @@
+# Rust
+/target
+/target-host-installer/
+finalOutput
+ignore
+
+# VsCode
+.vscode
+
+# npm / js
+node_modules
+dist
+bindings
+web/api_bindings.ts
+
+# Server
+server
+
+# Portable bundle output / local runtime state
+export/*
+!export/
+!export/mon1-template/
+!export/mon1-template/**
+export/*.zip
+export/mon1/
+export/mon1-template/sunshine/config/credentials/
+export/mon1-template/sunshine/config/*.log
+export/mon1-template/sunshine/config/sunshine_state.json
+runtime/sunshine/config/credentials/
+runtime/sunshine/config/*.log
+runtime/sunshine/config/sunshine_state.json
+runtime/sunshine-legacy/config/credentials/
+runtime/sunshine-legacy/config/*.log
+runtime/sunshine-legacy/config/sunshine_state.json
+runtime/moonlight/static/
+runtime/moonlight/*.exe
+runtime/moonlight/server/*.exe
+runtime/sunshine-legacy/assets/
+runtime/sunshine-legacy/config/
+runtime/sunshine-legacy/scripts/
+runtime/sunshine-legacy/tools/
+runtime/sunshine-legacy/*.exe
+runtime/sunshine-legacy/*.dll
+runtime/tools/bundle-process-manager-publish/
+runtime/tools/display-prepare-helper-publish/
+runtime/tools/gamepad-sidecar-publish/
+runtime/tools/host-keep-awake-agent-publish/
+tools/portable/BundleProcessManager/bin/
+tools/portable/BundleProcessManager/obj/
+tools/portable/**/bin/
+tools/portable/**/obj/
+tools/portable/**/dist/
+tools/portable/**/release/
+tools/portable/**/installer/output/
+tools/portable/**/installer/payload/
+tools/portable/_publish/
+generated/
+test-results/
+tmp/
+tmp-*.log
+tmp_last_log_len.txt
+repo/

@@ -1,0 +1,19 @@
+{
+  "description": "SYMO custom virtual audio fallback package",
+  "installer": "payload\\symo-x64-release\\VirtualAudioDriver.inf",
+  "legacy_hardware_id": "ROOT\\VirtualAudioDriver",
+  "arguments": [],
+  "post_install_delay_seconds": 10,
+  "verify_timeout_seconds": 30,
+  "verify_poll_interval_seconds": 2,
+  "expected_audio_endpoints": [
+    {
+      "direction": "output",
+      "name": "SYMO Virtual Audio Output"
+    },
+    {
+      "direction": "input",
+      "name": "SYMO Virtual Audio Input"
+    }
+  ]
+}

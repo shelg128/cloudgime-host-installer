@@ -1,0 +1,14 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "id.cloudgime.moonlightweb.androidclient.debug",
+      "sha256_cert_fingerprints": [
+        "F2:5F:48:32:80:4E:38:61:D8:9D:20:12:CF:21:E9:A8:23:46:99:31:5D:3C:E7:EC:23:B5:90:03:61:A0:6A:C6"
+      ]
+    }
+  }
+]

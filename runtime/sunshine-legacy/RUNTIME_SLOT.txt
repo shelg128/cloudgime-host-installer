@@ -1,0 +1,12 @@
+Cloudgime compatibility runtime slot
+
+Purpose:
+- optional compatibility runtime for older NVENC API / driver stacks
+
+Expected contents:
+- sunshine.exe and normal runtime engine files
+- optional FFmpeg bundle at tools\ (ffmpeg.exe + ffprobe.exe + needed DLL sidecars) when this slot needs a specific legacy FFmpeg build
+
+Imported from:
+- SourceRoot: c:\1\moonlight web\repo\tmp\sunshine-release-downloads\0.20.0-sunshine-windows-portable\Sunshine
+- FfmpegSource: c:\1\moonlight web\repo\tmp\ffmpeg-release-downloads\6.0-ffmpeg-6.0-full_build-shared\ffmpeg-6.0-full_build-shared\bin
