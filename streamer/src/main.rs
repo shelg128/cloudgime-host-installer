@@ -121,7 +121,7 @@ use crate::{
 
 pub type RequestClient = TokioHyperClient;
 
-pub const TIMEOUT_DURATION: Duration = Duration::from_secs(30);
+pub const TIMEOUT_DURATION: Duration = Duration::from_secs(60);
 const HOST_IDENTITY_TIMEOUT: Duration = Duration::from_secs(8);
 const STREAM_CONNECTION_SETUP_TIMEOUT: Duration = Duration::from_secs(8);
 const ABSOLUTE_FOLLOW_GAIN_BASE: f32 = 1.04;

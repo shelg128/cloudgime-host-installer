@@ -90,7 +90,7 @@ static LEGACY_RUNTIME_STARTUP_FAILURE_STATE: LazyLock<Mutex<(u32, u64)>> =
     LazyLock::new(|| Mutex::new((0, 0)));
 static RECENT_STREAM_CLOSE_CONTEXT: LazyLock<Mutex<(String, u64, bool)>> =
     LazyLock::new(|| Mutex::new((String::new(), 0, false)));
-const STREAM_CONTROL_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+const STREAM_CONTROL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const GOLDEN_PATH_CONTROL_PROBE_TIMEOUT_MS: u64 = 50;
 const DISPLAY_PREPARE_HELPER_TIMEOUT: Duration = Duration::from_secs(25);
 const TASKKILL_TIMEOUT: Duration = Duration::from_secs(5);
