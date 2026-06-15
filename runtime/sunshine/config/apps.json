@@ -3,7 +3,13 @@
   "apps": [
     {
       "name": "Desktop",
-      "image-path": "desktop.png"
+      "image-path": "desktop.png",
+      "prep-cmd": [
+        {
+          "do": "python C:\\ProgramData\\Cloudgime\\Host\\toggle_host_cursor.py hide",
+          "undo": "python C:\\ProgramData\\Cloudgime\\Host\\toggle_host_cursor.py restore"
+        }
+      ]
     },
     {
       "name": "Steam Big Picture",

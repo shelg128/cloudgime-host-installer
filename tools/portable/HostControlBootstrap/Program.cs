@@ -720,7 +720,7 @@ internal static class Program
     private static bool IsNonFatalPrepareStartupIssue(string message)
     {
         var text = message.ToLowerInvariant();
-        return text.Contains("start-bundle", StringComparison.Ordinal)
+        return (text.Contains("start-bundle", StringComparison.Ordinal) || text.Contains("prepare-host", StringComparison.Ordinal))
             && (text.Contains("bundle startup incomplete", StringComparison.Ordinal)
                 || text.Contains("timed out waiting", StringComparison.Ordinal)
                 || text.Contains("49000", StringComparison.Ordinal)
@@ -1746,6 +1746,7 @@ while ($settings.HasChildNodes) {{
 [void]$settings.AppendChild((New-RestartOnFailureNode '999' 'PT1M'))
 [void]$settings.AppendChild((New-TaskNode 'StartWhenAvailable' 'true'))
 [void]$settings.AppendChild((New-TaskNode 'UseUnifiedSchedulingEngine' 'true'))
+[void]$settings.AppendChild((New-TaskNode 'Priority' '4'))
 $tempXml = Join-Path $env:TEMP ('cloudgime-host-user-task-' + [guid]::NewGuid().ToString('N') + '.xml')
 try {{
     $taskXml.Save($tempXml)
