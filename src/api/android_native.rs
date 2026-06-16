@@ -804,6 +804,38 @@ fn discover_streamer_host_address() -> Option<String> {
     }
 }
 
+fn extract_public_turn_host(ice_servers: &[RtcIceServer]) -> Option<String> {
+    for server in ice_servers {
+        for url in &server.urls {
+            let remainder = if let Some(val) = url.strip_prefix("turn:") {
+                val
+            } else if let Some(val) = url.strip_prefix("turns:") {
+                val
+            } else {
+                continue;
+            };
+
+            let host_part = remainder
+                .trim_start_matches("//")
+                .split('?')
+                .next()
+                .unwrap_or_default()
+                .split('@')
+                .last()
+                .unwrap_or_default()
+                .split(':')
+                .next()
+                .unwrap_or_default()
+                .trim();
+
+            if !host_part.is_empty() && is_public_remote_host_address(host_part) {
+                return Some(host_part.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn resolve_android_native_host_address(app: &App, detailed: &DetailedHost) -> String {
     let local_ip = if is_valid_local_host_address(&detailed.local_ip) {
         Some(detailed.local_ip.as_str())
@@ -822,6 +854,12 @@ fn resolve_android_native_host_address(app: &App, detailed: &DetailedHost) -> St
             .find(|ip| is_usable_public_host_address(ip, local_ip))
     }) {
         return public_ip.clone();
+    }
+
+    if let Some(turn_host) = extract_public_turn_host(&app.config().webrtc.ice_servers) {
+        if is_usable_public_host_address(&turn_host, local_ip) {
+            return turn_host;
+        }
     }
 
     if let Some(discovered_ip) =
@@ -993,6 +1031,15 @@ async fn resolve_remote_candidate(
             address: public_ip.clone(),
             source: "config.webrtc.nat_1to1".to_string(),
         });
+    }
+
+    if let Some(turn_host) = extract_public_turn_host(&app.config().webrtc.ice_servers) {
+        if is_usable_public_host_address(&turn_host, local_ip) {
+            return Some(AndroidNativeRemoteCandidate {
+                address: turn_host,
+                source: "ice_servers.turn_host".to_string(),
+            });
+        }
     }
 
     discover_remote_candidate_from_stun(app, local_ip).await

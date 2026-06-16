@@ -666,32 +666,55 @@
                 if (targetValue) {
                     targetValue.textContent = `${cachedTarget.hostName || "Host"} • ${cachedTarget.appTitle || "Desktop"}`;
                 }
-                setButtonsDisabled(true);
-                setStatus(shouldAutoLaunch ? "Preparing stream…" : "Checking latest host target…");
             } else {
-                setButtonsDisabled(true);
-                setStatus(shouldAutoLaunch ? "Preparing stream…" : "Checking host and app…");
+                if (targetValue) {
+                    targetValue.textContent = "Loading host and app…";
+                }
             }
+            setButtonsDisabled(true);
 
-            fetchDefaultTarget()
-                .then((target) => {
-                    saveCachedTarget(target);
-                    applyTarget(target, "Ready. Open App.");
-                })
-                .catch((error) => {
-                    console.error(error);
-                    if (cachedTarget?.hostId && cachedTarget?.appId) {
-                        applyTarget(cachedTarget, "Host API sedang tidak stabil. Menggunakan target terakhir yang masih valid.");
-                        setStatus(error?.message || "Quick launch memakai target cadangan.", "is-error");
-                        return;
-                    }
+            let pollTimer = null;
+            let pollAttempts = 0;
 
-                    if (targetValue) {
-                        targetValue.textContent = "Host or app is not ready.";
+            const startPollingTarget = () => {
+                if (pollTimer) return;
+                pollAttempts = 0;
+
+                const poll = async () => {
+                    pollAttempts++;
+                    setStatus(shouldAutoLaunch ? "Preparing stream…" : `Connecting to cloud servers... (Attempt ${pollAttempts})`);
+
+                    try {
+                        const target = await fetchDefaultTarget();
+                        saveCachedTarget(target);
+                        applyTarget(target, "Ready. Open App.");
+                        if (pollTimer) {
+                            clearInterval(pollTimer);
+                            pollTimer = null;
+                        }
+                    } catch (error) {
+                        console.warn("Poll target attempt failed:", error);
+                        let errStr = String(error?.message || "").toLowerCase();
+                        let signalText = "502 Bad Gateway";
+                        if (errStr.includes("404")) {
+                            signalText = "404 Not Found";
+                        } else if (errStr.includes("403")) {
+                            signalText = "403 Forbidden";
+                        } else if (errStr.includes("504")) {
+                            signalText = "504 Gateway Timeout";
+                        } else if (errStr.includes("500")) {
+                            signalText = "500 Internal Error";
+                        }
+                        
+                        setStatus(`Waiting for 200 OK signal... (Current status: ${signalText})`, "is-error");
                     }
-                    setButtonsDisabled(true);
-                    setStatus(error?.message || "Quick launch is unavailable.", "is-error");
-                });
+                };
+
+                poll();
+                pollTimer = setInterval(poll, 2500);
+            };
+
+            startPollingTarget();
 
             const bindTopLevelNavigation = (element, useReplace = false) => {
                 if (!element) {

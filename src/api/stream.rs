@@ -54,8 +54,9 @@ use crate::app::{
 use windows_sys::Win32::{
     Foundation::{CloseHandle, GetLastError, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT},
     Security::{
-        DuplicateTokenEx, SecurityImpersonation, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID,
-        TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY, TokenPrimary,
+        DuplicateTokenEx, GetTokenInformation, SecurityImpersonation, TOKEN_ADJUST_DEFAULT,
+        TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_LINKED_TOKEN,
+        TOKEN_QUERY, TokenLinkedToken, TokenPrimary,
     },
     System::RemoteDesktop::{
         WTS_SESSION_INFOW, WTSActive, WTSConnected, WTSEnumerateSessionsW, WTSFreeMemory,
@@ -3864,10 +3865,34 @@ fn run_helper_in_active_user_session_blocking(
             continue;
         }
 
+        // Try to get the linked elevated token (e.g. if the user is an admin but run with UAC filtered token)
+        let mut linked_token_info = TOKEN_LINKED_TOKEN { LinkedToken: std::ptr::null_mut() };
+        let mut return_length = 0u32;
+        let get_info_ok = unsafe {
+            GetTokenInformation(
+                user_token,
+                TokenLinkedToken,
+                &mut linked_token_info as *mut _ as *mut _,
+                std::mem::size_of::<TOKEN_LINKED_TOKEN>() as u32,
+                &mut return_length,
+            )
+        } != 0;
+
+        let target_user_token = if get_info_ok && !linked_token_info.LinkedToken.is_null() {
+            info!("Successfully retrieved linked elevated token for session {active_session_id}");
+            unsafe {
+                CloseHandle(user_token);
+            }
+            linked_token_info.LinkedToken
+        } else {
+            debug!("No linked elevated token found for session {active_session_id} or failed to query (win32={}). Falling back to standard user token.", unsafe { GetLastError() });
+            user_token
+        };
+
         let mut primary_token: HANDLE = std::ptr::null_mut();
         let duplicate_ok = unsafe {
             DuplicateTokenEx(
-                user_token,
+                target_user_token,
                 TOKEN_ASSIGN_PRIMARY
                     | TOKEN_DUPLICATE
                     | TOKEN_QUERY
@@ -3880,7 +3905,7 @@ fn run_helper_in_active_user_session_blocking(
             )
         } != 0;
         unsafe {
-            CloseHandle(user_token);
+            CloseHandle(target_user_token);
         }
         if !duplicate_ok {
             failures.push(format!(

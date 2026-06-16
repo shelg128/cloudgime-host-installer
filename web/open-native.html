@@ -463,30 +463,79 @@
 
                 syncLinks();
 
+                let nativePollTimer = null;
+                let nativePollAttempts = 0;
+
+                const startPollingNativeLaunch = () => {
+                    if (nativePollTimer) return;
+                    nativePollAttempts = 0;
+
+                    const poll = async () => {
+                        nativePollAttempts++;
+                        setStatus(`Menyiapkan sesi aplikasi... (Percobaan ${nativePollAttempts})`);
+
+                        try {
+                            const freshIntentUrl = await refreshNativeLaunch("Menyiapkan sesi aplikasi...");
+                            if (freshIntentUrl) {
+                                setStatus(isWindows
+                                    ? "Aplikasi Windows siap. Tekan Open App untuk lanjut."
+                                    : "Aplikasi siap. Tekan Open App untuk lanjut.");
+                                
+                                if (nativePollTimer) {
+                                    clearInterval(nativePollTimer);
+                                    nativePollTimer = null;
+                                }
+
+                                if (shouldAutoLaunchApp()) {
+                                    setStatus("Membuka aplikasi Cloudgime...");
+                                    openNativeApp(freshIntentUrl);
+                                    window.setTimeout(() => {
+                                        if (hidden) return;
+                                        setStatus(isWindows
+                                            ? "Aplikasi belum muncul di depan. Tekan Open App lagi atau pastikan aplikasinya sudah terpasang."
+                                            : "Aplikasi belum muncul di depan. Tekan Open App lagi.");
+                                    }, 1600);
+                                }
+                            } else {
+                                setStatus("Aplikasi native belum siap.");
+                            }
+                        } catch (error) {
+                            console.warn("Native launch token poll failed:", error);
+                            let errStr = String(error?.message || "").toLowerCase();
+                            let signalText = "502 Bad Gateway";
+                            if (errStr.includes("404")) {
+                                signalText = "404 Not Found";
+                            } else if (errStr.includes("403")) {
+                                signalText = "403 Forbidden";
+                            } else if (errStr.includes("504")) {
+                                signalText = "504 Gateway Timeout";
+                            } else if (errStr.includes("500")) {
+                                signalText = "500 Internal Error";
+                            }
+                            setStatus(`Menunggu sinyal host siap... (Status: ${signalText})`);
+                        }
+                    };
+
+                    poll();
+                    nativePollTimer = setInterval(poll, 2500);
+                };
+
                 if (existingLaunchToken) {
                     intentUrl = buildExistingIntentUrl();
                     syncLinks();
                     setStatus(isWindows ? "Aplikasi Windows siap dibuka." : "Aplikasi siap dibuka.");
-                } else {
-                    setStatus("Menyiapkan sesi aplikasi...");
-                }
-
-                if (!existingLaunchToken) {
-                    try {
-                        const freshIntentUrl = await refreshNativeLaunch("Menyiapkan sesi aplikasi...");
-                        if (freshIntentUrl) {
+                    if (shouldAutoLaunchApp() && intentUrl) {
+                        setStatus("Membuka aplikasi Cloudgime...");
+                        openNativeApp(intentUrl);
+                        window.setTimeout(() => {
+                            if (hidden) return;
                             setStatus(isWindows
-                                ? "Aplikasi Windows siap. Tekan Open App untuk lanjut."
-                                : "Aplikasi siap. Tekan Open App untuk lanjut.");
-                        } else {
-                            setStatus("Aplikasi native belum siap.");
-                        }
-                    } catch (error) {
-                        console.error(error);
-                        intentUrl = null;
-                        syncLinks();
-                        setStatus("Sesi aplikasi belum berhasil disiapkan.");
+                                ? "Aplikasi belum muncul di depan. Tekan Open App lagi atau pastikan aplikasinya sudah terpasang."
+                                : "Aplikasi belum muncul di depan. Tekan Open App lagi.");
+                        }, 1600);
                     }
+                } else {
+                    startPollingNativeLaunch();
                 }
 
                 if (openAppLink) {
@@ -520,21 +569,6 @@
                         navigateTopLevel(target);
                     });
                 }
-
-                if (!shouldAutoLaunchApp() || !intentUrl) {
-                    return;
-                }
-
-                setStatus("Membuka aplikasi Cloudgime...");
-                openNativeApp(intentUrl);
-                window.setTimeout(() => {
-                    if (hidden) {
-                        return;
-                    }
-                    setStatus(isWindows
-                        ? "Aplikasi belum muncul di depan. Tekan Open App lagi atau pastikan aplikasinya sudah terpasang."
-                        : "Aplikasi belum muncul di depan. Tekan Open App lagi.");
-                }, 1600);
             });
 
             window.addEventListener("pageshow", (event) => {

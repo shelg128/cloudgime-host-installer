@@ -129,6 +129,9 @@ $TurnUsername = Resolve-SecretOverride -CurrentValue $TurnUsername -EnvName "ML_
 $TurnCredential = Resolve-SecretOverride -CurrentValue $TurnCredential -EnvName "ML_TURN_CREDENTIAL"
 $WebRtcNat1To1Ips = Resolve-StringOverride -CurrentValue $WebRtcNat1To1Ips -EnvName "ML_WEBRTC_NAT_1TO1_IPS"
 $WebRtcNat1To1CandidateType = Resolve-StringOverride -CurrentValue $WebRtcNat1To1CandidateType -EnvName "ML_WEBRTC_NAT_1TO1_CANDIDATE_TYPE"
+if ([string]::IsNullOrWhiteSpace($WebRtcNat1To1Ips) -and -not [string]::IsNullOrWhiteSpace($TurnHost)) {
+    $WebRtcNat1To1Ips = $TurnHost
+}
 $SunshineUsername = Resolve-SecretOverride -CurrentValue $SunshineUsername -EnvName "ML_SUNSHINE_USERNAME"
 $SunshinePassword = Resolve-SecretOverride -CurrentValue $SunshinePassword -EnvName "ML_SUNSHINE_PASSWORD"
 

@@ -5033,74 +5033,87 @@ pub async fn toggle_dual_stream(
     session: State<'_, AppSession>,
 ) -> Result<ActionOutcome, String> {
     ensure_unlocked(&session)?;
-    let _bundle_root = resolve_bundle_root()?;
+    let bundle_root = resolve_bundle_root()?;
+    let bundle_root_str = bundle_root.to_string_lossy().replace('\\', "\\\\");
 
     let script = if enabled {
-        r#"
+        format!(
+            r#"
 $ErrorActionPreference = 'Stop'
 $paths = @("C:\VirtualDisplayDriver\vdd_settings.xml", "D:\binary\display\vdd_settings.xml")
-foreach ($path in $paths) {
-    if (Test-Path $path) {
+foreach ($path in $paths) {{
+    if (Test-Path $path) {{
         $content = Get-Content $path -Raw
         $content = $content -replace '<count>[0-9]+</count>', '<count>2</count>'
         $content | Set-Content $path -Force
-    }
-}
+    }}
+}}
 $device = Get-PnpDevice -FriendlyName "*Virtual Display Driver*" -ErrorAction SilentlyContinue
-if ($device) {
+if ($device) {{
     Disable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false
     Start-Sleep -Seconds 1
     Enable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false
-}
-$serverDir = "C:\ProgramData\Cloudgime\Host\moonlight\server"
-if (Test-Path $serverDir) {
+}}
+$serverDir = "{}\moonlight\server"
+if (Test-Path $serverDir) {{
     "forced" | Set-Content (Join-Path $serverDir "force-wgc.txt") -Force
-}
+}}
 Stop-Service -Name CloudgimeRuntime-Host -Force -ErrorAction SilentlyContinue
 Set-Service -Name CloudgimeRuntime-Host -StartupType Disabled -ErrorAction SilentlyContinue
 Stop-Process -Name sunshine -Force -ErrorAction SilentlyContinue
 $currentUser = (Get-CimInstance Win32_ComputerSystem).UserName
-if ($currentUser) { $currentUser = $currentUser.Split('\')[-1] } else { $currentUser = [Environment]::UserName }
-$action = New-ScheduledTaskAction -Execute "C:\ProgramData\Cloudgime\Host\sunshine\sunshine.exe" -WorkingDirectory "C:\ProgramData\Cloudgime\Host\sunshine"
+if ($currentUser) {{ $currentUser = $currentUser.Split('\')[-1] }} else {{ $currentUser = [Environment]::UserName }}
+$action = New-ScheduledTaskAction -Execute "{}\sunshine\sunshine.exe" -WorkingDirectory "{}\sunshine"
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 Unregister-ScheduledTask -TaskName "CloudgimeUserSunshine" -Confirm:$false -ErrorAction SilentlyContinue
 Register-ScheduledTask -TaskName "CloudgimeUserSunshine" -Action $action -Trigger $trigger -User $currentUser -ErrorAction SilentlyContinue
 Start-ScheduledTask -TaskName "CloudgimeUserSunshine" -ErrorAction SilentlyContinue
-$helper = "C:\ProgramData\Cloudgime\Host\moonlight\server\display-prepare-helper.exe"
-if (Test-Path $helper) {
-    & $helper preflight --bundle-root "C:\ProgramData\Cloudgime\Host" --refresh
-}
-        "#
+$helper = "{}\moonlight\server\display-prepare-helper.exe"
+if (Test-Path $helper) {{
+    & $helper preflight --bundle-root "{}" --refresh
+}}
+"#,
+            bundle_root_str,
+            bundle_root_str,
+            bundle_root_str,
+            bundle_root_str,
+            bundle_root_str
+        )
     } else {
-        r#"
+        format!(
+            r#"
 $ErrorActionPreference = 'Stop'
 $paths = @("C:\VirtualDisplayDriver\vdd_settings.xml", "D:\binary\display\vdd_settings.xml")
-foreach ($path in $paths) {
-    if (Test-Path $path) {
+foreach ($path in $paths) {{
+    if (Test-Path $path) {{
         $content = Get-Content $path -Raw
         $content = $content -replace '<count>[0-9]+</count>', '<count>1</count>'
         $content | Set-Content $path -Force
-    }
-}
+    }}
+}}
 $device = Get-PnpDevice -FriendlyName "*Virtual Display Driver*" -ErrorAction SilentlyContinue
-if ($device) {
+if ($device) {{
     Disable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false
     Start-Sleep -Seconds 1
     Enable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false
-}
-$wgcFile = "C:\ProgramData\Cloudgime\Host\moonlight\server\force-wgc.txt"
-if (Test-Path $wgcFile) {
+}}
+$wgcFile = "{}\moonlight\server\force-wgc.txt"
+if (Test-Path $wgcFile) {{
     Remove-Item $wgcFile -Force
-}
+}}
 Unregister-ScheduledTask -TaskName "CloudgimeUserSunshine" -Confirm:$false -ErrorAction SilentlyContinue
 Stop-Process -Name sunshine -Force -ErrorAction SilentlyContinue
 Set-Service -Name CloudgimeRuntime-Host -StartupType Automatic -ErrorAction SilentlyContinue
 Start-Service -Name CloudgimeRuntime-Host -ErrorAction SilentlyContinue
-$helper = "C:\ProgramData\Cloudgime\Host\moonlight\server\display-prepare-helper.exe"
-if (Test-Path $helper) {
-    & $helper preflight --bundle-root "C:\ProgramData\Cloudgime\Host" --refresh
-}
-        "#
+$helper = "{}\moonlight\server\display-prepare-helper.exe"
+if (Test-Path $helper) {{
+    & $helper preflight --bundle-root "{}" --refresh
+}}
+"#,
+            bundle_root_str,
+            bundle_root_str,
+            bundle_root_str
+        )
     };
 
     let mut cmd = Command::new("powershell");

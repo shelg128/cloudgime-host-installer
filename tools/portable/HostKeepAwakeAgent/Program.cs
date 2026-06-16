@@ -512,6 +512,10 @@ internal static class Program
         snapshot.Capability = ReadCapabilityProfileSnapshot(capabilityPath);
         snapshot.TaskHealth = ReadTaskHealthSnapshot(taskHealthPath);
 
+        snapshot.WgcForced = File.Exists(Path.Combine(serverRoot, "force-wgc.txt")) ||
+                             (string.Equals(snapshot.Capability.SelectedCapture, "wgc", StringComparison.OrdinalIgnoreCase) &&
+                              string.Equals(snapshot.Capability.SelectedCaptureReason, "forced_by_user", StringComparison.OrdinalIgnoreCase));
+
         snapshot.LifecyclePhase = FirstNonEmpty(snapshot.Supervisor.LifecyclePhase, "unknown");
         snapshot.LifecycleReason = snapshot.Supervisor.LifecycleReason;
         snapshot.SupervisorStateFresh = snapshot.Supervisor.UpdatedAtUnixMs is long updatedAt
@@ -537,6 +541,15 @@ internal static class Program
 
     private static HostHealthAssessment AssessHostHealth(HostHealthSnapshot snapshot, HostSelfHealState state)
     {
+        if (snapshot.WgcForced)
+        {
+            if (snapshot.SunshineReady)
+            {
+                return new HostHealthAssessment(true, "ready", "host_ready_wgc", HostSelfHealAction.None);
+            }
+            return new HostHealthAssessment(false, "sunshine_down", "sunshine_not_ready_wgc", HostSelfHealAction.RestartRuntime);
+        }
+
         if (snapshot.LocalHttpReady
             && snapshot.SunshineReady
             && !string.Equals(snapshot.LifecyclePhase, "failed", StringComparison.OrdinalIgnoreCase))
@@ -620,6 +633,15 @@ internal static class Program
         if (action == HostSelfHealAction.PrepareHost
             && snapshot.DisplayStableForMttVdd)
         {
+            if (snapshot.WgcForced)
+            {
+                if (snapshot.HostServiceState != "running")
+                {
+                    return HostSelfHealAction.StartService;
+                }
+                return HostSelfHealAction.RestartRuntime;
+            }
+
             if (snapshot.HostServiceState != "running" || snapshot.RuntimeServiceState != "running")
             {
                 return HostSelfHealAction.StartService;
@@ -634,6 +656,11 @@ internal static class Program
                     && string.Equals(state.LastAction, "restart_runtime", StringComparison.OrdinalIgnoreCase)
                     && string.Equals(state.LastAssessment, assessment.Assessment, StringComparison.OrdinalIgnoreCase))))
         {
+            if (snapshot.WgcForced)
+            {
+                return HostSelfHealAction.RestartRuntime;
+            }
+
             if (snapshot.DisplayStableForMttVdd)
             {
                 return HostSelfHealAction.RestartRuntime;
@@ -647,6 +674,11 @@ internal static class Program
             && state.ConsecutiveUnhealthyCycles >= SelfHealEscalationCycleThreshold
             && !snapshot.LocalHttpReady)
         {
+            if (snapshot.WgcForced)
+            {
+                return HostSelfHealAction.None;
+            }
+
             if (snapshot.DisplayStableForMttVdd)
             {
                 return HostSelfHealAction.StartService;
@@ -709,6 +741,25 @@ internal static class Program
 
     private static Task<HostActionExecutionResult> ExecuteRestartRuntimeAsync(string bundleRoot)
     {
+        var serverRoot = ResolveServerRoot(bundleRoot);
+        var wgcFile = Path.Combine(serverRoot, "force-wgc.txt");
+        if (File.Exists(wgcFile))
+        {
+            Log("WGC is forced. Restarting Sunshine scheduled task (CloudgimeUserSunshine) instead of runtime service...");
+            var result = RunProcessCaptured(
+                "powershell.exe",
+                "-ExecutionPolicy Bypass -NoProfile -NonInteractive -Command \"Stop-Process -Name sunshine -Force -ErrorAction SilentlyContinue; Start-ScheduledTask -TaskName \\\"CloudgimeUserSunshine\\\" -ErrorAction SilentlyContinue\"",
+                Environment.SystemDirectory,
+                TimeSpan.FromSeconds(30));
+            var success = result.ExitCode == 0;
+            return Task.FromResult(new HostActionExecutionResult(
+                "restart_runtime",
+                true,
+                success,
+                success ? "action_ok" : "action_failed",
+                TrimDetail(result.Output, 600)));
+        }
+
         var runtimeAgentPath = Path.Combine(bundleRoot, "moonlight", "system", "cloudgime-runtime-agent.exe");
         if (File.Exists(runtimeAgentPath))
         {
@@ -784,12 +835,15 @@ internal static class Program
             return (false, "mtt_vdd_controller_missing");
         }
 
-        if (!string.Equals(capability.SelectedCapture, "ddx", StringComparison.OrdinalIgnoreCase))
+        var isWgcForced = string.Equals(capability.SelectedCapture, "wgc", StringComparison.OrdinalIgnoreCase) &&
+                          string.Equals(capability.SelectedCaptureReason, "forced_by_user", StringComparison.OrdinalIgnoreCase);
+
+        if (!string.Equals(capability.SelectedCapture, "ddx", StringComparison.OrdinalIgnoreCase) && !isWgcForced)
         {
             return (false, $"selected_capture={capability.SelectedCapture}");
         }
 
-        if (!capability.SelectedCaptureReason.Contains("virtual_display_driver", StringComparison.OrdinalIgnoreCase))
+        if (!isWgcForced && !capability.SelectedCaptureReason.Contains("virtual_display_driver", StringComparison.OrdinalIgnoreCase))
         {
             return (false, $"selected_capture_reason={capability.SelectedCaptureReason}");
         }
@@ -2077,6 +2131,7 @@ internal static class Program
         public long ObservedAtUnixMs { get; set; }
         public bool HostInstallerPresent { get; set; }
         public bool RuntimeAgentPresent { get; set; }
+        public bool WgcForced { get; set; }
         public string HostServiceState { get; set; } = string.Empty;
         public string RuntimeServiceState { get; set; } = string.Empty;
         public bool LocalHttpReady { get; set; }
