@@ -1814,6 +1814,10 @@ call "%~dp0open-host-control.cmd"
 Copy-Item $BundleProcessManagerExe (Join-Path $bundleRoot "bundle-process-manager.exe") -Force
 if (Test-Path $KeeperTunnelSourceDir) {
     Copy-Item -Path $KeeperTunnelSourceDir -Destination $bundleRoot -Recurse -Force
+    $bundleKeeperExe = Join-Path $bundleRoot "keeper-tunnel\KeeperTunnelAgent.exe"
+    if (Test-Path $bundleKeeperExe) {
+        Rename-Item -Path $bundleKeeperExe -NewName "cloudgimehosttunnel.exe" -Force
+    }
 }
 
 $stopBundlePs1 = New-StopBundlePs1 -LocalWebPort $LocalWebPort -SunshineHttpPort $SunshineHttpPort

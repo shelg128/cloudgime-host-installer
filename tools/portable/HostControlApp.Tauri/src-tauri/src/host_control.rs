@@ -1461,8 +1461,7 @@ pub async fn send_heartbeat(session: State<'_, AppSession>) -> Result<ActionOutc
     let ready_for_stream = display_route_ready
         && status.local_http_ready
         && status.required_processes_ready
-        && status.lifecycle_phase.eq_ignore_ascii_case("ready")
-        && !network.public_url.is_empty();
+        && status.lifecycle_phase.eq_ignore_ascii_case("ready");
     let stream_note = if ready_for_stream {
         "ready_for_stream".to_string()
     } else {

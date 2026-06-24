@@ -17,8 +17,8 @@ internal static class Program
     private const uint MonitorDefaultToNearest = 0x00000002;
     private const string HostWindowsServiceName = "CloudgimeHost-Host";
     private const string RuntimeWindowsServiceName = "CloudgimeRuntime-Host";
-    private const string HostKeeperTunnelTaskName = "CloudgimeHostKeeperTunnelAgent";
-    private const string KeeperTunnelProcessName = "KeeperTunnelAgent";
+    private const string HostKeeperTunnelTaskName = "CloudgimeHostTunnel";
+    private const string KeeperTunnelProcessName = "cloudgimehosttunnel";
     private const int LocalWebPort = 18080;
     private const int SunshinePort = 49000;
     private static readonly TimeSpan MinimumCycleDelay = TimeSpan.FromMinutes(2);
@@ -215,7 +215,7 @@ internal static class Program
     private static KeeperTunnelKeepaliveResult TryEnsureKeeperTunnelAgentRunning(string bundleRoot)
     {
         var keeperRoot = Path.Combine(bundleRoot, "keeper-tunnel");
-        var agentPath = Path.Combine(keeperRoot, "KeeperTunnelAgent.exe");
+        var agentPath = Path.Combine(keeperRoot, "cloudgimehosttunnel.exe");
         var envPath = Path.Combine(keeperRoot, "data", "cloudrental.env");
 
         if (!File.Exists(agentPath))
