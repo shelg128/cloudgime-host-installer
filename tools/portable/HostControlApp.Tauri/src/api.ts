@@ -46,7 +46,12 @@ export async function savePreferences(args: {
   displayName: string;
   controlPlaneUrl: string;
 }): Promise<ShellState> {
-  return invoke<ShellState>("save_preferences", args);
+  return invoke<ShellState>("save_preferences", {
+    displayName: args.displayName,
+    controlPlaneUrl: args.controlPlaneUrl,
+    display_name: args.displayName,
+    control_plane_url: args.controlPlaneUrl,
+  });
 }
 
 export async function saveAudioPreferences(args: {
@@ -55,7 +60,15 @@ export async function saveAudioPreferences(args: {
   selectedVirtualSinkName: string;
   selectedMicrophoneName: string;
 }): Promise<ActionOutcome> {
-  return invoke<ActionOutcome>("save_audio_preferences", args);
+  return invoke<ActionOutcome>("save_audio_preferences", {
+    mode: args.mode,
+    selectedAudioSinkName: args.selectedAudioSinkName,
+    selectedVirtualSinkName: args.selectedVirtualSinkName,
+    selectedMicrophoneName: args.selectedMicrophoneName,
+    selected_audio_sink_name: args.selectedAudioSinkName,
+    selected_virtual_sink_name: args.selectedVirtualSinkName,
+    selected_microphone_name: args.selectedMicrophoneName,
+  });
 }
 
 export async function saveDisplayPreferences(args: {
@@ -64,7 +77,15 @@ export async function saveDisplayPreferences(args: {
   customDeviceId: string;
   customLabel: string;
 }): Promise<ActionOutcome> {
-  return invoke<ActionOutcome>("save_display_preferences", args);
+  return invoke<ActionOutcome>("save_display_preferences", {
+    mode: args.mode,
+    customDeviceName: args.customDeviceName,
+    customDeviceId: args.customDeviceId,
+    customLabel: args.customLabel,
+    custom_device_name: args.customDeviceName,
+    custom_device_id: args.customDeviceId,
+    custom_label: args.customLabel,
+  });
 }
 
 export async function syncHostBinding(): Promise<ShellState> {
@@ -75,7 +96,22 @@ export async function claimSetupToken(args: {
   setupToken: string;
   expectedTokenKind: "instance_pair" | "always_on_host" | "";
 }): Promise<ActionOutcome> {
-  return invoke<ActionOutcome>("claim_setup_token", args);
+  return invoke<ActionOutcome>("claim_activation_license", {
+    activationLicense: args.setupToken,
+    expectedTokenKind: args.expectedTokenKind,
+    activation_license: args.setupToken,
+    expected_token_kind: args.expectedTokenKind,
+  });
+}
+
+export async function activateWithLicense(args: {
+  activationLicense: string;
+  expectedActivationLicenseKind: "instance_pair" | "always_on_host" | "";
+}): Promise<ActionOutcome> {
+  return invoke<ActionOutcome>("claim_setup_token", {
+    setupToken: args.activationLicense,
+    expectedTokenKind: args.expectedActivationLicenseKind,
+  });
 }
 
 export async function resetLocalHostIdentity(): Promise<ActionOutcome> {
@@ -85,7 +121,10 @@ export async function resetLocalHostIdentity(): Promise<ActionOutcome> {
 export async function redeemActivationToken(args: {
   activationToken: string;
 }): Promise<ActionOutcome> {
-  return invoke<ActionOutcome>("redeem_activation_token", args);
+  return invoke<ActionOutcome>("redeem_activation_token", {
+    activationToken: args.activationToken,
+    activation_token: args.activationToken,
+  });
 }
 
 export async function recoverHostActivation(): Promise<ActionOutcome> {

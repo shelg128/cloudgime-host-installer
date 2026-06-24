@@ -25,11 +25,11 @@ import {
 } from "lucide-react";
 import "./App.css";
 import {
+  activateWithLicense,
   changeAdminPassword,
   getShellState,
   lockApp,
   launchEmergencyUninstaller,
-  claimSetupToken,
   recoverHostActivation,
   resetLocalHostIdentity,
   runPreflightHost,
@@ -530,7 +530,7 @@ function App() {
     const normalized = raw.replace(/\s+/g, "").trim();
     setSetupTokenInput(normalized);
     if (normalized.length < 12) {
-      pushToast(bi("Paste token host yang valid dulu.", "Paste a valid host token first."));
+      pushToast(bi("Paste Lisensi Aktivasi host yang valid dulu.", "Paste a valid host activation license first."));
       return;
     }
     if (activationProgress) {
@@ -542,8 +542,8 @@ function App() {
     let submitState = shell;
     let submitError = "";
     try {
-      setBusyLabel(bi("Mengklaim setup token...", "Claiming setup token..."));
-      const outcome = await claimSetupToken({ setupToken: normalized, expectedTokenKind: "" });
+      setBusyLabel(bi("Mengaktifkan Lisensi Aktivasi...", "Activating license..."));
+      const outcome = await activateWithLicense({ activationLicense: normalized, expectedActivationLicenseKind: "" });
       submitState = outcome.state;
       applyShellState(outcome.state);
       appendActivity(outcome.message);
@@ -572,15 +572,15 @@ function App() {
       setActivationProgress(null);
       void handleUploadDiagnostic(
         submitError
-          ? `Setup token claim did not complete: ${submitError}`
-          : "Setup token claim did not complete after monitor flow.",
+          ? `Activation license flow did not complete: ${submitError}`
+          : "Activation license flow did not complete after monitor flow.",
         true,
       );
       pushToast(
         submitError ||
           bi(
-            "Claim setup token belum selesai. Tunggu beberapa detik lalu klik Refresh Status bila perlu.",
-            "Setup token claim did not finish yet. Wait a few seconds, then click Refresh Status if needed.",
+            "Aktivasi Lisensi belum selesai. Tunggu beberapa detik lalu klik Refresh Status bila perlu.",
+            "Activation license flow did not finish yet. Wait a few seconds, then click Refresh Status if needed.",
           ),
       );
     }
@@ -601,7 +601,7 @@ function App() {
                 void handleClaimSetupToken();
               }
             }}
-            placeholder={bi("Paste Setup / Pairing Token disini", "Paste Setup / Pairing Token here")}
+            placeholder={bi("Paste Lisensi Aktivasi di sini", "Paste Activation License here")}
           />
           <button
             type="button"
@@ -610,7 +610,7 @@ function App() {
             disabled={setupTokenInput.trim().length < 12 || disabled}
           >
             <KeyRound size={16} />
-            {bi("Claim Token", "Claim Token")}
+            {bi("Aktivasi Aplikasi", "Activate App")}
           </button>
         </div>
       </div>
@@ -623,8 +623,8 @@ function App() {
     }
     const confirmed = window.confirm(
       bi(
-        "Reset identitas lokal host ini? Token/runtime lama akan dikosongkan, route publik lama dibersihkan, lalu host harus memakai token Instance Pair atau Always-On Host baru.",
-        "Reset this host's local identity? The old token/runtime state will be cleared, the old public route will be emptied, and this host must use a fresh Instance Pair or Always-On Host token.",
+        "Reset identitas lokal host ini? Lisensi/runtime lama akan dikosongkan, route publik lama dibersihkan, lalu host harus memakai Lisensi Aktivasi Instance Pair atau Always-On Host baru.",
+        "Reset this host's local identity? The old license/runtime state will be cleared, the old public route will be emptied, and this host must use a fresh Instance Pair or Always-On Host license.",
       ),
     );
     if (!confirmed) {
@@ -637,7 +637,7 @@ function App() {
       clearSetupTokenInputs();
       applyShellState(outcome.state);
       appendActivity(outcome.message);
-      pushToast(bi("Identitas lokal direset. Paste token host baru.", "Local identity reset. Paste a fresh host token."));
+      pushToast(bi("Identitas lokal direset. Paste Lisensi Aktivasi host baru.", "Local identity reset. Paste a fresh host activation license."));
     } catch (error) {
       pushToast(extractErrorMessage(error));
     } finally {
@@ -724,8 +724,8 @@ function App() {
     const message =
       source === "setup"
         ? bi(
-            "Setup token diterima. Host Control sedang menyiapkan runtime otomatis.",
-            "Setup token accepted. Host Control is preparing the runtime automatically.",
+            "Lisensi Aktivasi diterima. Host Control sedang menyiapkan runtime otomatis.",
+            "Activation license accepted. Host Control is preparing the runtime automatically.",
           )
         : bi(
             "Aktivasi selesai. Host Control sedang menyiapkan runtime otomatis.",
@@ -869,8 +869,8 @@ function App() {
       setActivationProgress(null);
       pushToast(
         bi(
-          "Host ini sudah aktif. Tidak perlu paste token lagi.",
-          "This host is already activated. No need to paste the token again.",
+          "Host ini sudah aktif. Tidak perlu paste Lisensi Aktivasi lagi.",
+          "This host is already activated. No need to paste the activation license again.",
         ),
       );
       return true;
@@ -1583,8 +1583,8 @@ function App() {
                   <span>{bi("1 · Mode otomatis", "1 · Automatic mode")}</span>
                   <p>
                     {bi(
-                      "Tidak perlu klik setup atau start manual. Paste token Instance Pair atau Always-On Host, lalu Host Control menyiapkan bundle, binding, service, runtime, dan heartbeat otomatis.",
-                      "No manual setup or start click is required. Paste the Instance Pair or Always-On Host token and Host Control prepares the bundle, binding, service, runtime, and heartbeat automatically.",
+                      "Tidak perlu klik setup atau start manual. Paste Lisensi Aktivasi Instance Pair atau Always-On Host, lalu Host Control menyiapkan bundle, binding, service, runtime, dan heartbeat otomatis.",
+                      "No manual setup or start click is required. Paste the Instance Pair or Always-On Host activation license and Host Control prepares the bundle, binding, service, runtime, and heartbeat automatically.",
                     )}
                   </p>
                 </div>
@@ -1593,7 +1593,7 @@ function App() {
                   <span>
                     {shell.runtime.lifecyclePhase === "ready"
                       ? bi("Runtime siap.", "Runtime is ready.")
-                      : bi("Runtime akan dinyalakan otomatis setelah token valid.", "Runtime will start automatically after a valid token.")}
+                      : bi("Runtime akan dinyalakan otomatis setelah Lisensi Aktivasi valid.", "Runtime will start automatically after a valid activation license.")}
                   </span>
                 </div>
               </section>
@@ -1605,11 +1605,11 @@ function App() {
                     {shell.activation.phase === "activated"
                       ? bi(
                           "Host ini sudah aktif. Buka lagi Host Control hanya saat perlu menerbitkan ulang atau memeriksa token.",
-                          "This host is already activated. Reopen Host Control only when you need to reissue or inspect the token.",
+                          "This host is already activated. Reopen Host Control only when you need to reissue or inspect the license.",
                         )
                       : bi(
-                          "Paste token Instance Pair atau Always-On Host dari CloudRental. Host app akan claim binding dan redeem token aktivasi secara otomatis.",
-                          "Paste the Instance Pair or Always-On Host token from CloudRental. The host app will claim the binding and redeem the activation token automatically.",
+                          "Paste Lisensi Aktivasi Instance Pair atau Always-On Host dari CloudRental. Host app akan mengaktifkan binding dan redeem token runtime secara otomatis.",
+                          "Paste the Instance Pair or Always-On Host activation license from CloudRental. The host app will activate the binding and redeem the runtime token automatically.",
                         )}
                   </p>
                 </div>
@@ -1618,12 +1618,12 @@ function App() {
                   <>
                     <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-4 mb-4">
                       <div className="text-xs uppercase tracking-[0.22em] text-emerald-300">
-                        {bi("Setup Token Repair", "Setup Token Repair")}
+                        {bi("Perbaikan Lisensi Aktivasi", "Activation License Repair")}
                       </div>
                       <p className="mt-2 text-sm text-slate-300">
                         {bi(
-                          "Jika host ini perlu di-bind ulang setelah reinstall, paste token Instance Pair atau Always-On Host baru di sini. Host app akan claim dan redeem otomatis.",
-                          "If this host needs to be rebound after reinstall, paste a fresh Instance Pair or Always-On Host token here. The host app will claim and redeem automatically.",
+                          "Jika host ini perlu di-bind ulang setelah reinstall, paste Lisensi Aktivasi Instance Pair atau Always-On Host baru di sini. Host app akan aktif dan redeem otomatis.",
+                          "If this host needs to be rebound after reinstall, paste a fresh Instance Pair or Always-On Host activation license here. The host app will activate and redeem automatically.",
                         )}
                       </p>
                       {renderSetupTokenClaimControls("ghost")}
@@ -1676,12 +1676,12 @@ function App() {
                   <>
                     <div className="rounded-2xl border border-sky-500/20 bg-sky-500/5 px-4 py-4 mb-4">
                       <div className="text-xs uppercase tracking-[0.22em] text-sky-300">
-                        {bi("Setup Token", "Setup Token")}
+                        {bi("Lisensi Aktivasi", "Activation License")}
                       </div>
                       <p className="mt-2 text-sm text-slate-300">
                         {bi(
-                          "Flow baru yang direkomendasikan. Paste token Instance Pair atau Always-On Host dari Cloudrental dan host app akan claim lalu redeem sendiri.",
-                          "Recommended new flow. Paste the Cloudrental Instance Pair or Always-On Host token and the host app will claim and redeem automatically.",
+                          "Flow baru yang direkomendasikan. Paste Lisensi Aktivasi Instance Pair atau Always-On Host dari Cloudrental dan host app akan aktif lalu redeem sendiri.",
+                          "Recommended new flow. Paste the Cloudrental Instance Pair or Always-On Host activation license and the host app will activate and redeem automatically.",
                         )}
                       </p>
                       {renderSetupTokenClaimControls("success")}
@@ -1731,8 +1731,8 @@ function App() {
                   <span>{bi("3 · Runtime otomatis", "3 · Automatic runtime")}</span>
                   <p>
                     {bi(
-                      "Service dan runtime dipicu otomatis setelah token valid. Kontrol manual dipindah ke Perawatan untuk teknisi saja.",
-                      "Service and runtime are triggered automatically after a valid token. Manual controls are moved to Maintenance for technicians only.",
+                      "Service dan runtime dipicu otomatis setelah Lisensi Aktivasi valid. Kontrol manual dipindah ke Perawatan untuk teknisi saja.",
+                      "Service and runtime are triggered automatically after a valid activation license. Manual controls are moved to Maintenance for technicians only.",
                     )}
                   </p>
                 </div>
@@ -1870,8 +1870,8 @@ function App() {
                   <span>{bi("Pengaturan akses terkelola", "Managed access settings")}</span>
                   <p>
                     {bi(
-                      "Admin master menentukan slot PC lewat setup token. Operator lokal hanya menyimpan nama PC dan control plane saat migrasi.",
-                      "Master admin decides the PC slot through the setup token. The local operator only saves the PC name and control plane during migration.",
+                      "Admin master menentukan PC ID lewat Lisensi Aktivasi. Operator lokal hanya menyimpan nama PC dan control plane saat migrasi.",
+                      "Master admin decides the PC ID through the activation license. The local operator only saves the PC name and control plane during migration.",
                     )}
                   </p>
                 </div>
@@ -1903,8 +1903,8 @@ function App() {
                 </div>
                 <p className="field-helper">
                   {bi(
-                    "Mode resmi sekarang: token Instance Pair atau Always-On Host dari control plane, lalu runtime publish route lewat control plane dan keeper tunnel. FRP manual sudah bukan jalur normal.",
-                    "The official mode is now: an Instance Pair or Always-On Host token from the control plane, then the runtime publishes the route through the control plane and keeper tunnel. Manual FRP is no longer the normal path.",
+                    "Mode resmi sekarang: Lisensi Aktivasi Instance Pair atau Always-On Host dari control plane, lalu runtime publish route lewat control plane dan keeper tunnel. FRP manual sudah bukan jalur normal.",
+                    "The official mode is now: an Instance Pair or Always-On Host activation license from the control plane, then the runtime publishes the route through the control plane and keeper tunnel. Manual FRP is no longer the normal path.",
                   )}
                 </p>
               </section>
@@ -3093,10 +3093,10 @@ function buildRecommendedStep(shell: ShellState | null): {
 
   if (shell.activation.phase === "installed_unprepared") {
     return {
-      title: bi("Menunggu setup token", "Waiting for setup token"),
+      title: bi("Menunggu Lisensi Aktivasi", "Waiting for activation license"),
       description: bi(
-        "Paste token host. Host Control akan menyiapkan bundle lokal, runtime, dan health check otomatis.",
-        "Paste the host token. Host Control will prepare the local bundle, runtime, and health checks automatically.",
+        "Paste Lisensi Aktivasi host. Host Control akan menyiapkan bundle lokal, runtime, dan health check otomatis.",
+        "Paste the host activation license. Host Control will prepare the local bundle, runtime, and health checks automatically.",
       ),
       label: bi("Otomatis", "Automatic"),
       icon: Settings2,
@@ -3117,8 +3117,8 @@ function buildRecommendedStep(shell: ShellState | null): {
       return {
         title: bi("Binding masuk, runtime otomatis", "Binding applied, runtime automatic"),
         description: bi(
-          "Setup token sudah mengikat slot PC ini. Host Control akan menyalakan route web stream lokal otomatis.",
-          "The setup token already bound this PC slot. Host Control will start the local web stream route automatically.",
+          "Lisensi Aktivasi sudah mengikat PC ID ini. Host Control akan menyalakan route web stream lokal otomatis.",
+          "The activation license already bound this PC ID. Host Control will start the local web stream route automatically.",
         ),
         label: bi("Otomatis", "Automatic"),
         icon: Play,
@@ -3128,12 +3128,12 @@ function buildRecommendedStep(shell: ShellState | null): {
     }
 
     return {
-      title: bi("Paste host token", "Paste host token"),
+      title: bi("Paste Lisensi Aktivasi", "Paste activation license"),
       description: bi(
-        "Token dibuat dari master admin. Setelah ditempel, binding dan aktivasi berjalan satu arah otomatis.",
-        "The token is generated from master admin. After pasting it, binding and activation run automatically in one direction.",
+        "Lisensi dibuat dari master admin. Setelah ditempel, binding dan aktivasi berjalan satu arah otomatis.",
+        "The license is generated from master admin. After pasting it, binding and activation run automatically in one direction.",
       ),
-      label: bi("Menunggu Token", "Waiting Token"),
+      label: bi("Menunggu Lisensi", "Waiting License"),
       icon: ArrowUpRight,
       variant: "neutral",
       action: "none",
@@ -3207,12 +3207,12 @@ function buildRecommendedStep(shell: ShellState | null): {
 
   if (shell.activation.phase === "revoked") {
     return {
-      title: bi("Token harus diterbitkan ulang", "Token must be reissued"),
+      title: bi("Lisensi harus diterbitkan ulang", "License must be reissued"),
       description: bi(
-        "Host ini sudah direvoke. Buka Host Control dan buat token baru sebelum dijalankan lagi.",
-        "This host was revoked. Open Host Control and issue a fresh token before running it again.",
+        "Host ini sudah direvoke. Buka Host Control dan buat Lisensi Aktivasi baru sebelum dijalankan lagi.",
+        "This host was revoked. Open Host Control and issue a fresh activation license before running it again.",
       ),
-      label: bi("Butuh Token Baru", "Needs New Token"),
+      label: bi("Butuh Lisensi Baru", "Needs New License"),
       icon: ArrowUpRight,
       variant: "danger",
       action: "none",
@@ -3271,8 +3271,8 @@ function buildHero(shell: ShellState | null): {
     return {
       title: bi("AKTIF / SIAGA", "ACTIVATED / STANDBY"),
       subtitle: bi(
-        "Token sudah dipakai. Jalankan runtime host saat PC ini harus menerima sesi.",
-        "Token is redeemed. Start the host runtime when this PC should accept sessions.",
+        "Lisensi sudah dipakai. Jalankan runtime host saat PC ini harus menerima sesi.",
+        "License is redeemed. Start the host runtime when this PC should accept sessions.",
       ),
       badge: bi("Aktivasi terbuka", "Activation unlocked"),
       tone: "warning",
@@ -3284,8 +3284,8 @@ function buildHero(shell: ShellState | null): {
       return {
         title: bi("BINDING OK / BERJALAN", "BOUND / RUNNING"),
         subtitle: bi(
-          "Binding setup token sudah lengkap dan runtime lokal sedang hidup. Jalur open web stream seharusnya bisa dipakai.",
-          "The setup token binding is complete and the local runtime is up. The open web stream route should now be usable.",
+          "Binding Lisensi Aktivasi sudah lengkap dan runtime lokal sedang hidup. Jalur open web stream seharusnya bisa dipakai.",
+          "The activation license binding is complete and the local runtime is up. The open web stream route should now be usable.",
         ),
         badge: bi("Runtime lokal hidup", "Local runtime up"),
         tone: "success",
@@ -3296,19 +3296,19 @@ function buildHero(shell: ShellState | null): {
       return {
         title: bi("BINDING OK / SIAGA", "BOUND / STANDBY"),
         subtitle: bi(
-          "Identity slot PC sudah terikat dari setup token. Jalankan host untuk menghidupkan route web stream lokal.",
-          "The PC slot identity is already bound from the setup token. Start the host to bring the local web stream route online.",
+          "PC ID sudah terikat dari Lisensi Aktivasi. Jalankan host untuk menghidupkan route web stream lokal.",
+          "The PC ID is already bound from the activation license. Start the host to bring the local web stream route online.",
         ),
         badge: bi("Binding lengkap", "Binding complete"),
-        tone: "warning",
+        tone: "success"
       };
     }
 
     return {
-      title: bi("SIAP LOKAL / MENUNGGU TOKEN", "SET UP / WAITING TOKEN"),
+      title: bi("SIAP LOKAL / MENUNGGU LISENSI", "SET UP / WAITING LICENSE"),
       subtitle: bi(
-        "Setup lokal selesai. Buat token di Host Control lalu paste di sini.",
-        "Local setup is done. Generate a token in Host Control and paste it here.",
+        "Setup lokal selesai. Buat Lisensi Aktivasi di Host Control lalu paste di sini.",
+        "Local setup is done. Issue an activation license in Host Control and paste it here.",
       ),
       badge: bi("Siap lokal", "Prepare only"),
       tone: "neutral",
@@ -3331,8 +3331,8 @@ function buildHero(shell: ShellState | null): {
     return {
       title: bi("DICABUT", "REVOKED"),
       subtitle: bi(
-        "Host ini membutuhkan token aktivasi baru dari control plane.",
-        "This host needs a new activation token from the control plane.",
+        "Host ini membutuhkan Lisensi Aktivasi baru dari control plane.",
+        "This host needs a new activation license from the control plane.",
       ),
       badge: bi("Dicabut", "Revoked"),
       tone: "critical",
@@ -3427,10 +3427,10 @@ function createActivationProgress(
       return {
         stage,
         mode: "submitting",
-        title: bi("Memverifikasi token", "Verifying token"),
+        title: bi("Memverifikasi Lisensi Aktivasi", "Verifying activation license"),
         detail: bi(
-          "Memeriksa token baru ke control plane. Klik Activate sekali saja, lalu tunggu prosesnya.",
-          "Checking the new token with the control plane. Click Activate once, then wait for the process to finish.",
+          "Memeriksa Lisensi Aktivasi baru ke control plane. Klik Aktivasi Aplikasi sekali saja, lalu tunggu prosesnya.",
+          "Checking the new activation license with the control plane. Click Activate App once, then wait for the process to finish.",
         ),
         secondsRemaining,
       };
@@ -3440,8 +3440,8 @@ function createActivationProgress(
         mode: "confirming",
         title: bi("Menautkan host", "Binding host"),
         detail: bi(
-          "Token sudah diterima. Cloudgime sedang menautkan host ini. Jangan paste token baru selama proses berjalan.",
-          "The token was accepted. Cloudgime is binding this host now. Do not paste a new token while the process is running.",
+          "Lisensi Aktivasi sudah diterima. Cloudgime sedang menautkan host ini. Jangan paste lisensi baru selama proses berjalan.",
+          "The activation license was accepted. Cloudgime is binding this host now. Do not paste a new license while the process is running.",
         ),
         secondsRemaining,
       };
@@ -3867,13 +3867,13 @@ function describeActivationPhase(phase: string) {
   switch (phase) {
     case "prepared_local":
       return bi(
-        "Langkah berikutnya: buat token di cloudgime.my.id > Settings > Host Control.",
-        "Next step: issue a token in cloudgime.my.id > Settings > Host Control.",
+        "Langkah berikutnya: buat Lisensi Aktivasi di cloudgime.my.id > Settings > Host Control.",
+        "Next step: issue an activation license in cloudgime.my.id > Settings > Host Control.",
       );
     case "locked_waiting_token":
       return bi(
-        "Langkah berikutnya: paste token yang sudah dibuat di sini untuk membuka aksi runtime.",
-        "Next step: paste the issued token here to unlock runtime actions.",
+        "Langkah berikutnya: paste Lisensi Aktivasi yang sudah dibuat di sini untuk membuka aksi runtime.",
+        "Next step: paste the issued activation license here to unlock runtime actions.",
       );
     case "activated":
       return bi(
@@ -3887,13 +3887,13 @@ function describeActivationPhase(phase: string) {
       );
     case "revoked":
       return bi(
-        "Host ini dicabut dan membutuhkan token baru.",
-        "This host is revoked and needs a new token.",
+        "Host ini dicabut dan membutuhkan Lisensi Aktivasi baru.",
+        "This host is revoked and needs a new activation license.",
       );
     default:
       return bi(
-        "Jalankan setup lokal sebelum membuat token.",
-        "Run local setup before you generate a token.",
+        "Jalankan setup lokal sebelum membuat Lisensi Aktivasi.",
+        "Run local setup before you issue an activation license.",
       );
   }
 }

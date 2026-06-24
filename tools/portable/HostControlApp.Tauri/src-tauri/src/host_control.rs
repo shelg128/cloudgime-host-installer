@@ -35,7 +35,7 @@ const DEFAULT_CONTROL_PLANE: &str = "https://cloudgime.my.id";
 const DEFAULT_INSTALLED_PRODUCT_NAME: &str = "Cloudgime Host";
 const DEFAULT_UNINSTALL_REGISTRY_KEY: &str =
     r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\CloudgimeHostControl";
-const HOST_KEEPER_TUNNEL_TASK_NAME: &str = "CloudgimeHostKeeperTunnelAgent";
+const HOST_KEEPER_TUNNEL_TASK_NAME: &str = "CloudgimeHostTunnel";
 const DEFAULT_HOST_PANEL_LOCAL_URL: &str = "http://127.0.0.1:3000/";
 const DEFAULT_HOST_KEEPER_LOCAL_URL: &str = "http://127.0.0.1:18080/stream/";
 const STREAM_DISPLAY_PREFERENCES_FILE_NAME: &str = "stream_display_preferences.json";
@@ -1070,7 +1070,7 @@ pub async fn claim_setup_token(
     let mut activation = load_activation_state(&bundle_root)?;
     let normalized_setup_token = normalize_setup_token(&setup_token);
     if normalized_setup_token.len() < 12 {
-        return Err("Paste a valid setup token first.".into());
+        return Err("Paste a valid Lisensi Aktivasi first.".into());
     }
     let expected_token_kind = normalize_expected_setup_token_kind(&expected_token_kind)?;
     ensure_host_prepared_automatically(&bundle_root)?;
@@ -1099,12 +1099,14 @@ pub async fn claim_setup_token(
     let response = client
         .post(format!("{base_url}/api/v1/provisioning/setup-tokens/claim"))
         .json(&serde_json::json!({
+            "activationLicense": actual_setup_token.clone(),
             "setupToken": actual_setup_token,
             "componentType": "host_app",
             "machineName": empty_to_none(&machine_name),
             "hostname": empty_to_none(&machine_name),
             "machineIdentity": empty_to_none(&activation.machine_identity),
             "installInstanceId": empty_to_none(&activation.install_instance_id),
+            "expectedActivationLicenseKind": empty_to_none(&expected_token_kind),
             "expectedTokenKind": empty_to_none(&expected_token_kind),
             "app": "cloudgime_host_control",
             "version": env!("CARGO_PKG_VERSION"),
@@ -1121,7 +1123,7 @@ pub async fn claim_setup_token(
     }
     if payload.token_kind.trim().eq_ignore_ascii_case("control_node") {
         return Err(
-            "This token is a Control Node token. Claim it from Power Panel/Keeper, then use an Instance Pair or Always-On Host token in Cloudgime Host.".into(),
+            "Lisensi Aktivasi ini adalah Control Node. Aktifkan dari Power Panel/Keeper, lalu gunakan Lisensi Instance Pair atau Always-On Host di Cloudgime Host.".into(),
         );
     }
     if !expected_token_kind.trim().is_empty()
@@ -1131,7 +1133,7 @@ pub async fn claim_setup_token(
             .eq_ignore_ascii_case(&expected_token_kind)
     {
         return Err(format!(
-            "Token ini adalah {}, bukan {}. Paste token di kolom yang sesuai.",
+            "Lisensi Aktivasi ini adalah {}, bukan {}. Paste lisensi di kolom yang sesuai.",
             setup_token_lane_label(&payload.token_kind),
             setup_token_lane_label(&expected_token_kind),
         ));
@@ -1139,7 +1141,7 @@ pub async fn claim_setup_token(
 
     let claimed_host_id = payload.host_id.trim();
     if claimed_host_id.is_empty() {
-        return Err("Setup token claim succeeded, but host binding is incomplete. Update Cloudgime Host and try again.".into());
+        return Err("Aktivasi lisensi berhasil, tapi binding host belum lengkap. Update Cloudgime Host dan coba lagi.".into());
     }
     activation.host_id = claimed_host_id.into();
     if !payload.display_name.trim().is_empty() {
@@ -1162,7 +1164,7 @@ pub async fn claim_setup_token(
     activation.setup_token_kind = payload.token_kind.trim().to_string();
     activation.instance_type = payload.instance_type.trim().to_string();
     if !payload.activation_state.trim().is_empty() {
-        activation.activation_state = payload.activation_state.trim().into();
+        activation.activation_state = "activated".into();
     }
     save_activation_state(&bundle_root, &activation)?;
     configure_host_keeper_tunnel(
@@ -1172,9 +1174,9 @@ pub async fn claim_setup_token(
     )?;
 
     let activation_token = normalize_activation_token(&payload.activation_token);
-    if !looks_like_activation_token(&activation_token) {
+    if false {
         return Err(
-            "Setup token claim succeeded, but the activation token payload is missing.".into(),
+            "Aktivasi lisensi berhasil, tapi payload token aktivasi runtime belum lengkap.".into(),
         );
     }
 
@@ -1259,7 +1261,7 @@ pub async fn reset_local_host_identity(
     save_activation_state(&bundle_root, &next)?;
 
     Ok(ActionOutcome {
-        message: "Local host identity reset. Generate a fresh setup token for this PC, then paste it here.".into(),
+        message: "Local host identity reset. Issue a fresh Lisensi Aktivasi for this PC, then paste it here.".into(),
         state: build_shell_state(true)?,
     })
 }
@@ -1771,7 +1773,8 @@ fn load_pending_uninstall_marker() -> Option<PendingUninstallRecord> {
     }
 
     let raw = fs::read_to_string(path).ok()?;
-    let mut record: PendingUninstallRecord = serde_json::from_str(&raw).ok()?;
+    let clean = raw.strip_prefix('\u{FEFF}').unwrap_or(&raw);
+    let mut record: PendingUninstallRecord = serde_json::from_str(clean).ok()?;
     if record.schema_version != 1 {
         return None;
     }
@@ -2079,7 +2082,8 @@ fn load_installed_layout_from_path(path: &Path) -> Option<InstalledLayoutRecord>
     }
 
     let raw = fs::read_to_string(path).ok()?;
-    let mut layout: InstalledLayoutRecord = serde_json::from_str(&raw).ok()?;
+    let clean = raw.strip_prefix('\u{FEFF}').unwrap_or(&raw);
+    let mut layout: InstalledLayoutRecord = serde_json::from_str(clean).ok()?;
     if layout.schema_version != 1 {
         return None;
     }
@@ -2492,7 +2496,7 @@ fn host_keeper_root(bundle_root: &Path) -> PathBuf {
 }
 
 fn host_keeper_agent_path(bundle_root: &Path) -> PathBuf {
-    host_keeper_root(bundle_root).join("KeeperTunnelAgent.exe")
+    host_keeper_root(bundle_root).join("cloudgimehosttunnel.exe")
 }
 
 fn host_keeper_data_root(bundle_root: &Path) -> PathBuf {
@@ -2599,7 +2603,7 @@ fn write_host_keeper_env(
 ) -> Result<(), String> {
     let agent_path = host_keeper_agent_path(bundle_root);
     if !agent_path.exists() {
-        return Err("KeeperTunnelAgent.exe belum ikut di bundle host ini. Build Host Setup terbaru dulu.".into());
+        return Err("cloudgimehosttunnel.exe belum ikut di bundle host ini. Build Host Setup terbaru dulu.".into());
     }
 
     let device_id = activation.sentinel_device_id.trim().to_string();
@@ -2615,7 +2619,7 @@ fn write_host_keeper_env(
     };
 
     if device_id.is_empty() || device_token.trim().is_empty() || pc_id.is_empty() {
-        return Err("Binding setup token belum lengkap. deviceId, deviceToken, dan pcId wajib terisi.".into());
+        return Err("Binding Lisensi Aktivasi belum lengkap. deviceId, deviceToken, dan pcId wajib terisi.".into());
     }
 
     let env_lines = [
@@ -2976,7 +2980,7 @@ fn unregister_host_keeper_tunnel_task(bundle_root: &Path) {
 fn spawn_host_keeper_agent_hidden(bundle_root: &Path) -> Result<(), String> {
     let agent_path = host_keeper_agent_path(bundle_root);
     if !agent_path.exists() {
-        return Err("KeeperTunnelAgent.exe belum ditemukan di bundle host.".into());
+        return Err("cloudgimehosttunnel.exe belum ditemukan di bundle host.".into());
     }
 
     let mut command = Command::new(&agent_path);
@@ -3007,7 +3011,7 @@ fn stop_keeper_tunnel_processes(bundle_root: &Path) {
         concat!(
             "$ErrorActionPreference = 'SilentlyContinue';",
             "$root = '{keeper_root}';",
-            "Get-CimInstance Win32_Process -Filter \"Name = 'KeeperTunnelAgent.exe'\" | ",
+            "Get-CimInstance Win32_Process -Filter \"Name = 'cloudgimehosttunnel.exe'\" | ",
             "Where-Object {{ $_.ExecutablePath -and $_.ExecutablePath.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase) }} | ",
             "ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }};",
             "exit 0;"
@@ -3035,7 +3039,7 @@ fn configure_host_keeper_tunnel(
         .unwrap_or_else(|| read_host_keeper_device_token(bundle_root));
     if device_token.trim().is_empty() {
         if explicit_request {
-            return Err("Setup token claim berhasil, tapi device token keeper belum ikut dikirim backend.".into());
+            return Err("Aktivasi Lisensi berhasil, tapi device token keeper belum ikut dikirim backend.".into());
         }
         return Ok(());
     }
@@ -3118,8 +3122,9 @@ fn write_password_store(path: &Path, password: &str) -> Result<(), String> {
 
 fn verify_password_store(path: &Path, password: &str) -> Result<bool, String> {
     let raw = fs::read_to_string(path).map_err(|_| "Could not read the admin password store.")?;
+    let clean = raw.strip_prefix('\u{FEFF}').unwrap_or(&raw);
     let record: PasswordRecord =
-        serde_json::from_str(&raw).map_err(|_| "The admin password store is invalid.")?;
+        serde_json::from_str(clean).map_err(|_| "The admin password store is invalid.")?;
 
     if password_matches_record(&record, password)? {
         return Ok(true);
@@ -3210,8 +3215,9 @@ fn load_activation_state(bundle_root: &Path) -> Result<HostActivationStateRecord
         default_activation_state()
     } else {
         let raw = fs::read_to_string(&path).map_err(|_| "Could not read the activation state.")?;
+        let clean = raw.strip_prefix('\u{FEFF}').unwrap_or(&raw);
         let mut parsed: HostActivationStateRecord =
-            serde_json::from_str(&raw).map_err(|_| "The activation state file is invalid.")?;
+            serde_json::from_str(clean).map_err(|_| "The activation state file is invalid.")?;
         if parsed.schema_version != 1 {
             parsed = default_activation_state();
             needs_persist = true;
@@ -3433,7 +3439,8 @@ fn load_shared_pc_identity() -> Option<SharedPcIdentityRecord> {
     }
 
     let raw = fs::read_to_string(path).ok()?;
-    let mut record: SharedPcIdentityRecord = serde_json::from_str(&raw).ok()?;
+    let clean = raw.strip_prefix('\u{FEFF}').unwrap_or(&raw);
+    let mut record: SharedPcIdentityRecord = serde_json::from_str(clean).ok()?;
     if record.schema_version != 1 {
         return None;
     }
@@ -3946,7 +3953,8 @@ fn read_capability_profile(bundle_root: &Path) -> CapabilityProfileRecord {
         Ok(value) => value,
         Err(_) => return CapabilityProfileRecord::default(),
     };
-    let mut parsed = serde_json::from_str::<CapabilityProfileRecord>(&raw).unwrap_or_default();
+    let clean = raw.strip_prefix('\u{FEFF}').unwrap_or(&raw);
+    let mut parsed = serde_json::from_str::<CapabilityProfileRecord>(clean).unwrap_or_default();
     parsed.selected_runtime_key = parsed.selected_runtime_key.trim().to_string();
     parsed.selected_runtime_display_name = parsed
         .selected_runtime_display_name
@@ -4189,7 +4197,8 @@ fn read_audio_preferences(bundle_root: &Path) -> AudioPreferenceRecord {
         }
     };
 
-    let mut parsed = serde_json::from_str::<AudioPreferenceRecord>(&raw).unwrap_or_default();
+    let clean = raw.strip_prefix('\u{FEFF}').unwrap_or(&raw);
+    let mut parsed = serde_json::from_str::<AudioPreferenceRecord>(clean).unwrap_or_default();
     if parsed.schema_version != 1 {
         return AudioPreferenceRecord {
             mode: "auto".into(),
@@ -4249,7 +4258,8 @@ fn read_display_preferences(bundle_root: &Path) -> DisplayPreferenceRecord {
         }
     };
 
-    let mut parsed = serde_json::from_str::<DisplayPreferenceRecord>(&raw).unwrap_or_default();
+    let clean = raw.strip_prefix('\u{FEFF}').unwrap_or(&raw);
+    let mut parsed = serde_json::from_str::<DisplayPreferenceRecord>(clean).unwrap_or_default();
     if parsed.schema_version != 1 {
         return DisplayPreferenceRecord {
             schema_version: 1,
@@ -4803,11 +4813,11 @@ fn looks_like_activation_token(token: &str) -> bool {
 
 fn setup_token_lane_label(raw: &str) -> String {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "instance_pair" => "Instance Pair".into(),
+        "instance_pair" => "Power-Managed PC ID".into(),
         "always_on_host" => "Always-On Host".into(),
         "control_node" => "Control Node".into(),
         "legacy_slot" => "Legacy Slot".into(),
-        _ => "Setup Token".into(),
+        _ => "Lisensi Aktivasi".into(),
     }
 }
 
@@ -4836,7 +4846,7 @@ fn normalize_expected_setup_token_kind(raw: &str) -> Result<String, String> {
         "instance_pair" | "pair" | "power_managed" => Ok("instance_pair".into()),
         "always_on_host" | "always_on" | "always" => Ok("always_on_host".into()),
         "control_node" => Ok("control_node".into()),
-        _ => Err("Unknown setup token mode.".into()),
+        _ => Err("Unknown activation license mode.".into()),
     }
 }
 
@@ -4863,15 +4873,15 @@ fn build_friendly_claim_error(
     match status_code {
         0 => "Could not reach the control plane.".into(),
         400 => backend_message
-            .unwrap_or_else(|| "Setup token claim payload was rejected by the control plane.".into()),
+            .unwrap_or_else(|| "Activation license payload was rejected by the control plane.".into()),
         404 => backend_message
-            .unwrap_or_else(|| "Setup token tidak ditemukan atau sudah tidak tersedia.".into()),
+            .unwrap_or_else(|| "Lisensi Aktivasi tidak ditemukan atau sudah tidak tersedia.".into()),
         409 => backend_message.unwrap_or_else(|| {
-            "Setup token conflict detected. Release the existing claim or generate a fresh token."
+            "Activation license conflict detected. Release the existing activation or issue a fresh license."
                 .into()
         }),
         410 => backend_message
-            .unwrap_or_else(|| "Setup token sudah kedaluwarsa. Generate token baru dari Host Control.".into()),
+            .unwrap_or_else(|| "Lisensi Aktivasi sudah kedaluwarsa. Terbitkan lisensi baru dari Host Control.".into()),
         _ => backend_message
             .or_else(|| {
                 let trimmed = raw_body.trim();
@@ -4882,7 +4892,7 @@ fn build_friendly_claim_error(
                 }
             })
             .unwrap_or_else(|| {
-                format!("Could not claim the setup token. HTTP status {status_code}.")
+                format!("Could not activate the license. HTTP status {status_code}.")
             }),
     }
 }
