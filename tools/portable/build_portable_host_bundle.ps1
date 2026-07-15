@@ -129,9 +129,7 @@ $TurnUsername = Resolve-SecretOverride -CurrentValue $TurnUsername -EnvName "ML_
 $TurnCredential = Resolve-SecretOverride -CurrentValue $TurnCredential -EnvName "ML_TURN_CREDENTIAL"
 $WebRtcNat1To1Ips = Resolve-StringOverride -CurrentValue $WebRtcNat1To1Ips -EnvName "ML_WEBRTC_NAT_1TO1_IPS"
 $WebRtcNat1To1CandidateType = Resolve-StringOverride -CurrentValue $WebRtcNat1To1CandidateType -EnvName "ML_WEBRTC_NAT_1TO1_CANDIDATE_TYPE"
-if ([string]::IsNullOrWhiteSpace($WebRtcNat1To1Ips) -and -not [string]::IsNullOrWhiteSpace($TurnHost)) {
-    $WebRtcNat1To1Ips = $TurnHost
-}
+# NAT 1:1 must be the host's real public address. TURN host is relay infrastructure.
 $SunshineUsername = Resolve-SecretOverride -CurrentValue $SunshineUsername -EnvName "ML_SUNSHINE_USERNAME"
 $SunshinePassword = Resolve-SecretOverride -CurrentValue $SunshinePassword -EnvName "ML_SUNSHINE_PASSWORD"
 
@@ -1428,7 +1426,7 @@ if (Test-Path $HostKeepAwakeAgentProject) {
 if (Test-Path $HostControlTauriPublishScript) {
     Push-Location $HostControlTauriRoot
     try {
-        npm run tauri build | Out-Host
+        npm run tauri build -- --no-bundle | Out-Host
     } finally {
         Pop-Location
     }
@@ -1570,6 +1568,101 @@ echo cloudgime-runtime-agent.exe was not found. 1>&2
 exit /b 1
 "@
 Write-Utf8NoBom -Path (Join-Path $bundleRoot "start-bundle.bat") -Content $startBundle
+
+$ensureHostReady = @'
+$ErrorActionPreference = 'SilentlyContinue'
+
+$bundleRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$agentPath = Join-Path $bundleRoot 'moonlight\system\cloudgime-runtime-agent.exe'
+$statePath = Join-Path $bundleRoot 'moonlight\server\host_activation_state.json'
+$logPath = Join-Path $bundleRoot 'moonlight\server\ensure-host-ready.log'
+$tunnelPath = Join-Path $bundleRoot 'keeper-tunnel\cloudgimehosttunnel.exe'
+
+function Write-EnsureLog([string]$Message) {
+    $line = '[{0}] {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message
+    Add-Content -LiteralPath $logPath -Value $line
+}
+
+function Test-HostReady {
+    $webReady = @(Get-NetTCPConnection -LocalPort 18081 -State Listen).Count -gt 0
+    $streamReady = @(Get-NetTCPConnection -LocalPort 49000 -State Listen).Count -gt 0
+    $tunnelReady = Test-TunnelReady
+    $activationReady = $false
+    if (Test-Path -LiteralPath $statePath) {
+        try {
+            $state = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
+            $activationReady = [bool]$state.LastReadyForStream
+        } catch {
+            $activationReady = $false
+        }
+    }
+    return ($webReady -and $streamReady -and $activationReady -and $tunnelReady)
+}
+
+function Test-TunnelReady {
+    if (-not (Test-Path -LiteralPath $tunnelPath)) {
+        return $true
+    }
+    $tunnelProcess = Get-Process -Name 'cloudgimehosttunnel' | Where-Object {
+        try { $_.Path -ieq $tunnelPath } catch { $false }
+    } | Select-Object -First 1
+    return ($null -ne $tunnelProcess)
+}
+
+function Ensure-TunnelRunning {
+    if (-not (Test-Path -LiteralPath $tunnelPath)) {
+        Write-EnsureLog "tunnel executable missing: $tunnelPath"
+        return
+    }
+    if (Test-TunnelReady) {
+        Write-EnsureLog 'host tunnel already running'
+        return
+    }
+    Write-EnsureLog 'host tunnel not running; starting tunnel'
+    Start-Process -FilePath $tunnelPath -WorkingDirectory (Split-Path -Parent $tunnelPath) -WindowStyle Hidden
+    Start-Sleep -Seconds 8
+}
+
+Start-Sleep -Seconds 20
+
+Ensure-TunnelRunning
+
+if (Test-HostReady) {
+    Write-EnsureLog 'host already ready; no action'
+    exit 0
+}
+
+if (-not (Test-Path -LiteralPath $agentPath)) {
+    Write-EnsureLog "runtime agent missing: $agentPath"
+    exit 1
+}
+
+Write-EnsureLog 'host not ready; starting bundle'
+$process = Start-Process -FilePath $agentPath -ArgumentList @('--bundle-root', $bundleRoot, 'start-bundle') -WindowStyle Hidden -PassThru
+if (-not $process.WaitForExit(120000)) {
+    Write-EnsureLog 'start-bundle did not exit within 120 seconds; leaving spawned runtime state for readiness check'
+    try {
+        Stop-Process -Id $process.Id -Force
+    } catch {
+    }
+} else {
+    Write-EnsureLog "start-bundle exit code: $($process.ExitCode)"
+}
+
+Ensure-TunnelRunning
+
+for ($i = 0; $i -lt 18; $i++) {
+    Start-Sleep -Seconds 5
+    if (Test-HostReady) {
+        Write-EnsureLog 'host ready after fallback start'
+        exit 0
+    }
+}
+
+Write-EnsureLog 'host still not ready after fallback start'
+exit 2
+'@
+Write-Utf8NoBom -Path (Join-Path $bundleRoot "ensure-host-ready.ps1") -Content $ensureHostReady
 
 $stopBundle = @"
 @echo off
@@ -1744,6 +1837,9 @@ if exist "%~dp0host-installer.exe" (
         powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0harden-host-user-daemon-task.ps1" >nul 2>&1
         if not "%ERRORLEVEL%"=="0" exit /b %ERRORLEVEL%
     )
+    if exist "%~dp0ensure-host-ready.ps1" (
+        reg.exe add "HKLM\Software\Microsoft\Windows\CurrentVersion\Run" /v "CloudgimeHostReadyFallback" /t REG_SZ /d "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"%~dp0ensure-host-ready.ps1\"" /f >nul 2>&1
+    )
     exit /b 0
 )
 echo host-installer.exe was not found. 1>&2
@@ -1756,6 +1852,7 @@ $uninstallService = @"
 setlocal
 if exist "%~dp0host-installer.exe" (
     "%~dp0host-installer.exe" --bundle-root "%~dp0." uninstall-service
+    reg.exe delete "HKLM\Software\Microsoft\Windows\CurrentVersion\Run" /v "CloudgimeHostReadyFallback" /f >nul 2>&1
     exit /b %ERRORLEVEL%
 )
 echo host-installer.exe was not found. 1>&2

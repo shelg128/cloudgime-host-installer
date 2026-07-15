@@ -1,9 +1,11 @@
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import {
   Activity,
+  AlertTriangle,
   ArrowUpRight,
+  CheckCircle,
   Copy,
   FolderOpen,
   Globe,
@@ -22,6 +24,7 @@ import {
   Volume2,
   Wifi,
   Wrench,
+  XCircle,
 } from "lucide-react";
 import "./App.css";
 import {
@@ -50,6 +53,7 @@ import type {
   HostUserDaemonTaskHealth,
   RailKey,
   ShellState,
+  StreamReadinessView,
   WindowsNativeDiagnosticReportEntry,
 } from "./types";
 
@@ -64,6 +68,7 @@ function buildRailItems(): { key: RailKey; label: string; icon: typeof Settings2
     { key: "access", label: bi("Akses", "Access"), icon: Globe },
     { key: "audio", label: bi("Audio", "Audio"), icon: Volume2 },
     { key: "display", label: bi("Display", "Display"), icon: LaptopMinimal },
+    { key: "kesiapan", label: bi("Kesiapan", "Readiness"), icon: ShieldCheck },
     { key: "health", label: bi("Kesehatan", "Health"), icon: HeartPulse },
     { key: "maintenance", label: bi("Perawatan", "Maintenance"), icon: Wrench },
     { key: "support", label: bi("Bantuan", "Support"), icon: LifeBuoy },
@@ -1524,6 +1529,43 @@ function App() {
                     : bi("Tidak ada", "Missing")}
                 </span>
               </div>
+              <div className="identity-row">
+                <span className="identity-label">{bi("Lisensi", "License")}</span>
+                <strong>
+                  {shell.activation.applicationActivationId ||
+                    shell.activation.applicationType ||
+                    bi("Belum dari lisensi", "Not license-bound")}
+                </strong>
+                <span
+                  className={`mini-pill ${
+                    shell.activation.applicationActivationId ? "success" : "neutral"
+                  }`}
+                >
+                  {shell.activation.applicationType || bi("Belum", "Missing")}
+                </span>
+              </div>
+              <div className="identity-row">
+                <span className="identity-label">{bi("Assignment", "Assignment")}</span>
+                <strong>
+                  {[
+                    shell.activation.hostHttpPort > 0
+                      ? `HOST_HTTP ${shell.activation.hostHttpPort}`
+                      : "",
+                    shell.activation.hostStreamUdpStart > 0 && shell.activation.hostStreamUdpEnd > 0
+                      ? `UDP ${shell.activation.hostStreamUdpStart}-${shell.activation.hostStreamUdpEnd}`
+                      : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" · ") || bi("Belum diterima", "Not received")}
+                </strong>
+                <span
+                  className={`mini-pill ${
+                    shell.activation.hostStreamProxyRoute ? "success" : "neutral"
+                  }`}
+                >
+                  {shell.activation.hostStreamProxyRoute ? bi("Route siap", "Route set") : bi("Route kosong", "No route")}
+                </span>
+              </div>
               <div className="identity-row identity-row-note">
                 <span className="identity-label">{bi("Alur", "Flow")}</span>
                 <strong>{describeActivationLaneNote(shell)}</strong>
@@ -2524,6 +2566,44 @@ function App() {
             </div>
           )}
 
+          {activeRail === "kesiapan" && shell && (
+            <div className="page-grid">
+              <StreamReadinessPanel
+                readiness={shell.streamReadiness}
+                onFix={(action) => {
+                  switch (action) {
+                    case "open_control_plane":
+                      void openUrl(shell.activation.controlPlaneUrl || "https://cloudgime.my.id");
+                      break;
+                    case "recover_activation":
+                      void handleRecoverHostActivation();
+                      break;
+                    case "refresh":
+                      void refreshState(bi("Refresh Host Control...", "Refreshing Host Control..."));
+                      break;
+                    case "fix_preflight":
+                      void runPreflight(true);
+                      break;
+                    case "start_runtime":
+                      void runAction("start_host", bi("Memulai runtime...", "Starting runtime..."));
+                      break;
+                    case "restart_runtime":
+                      void runAction("restart_runtime", bi("Merestart runtime...", "Restarting runtime..."));
+                      break;
+                    case "sync_tunnel":
+                      void (async () => {
+                        try { const s = await syncHostBinding(); applyShellState(s); } catch (e) {}
+                      })();
+                      break;
+                    case "heartbeat":
+                      void handleSendHeartbeat();
+                      break;
+                  }
+                }}
+              />
+            </div>
+          )}
+
           {activeRail === "maintenance" && (
             <div className="page-grid two-column">
               <section className="glass-card section-card">
@@ -3000,6 +3080,110 @@ function MetricCard({
       </div>
       <strong>{value}</strong>
     </div>
+  );
+}
+
+function StreamReadinessPanel({
+  readiness,
+  onFix,
+}: {
+  readiness: StreamReadinessView;
+  onFix: (action: string) => void;
+}) {
+  const [fixing, setFixing] = useState<string | null>(null);
+  const errorItems = useMemo(
+    () => readiness.components.filter((c) => c.status !== "ok"),
+    [readiness]
+  );
+
+  const handleFixAll = useCallback(async () => {
+    const toFix = readiness.components.filter(
+      (c) => c.fixAction && c.status !== "ok"
+    );
+    for (let i = 0; i < toFix.length; i++) {
+      setFixing(`${i + 1}/${toFix.length} ${toFix[i].label}`);
+      onFix(toFix[i].fixAction);
+      await new Promise((r) => setTimeout(r, 2500));
+    }
+    setFixing(null);
+  }, [readiness, onFix]);
+
+  const okCount = readiness.components.filter((c) => c.status === "ok").length;
+  const totalCount = readiness.components.length;
+
+  return (
+    <>
+      <section className="glass-card section-card span-all">
+        <div className="section-heading">
+          <span>{bi("Kesiapan Stream", "Stream Readiness")}</span>
+          <p>
+            {readiness.allReady
+              ? bi("Seluruh komponen siap. Stream seharusnya bisa langsung digunakan.", "All components ready. Stream should work immediately.")
+              : bi("Komponen bertanda merah harus diperbaiki sebelum stream bisa digunakan.", "Red-marked components must be fixed before streaming.")}
+          </p>
+        </div>
+        <div className={`readiness-summary ${readiness.allReady ? "all-ready" : "not-ready"}`}>
+          <span className="readiness-icon">{readiness.allReady ? "✓" : "!"}</span>
+          <span>
+            {readiness.allReady
+              ? bi("Semua sistem siap", "All systems ready")
+              : `${okCount}/${totalCount} ${bi("komponen siap", "components ready")}${fixing ? ` — ${bi("memperbaiki:", "fixing:")} ${fixing}` : ""}`}
+          </span>
+          {errorItems.length > 0 && !fixing && (
+            <button
+              type="button"
+              className="action-button warning fix-all-btn"
+              onClick={handleFixAll}
+            >
+              <Wrench size={14} />
+              <span>{bi("Perbaiki Semua", "Fix All")}</span>
+            </button>
+          )}
+        </div>
+      </section>
+
+      <div className="readiness-checklist span-all">
+        {readiness.components.map((comp) => {
+          const badgeClass =
+            comp.status === "ok"
+              ? "ready-ok"
+              : comp.status === "warning"
+                ? "ready-warn"
+                : "ready-err";
+          const isFixing = Boolean(fixing && comp.status !== "ok" && comp.fixAction);
+          return (
+            <div key={comp.key} className={`readiness-item ${badgeClass} ${isFixing ? "fixing" : ""}`}>
+              <div className="readiness-item-icon">
+                {comp.status === "ok" ? (
+                  <CheckCircle size={18} />
+                ) : comp.status === "warning" ? (
+                  <AlertTriangle size={18} />
+                ) : isFixing ? (
+                  <RefreshCw size={18} className="spin-icon" />
+                ) : (
+                  <XCircle size={18} />
+                )}
+              </div>
+              <div className="readiness-item-body">
+                <strong>{comp.label}</strong>
+                <p>{comp.message}</p>
+              </div>
+              {comp.fixAction && onFix && (
+                <button
+                  type="button"
+                  className={`action-button ${comp.status === "error" ? "danger" : "warning"}`}
+                  onClick={() => onFix(comp.fixAction)}
+                  disabled={Boolean(fixing)}
+                >
+                  <Wrench size={14} />
+                  <span>{comp.fixLabel}</span>
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </>
   );
 }
 

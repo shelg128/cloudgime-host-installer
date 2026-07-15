@@ -19,8 +19,8 @@ internal static class Program
     private const string RuntimeWindowsServiceName = "CloudgimeRuntime-Host";
     private const string HostKeeperTunnelTaskName = "CloudgimeHostTunnel";
     private const string KeeperTunnelProcessName = "cloudgimehosttunnel";
-    private const int LocalWebPort = 18080;
-    private const int SunshinePort = 49000;
+    private const int DefaultLocalWebPort = 18080;
+    private const int DefaultSunshinePort = 49000;
     private static readonly TimeSpan MinimumCycleDelay = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan MaximumCycleDelay = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan MinimumInputIdleBeforeNudge = TimeSpan.FromSeconds(120);
@@ -296,6 +296,8 @@ internal static class Program
         }
         var snapshot = await CollectHostHealthSnapshotAsync(bundleRoot, serverRoot, cancellationToken);
 
+        NormalizeSunshineDisplayOutput(bundleRoot);
+
         // Unlock locked console session if Sunshine is down and we are in system mode
         if (!snapshot.SunshineReady && options.Mode == AgentMode.System)
         {
@@ -502,9 +504,10 @@ internal static class Program
             StreamRecentlyActive = IsStreamRecentlyActive(bundleRoot)
         };
 
+        var runtimePorts = ReadRuntimePorts(serverRoot);
         var probes = await Task.WhenAll(
-            ProbeTcpPortAsync("127.0.0.1", LocalWebPort, PortProbeTimeout, cancellationToken),
-            ProbeTcpPortAsync("127.0.0.1", SunshinePort, PortProbeTimeout, cancellationToken));
+            ProbeTcpPortAsync("127.0.0.1", runtimePorts.LocalWebPort, PortProbeTimeout, cancellationToken),
+            ProbeTcpPortAsync("127.0.0.1", runtimePorts.SunshinePort, PortProbeTimeout, cancellationToken));
         snapshot.LocalHttpReady = probes[0];
         snapshot.SunshineReady = probes[1];
 
@@ -604,11 +607,12 @@ internal static class Program
 
         if (string.Equals(snapshot.LifecyclePhase, "failed", StringComparison.OrdinalIgnoreCase))
         {
-            return new HostHealthAssessment(
-                false,
-                "lifecycle_failed",
-                FirstNonEmpty(snapshot.LifecycleReason, "lifecycle_failed"),
-                HostSelfHealAction.RestartRuntime);
+            var reason = FirstNonEmpty(snapshot.LifecycleReason, "lifecycle_failed");
+            var isDisplay = reason.Contains("0x887A", StringComparison.OrdinalIgnoreCase)
+                || reason.Contains("output device", StringComparison.OrdinalIgnoreCase)
+                || reason.Contains("capture", StringComparison.OrdinalIgnoreCase);
+            return new HostHealthAssessment(false, "lifecycle_failed", reason,
+                isDisplay ? HostSelfHealAction.PrepareHost : HostSelfHealAction.RestartRuntime);
         }
 
         if (!snapshot.SupervisorStateFresh)
@@ -633,6 +637,14 @@ internal static class Program
         if (action == HostSelfHealAction.PrepareHost
             && snapshot.DisplayStableForMttVdd)
         {
+            if (snapshot.LifecyclePhase == "failed"
+                && ((snapshot.LifecycleReason ?? "").Contains("0x887A", StringComparison.OrdinalIgnoreCase)
+                    || (snapshot.LifecycleReason ?? "").Contains("output device", StringComparison.OrdinalIgnoreCase)
+                    || (snapshot.LifecycleReason ?? "").Contains("capture", StringComparison.OrdinalIgnoreCase)))
+            {
+                return HostSelfHealAction.PrepareHost;
+            }
+
             if (snapshot.WgcForced)
             {
                 if (snapshot.HostServiceState != "running")
@@ -1342,6 +1354,67 @@ internal static class Program
         }
     }
 
+    private readonly record struct RuntimePorts(int LocalWebPort, int SunshinePort);
+
+    private static RuntimePorts ReadRuntimePorts(string serverRoot)
+    {
+        var localWebPort = DefaultLocalWebPort;
+        var sunshinePort = DefaultSunshinePort;
+        var configPath = Path.Combine(serverRoot, "config.json");
+        try
+        {
+            if (!File.Exists(configPath))
+            {
+                return new RuntimePorts(localWebPort, sunshinePort);
+            }
+
+            using var document = JsonDocument.Parse(File.ReadAllBytes(configPath));
+            var root = document.RootElement;
+            if (root.TryGetProperty("web_server", out var webServer))
+            {
+                localWebPort = ParseEndpointPort(JsonString(webServer, "bind_address")) ?? localWebPort;
+            }
+
+            if (root.TryGetProperty("moonlight", out var moonlight))
+            {
+                sunshinePort = JsonInt(moonlight, "default_http_port") ?? sunshinePort;
+            }
+        }
+        catch
+        {
+            return new RuntimePorts(DefaultLocalWebPort, DefaultSunshinePort);
+        }
+
+        return new RuntimePorts(localWebPort, sunshinePort);
+    }
+
+    private static int? ParseEndpointPort(string value)
+    {
+        var trimmed = value.Trim();
+        if (trimmed.Length == 0)
+        {
+            return null;
+        }
+
+        if (Uri.TryCreate($"http://{trimmed}", UriKind.Absolute, out var uri) && IsValidPort(uri.Port))
+        {
+            return uri.Port;
+        }
+
+        var lastColon = trimmed.LastIndexOf(':');
+        if (lastColon >= 0
+            && lastColon + 1 < trimmed.Length
+            && int.TryParse(trimmed[(lastColon + 1)..], out var parsed)
+            && IsValidPort(parsed))
+        {
+            return parsed;
+        }
+
+        return null;
+    }
+
+    private static bool IsValidPort(int port) => port is >= 1 and <= 65535;
+
     private static async Task<bool> ProbeTcpPortAsync(
         string host,
         int port,
@@ -1515,6 +1588,21 @@ internal static class Program
             JsonValueKind.True => true,
             JsonValueKind.False => false,
             _ => false
+        };
+    }
+
+    private static int? JsonInt(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var value))
+        {
+            return null;
+        }
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.Number when value.TryGetInt32(out var number) => number,
+            JsonValueKind.String when int.TryParse(value.GetString(), out var parsed) => parsed,
+            _ => null
         };
     }
 
@@ -2308,4 +2396,45 @@ internal static class Program
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
         public string DeviceKey;
     }
+
+
+    private static void NormalizeSunshineDisplayOutput(string bundleRoot)
+    {
+        try
+        {
+            var confPath = Path.Combine(bundleRoot, "sunshine", "config", "sunshine.conf");
+            if (!File.Exists(confPath)) return;
+
+            var lines = new List<string>(File.ReadAllLines(confPath));
+            var originalCount = lines.Count;
+            for (int i = lines.Count - 1; i >= 0; i--)
+            {
+                var t = lines[i].TrimStart();
+                if (IsConfigKey(t, "output_name") || IsConfigKey(t, "adapter_name"))
+                {
+                    lines.RemoveAt(i);
+                }
+            }
+            if (lines.Count == originalCount) return;
+
+            File.WriteAllLines(confPath, lines.ToArray());
+            Log("NormalizeSunshineDisplayOutput: removed stale manual display keys");
+        }
+        catch (Exception ex)
+        {
+            Log($"NormalizeSunshineDisplayOutput: error {ex.Message}");
+        }
+
+        static bool IsConfigKey(string trimmedLine, string key)
+        {
+            if (!trimmedLine.StartsWith(key, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            var remainder = trimmedLine[key.Length..].TrimStart();
+            return remainder.StartsWith("=", StringComparison.Ordinal);
+        }
+    }
+
 }

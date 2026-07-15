@@ -61,8 +61,7 @@ internal static class Program
         var emergencyUninstallerExe = PublishEmergencyUninstaller(portableRoot);
         var launcherExe = PublishLauncher(portableRoot);
         var keeperTunnelAgentExe = PublishKeeperTunnelAgent(args, repoRoot, installedRoot);
-        var appInstallerPath = GetLatestMsiPath(msiRoot)
-            ?? throw new InvalidOperationException($"Tauri MSI not found in {msiRoot}. Run 'npm run tauri build' first.");
+        var appInstallerPath = GetFreshMsiPath(msiRoot, tauriExePath);
         if (!File.Exists(tauriExePath))
         {
             throw new InvalidOperationException($"Tauri release executable not found: {tauriExePath}");
@@ -77,7 +76,7 @@ internal static class Program
         CopyFileWithRetry(bootstrapExe, Path.Combine(releaseRoot, "cloudgime-host-bootstrap.exe"));
         CopyFileWithRetry(bootstrapExe, Path.Combine(bundleReleaseRoot, "cloudgime-host-bootstrap.exe"));
         CopyFileWithRetry(emergencyUninstallerExe, Path.Combine(releaseRoot, "uninstaller-cloudgime.exe"));
-        CopyFileWithRetry(appInstallerPath, Path.Combine(releaseRoot, "cloudgime-host-control.msi"));
+        CopyOptionalFile(appInstallerPath, Path.Combine(releaseRoot, "cloudgime-host-control.msi"));
 
         CopyManagedBundleSeed(portableRoot, releaseRoot);
 
@@ -89,7 +88,8 @@ internal static class Program
         CopyDirectoryContents(bundleRoot, bundleReleaseRoot);
         OverlayLatestRuntimeStatic(repoRoot, bundleReleaseRoot);
         OverlayDriverSeed(repoRoot, bundleReleaseRoot);
-        CopyFileWithRetry(keeperTunnelAgentExe, Path.Combine(bundleReleaseRoot, "keeper-tunnel", "KeeperTunnelAgent.exe"));
+        CopyFileWithRetry(keeperTunnelAgentExe, Path.Combine(bundleReleaseRoot, "keeper-tunnel", "cloudgimehosttunnel.exe"));
+        DeleteIfExists(Path.Combine(bundleReleaseRoot, "keeper-tunnel", "KeeperTunnelAgent.exe"));
         StripLegacyFrpArtifacts(bundleReleaseRoot);
         RemoveStalePowerShellFiles(bundleReleaseRoot);
         WriteReleaseWrappers(releaseRoot, bundleReleaseRoot);
@@ -99,7 +99,10 @@ internal static class Program
         Console.WriteLine($"Executable: {Path.Combine(releaseRoot, "cloudgime-host-control.exe")}");
         Console.WriteLine($"Bootstrap:  {Path.Combine(releaseRoot, "cloudgime-host-bootstrap.exe")}");
         Console.WriteLine($"Uninstaller:{Path.Combine(releaseRoot, "uninstaller-cloudgime.exe")}");
-        Console.WriteLine($"MSI:        {Path.Combine(releaseRoot, "cloudgime-host-control.msi")}");
+        if (!string.IsNullOrWhiteSpace(appInstallerPath) && File.Exists(appInstallerPath))
+        {
+            Console.WriteLine($"MSI:        {Path.Combine(releaseRoot, "cloudgime-host-control.msi")}");
+        }
 
         SyncHostArtifactsToAllInOne(releaseRoot, null);
     }
@@ -116,7 +119,6 @@ internal static class Program
         var payloadRoot = NormalizeFullPath(args.GetValue("payload-root") ?? Path.Combine(hostControlRoot, "installer", "payload"));
         var tauriTargetRoot = ResolveTauriTargetRoot(hostControlRoot);
         var msiRoot = Path.Combine(tauriTargetRoot, "release", "bundle", "msi");
-        var appInstallerPath = GetLatestMsiPath(msiRoot);
         var releaseExecutablePath = Path.Combine(hostControlRoot, "release", "cloudgime-host-control.exe");
         var installedExecutablePath = installedRoot is not null
             ? Path.Combine(installedRoot, "cloudgime-host-control.exe")
@@ -124,6 +126,7 @@ internal static class Program
         var appExecutablePath = File.Exists(releaseExecutablePath)
             ? releaseExecutablePath
             : installedExecutablePath;
+        var appInstallerPath = GetFreshMsiPath(msiRoot, appExecutablePath);
         var emergencyUninstallerPath = Path.Combine(hostControlRoot, "release", "uninstaller-cloudgime.exe");
         if (!File.Exists(appExecutablePath))
         {
@@ -164,9 +167,10 @@ internal static class Program
         OverlayLatestRuntimeStatic(repoRoot, bundlePayload);
         OverlayDriverSeed(repoRoot, bundlePayload);
         CopyFileWithRetry(bootstrapExe, Path.Combine(bundlePayload, "cloudgime-host-bootstrap.exe"));
-        CopyFileWithRetry(keeperTunnelAgentExe, Path.Combine(bundlePayload, "keeper-tunnel", "KeeperTunnelAgent.exe"));
+        CopyFileWithRetry(keeperTunnelAgentExe, Path.Combine(bundlePayload, "keeper-tunnel", "cloudgimehosttunnel.exe"));
+        DeleteIfExists(Path.Combine(bundlePayload, "keeper-tunnel", "KeeperTunnelAgent.exe"));
         EnsureFilePresent(bootstrapExe, Path.Combine(bundlePayload, "cloudgime-host-bootstrap.exe"), "Bundle bootstrap");
-        EnsureFilePresent(keeperTunnelAgentExe, Path.Combine(bundlePayload, "keeper-tunnel", "KeeperTunnelAgent.exe"), "Host keeper tunnel agent");
+        EnsureFilePresent(keeperTunnelAgentExe, Path.Combine(bundlePayload, "keeper-tunnel", "cloudgimehosttunnel.exe"), "Host keeper tunnel agent");
         RemoveLegacyOpenHostControlScripts(bundlePayload);
         StripLegacyFrpArtifacts(bundlePayload);
         RemoveStalePowerShellFiles(bundlePayload);
@@ -1116,7 +1120,9 @@ internal static class Program
         var executableCandidates = NormalizeCandidates(
         [
             args.GetValue("keeper-tunnel-exe"),
+            Path.Combine(repoRoot, "runtime", "tools", "keeper-tunnel", "cloudgimehosttunnel.exe"),
             Path.Combine(repoRoot, "runtime", "tools", "keeper-tunnel", "KeeperTunnelAgent.exe"),
+            installedRoot is not null ? Path.Combine(installedRoot, "keeper-tunnel", "cloudgimehosttunnel.exe") : null,
             installedRoot is not null ? Path.Combine(installedRoot, "keeper-tunnel", "KeeperTunnelAgent.exe") : null
         ]);
         var executablePath = executableCandidates.FirstOrDefault(File.Exists);
@@ -1137,7 +1143,7 @@ internal static class Program
             throw new InvalidOperationException($"Host Control package.json not found: {packageJsonPath}");
         }
 
-        RunCheckedNoCapture(ResolveNpmPath(), ["run", "tauri", "build"], hostControlRoot, "Build Tauri Host Control");
+        RunCheckedNoCapture(ResolveNpmPath(), ["run", "tauri", "build", "--", "--no-bundle"], hostControlRoot, "Build Tauri Host Control");
     }
 
     private static string ResolveNpmPath()
@@ -1157,6 +1163,19 @@ internal static class Program
         return Directory.GetFiles(searchRoot, "*.msi", SearchOption.TopDirectoryOnly)
             .OrderByDescending(path => File.GetLastWriteTimeUtc(path))
             .FirstOrDefault();
+    }
+
+    private static string? GetFreshMsiPath(string searchRoot, string referenceExecutablePath)
+    {
+        var candidate = GetLatestMsiPath(searchRoot);
+        if (candidate is null || !File.Exists(referenceExecutablePath))
+        {
+            return candidate;
+        }
+
+        var msiTime = File.GetLastWriteTimeUtc(candidate);
+        var executableTime = File.GetLastWriteTimeUtc(referenceExecutablePath);
+        return msiTime >= executableTime.AddMinutes(-5) ? candidate : null;
     }
 
     private static void RunChecked(string fileName, IReadOnlyList<string> args, string workingDirectory, string stepName)
@@ -1270,6 +1289,12 @@ internal static class Program
     {
         try
         {
+            if (Environment.GetEnvironmentVariable("CLOUDGIME_SKIP_ALLINONE_SYNC") == "1")
+            {
+                Console.WriteLine("Skipping optional all-in-one artifact sync because CLOUDGIME_SKIP_ALLINONE_SYNC=1.");
+                return;
+            }
+
             Directory.CreateDirectory(ReleaseAllInOneRoot);
             var legacyTargetRoot = Path.Combine(ReleaseAllInOneRoot, "Cloudgime Host");
             if (Directory.Exists(legacyTargetRoot))

@@ -246,6 +246,7 @@ internal static class Program
                      $"CloudgimeHostUser-{bundleName}",
                      "CloudgimeHostUser-Host",
                      "CloudgimeHostKeeperTunnelAgent",
+                     "CloudgimeHostTunnel",
                      "CloudgimeHostKeepAwakeAgent",
                      "CloudgimeHostKeepAwakeAgentUser"
                   }.Distinct(StringComparer.OrdinalIgnoreCase))

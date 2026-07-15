@@ -358,10 +358,15 @@ select {
 
 .identity-row {
   display: grid;
-  grid-template-columns: 72px minmax(0, 1fr) auto;
+  grid-template-columns: 92px minmax(0, 1fr) auto;
   align-items: center;
   gap: 14px;
   padding: 8px 0;
+}
+
+.identity-row strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .identity-label,
@@ -1121,4 +1126,108 @@ select {
     grid-template-columns: 1fr;
     justify-items: start;
   }
+}
+
+/* ── Stream Readiness Panel ── */
+
+.readiness-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  margin-top: 10px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.readiness-summary.all-ready {
+  background: rgba(34, 197, 94, 0.14);
+  border: 1px solid rgba(34, 197, 94, 0.28);
+  color: #86efac;
+}
+.readiness-summary.not-ready {
+  background: rgba(239, 68, 68, 0.14);
+  border: 1px solid rgba(239, 68, 68, 0.28);
+  color: #fca5a5;
+}
+.readiness-icon {
+  font-size: 18px;
+}
+
+.readiness-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.readiness-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  min-height: 56px;
+}
+.readiness-item.ready-ok {
+  border-left: 4px solid #22c55e;
+}
+.readiness-item.ready-warn {
+  border-left: 4px solid #f59e0b;
+}
+.readiness-item.ready-err {
+  border-left: 4px solid #ef4444;
+}
+
+.readiness-item-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+.readiness-item.ready-ok .readiness-item-icon {
+  color: #22c55e;
+}
+.readiness-item.ready-warn .readiness-item-icon {
+  color: #f59e0b;
+}
+.readiness-item.ready-err .readiness-item-icon {
+  color: #ef4444;
+}
+
+.readiness-item-body {
+  flex: 1;
+  min-width: 0;
+}
+.readiness-item-body strong {
+  display: block;
+  font-size: 13px;
+  color: #e2e8f0;
+  margin-bottom: 2px;
+}
+.readiness-item-body p {
+  margin: 0;
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.fix-all-btn {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.spin-icon {
+  animation: readiness-spin 1s linear infinite;
+}
+
+@keyframes readiness-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.readiness-item.fixing {
+  opacity: 0.7;
+  pointer-events: none;
 }

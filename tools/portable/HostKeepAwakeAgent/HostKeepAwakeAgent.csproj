@@ -17,6 +17,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="System.Management" Version="8.0.0" />
     <Compile Remove="obj-publish-temp\**\*.cs" />
     <EmbeddedResource Remove="obj-publish-temp\**\*" />
     <None Remove="obj-publish-temp\**\*" />

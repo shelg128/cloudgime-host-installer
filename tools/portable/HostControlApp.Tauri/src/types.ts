@@ -6,6 +6,7 @@ export type RailKey =
   | "health"
   | "maintenance"
   | "support"
+  | "kesiapan"
   | "admin";
 
 export interface ShellState {
@@ -22,6 +23,22 @@ export interface ShellState {
   paths: PathView;
   hostUserDaemonTaskHealth?: HostUserDaemonTaskHealth | null;
   windowsNativeDiagnosticReports?: WindowsNativeDiagnosticReportsFile | null;
+  streamReadiness: StreamReadinessView;
+}
+
+export interface StreamReadinessComponent {
+  key: string;
+  label: string;
+  status: string;
+  message: string;
+  fixAction: string;
+  fixLabel: string;
+}
+
+export interface StreamReadinessView {
+  components: StreamReadinessComponent[];
+  allReady: boolean;
+  evaluatedAt: string;
 }
 
 export interface AuthState {
@@ -44,6 +61,14 @@ export interface ActivationView {
   sentinelPcId: string;
   sentinelDeviceId: string;
   keeperEntryId: string;
+  applicationActivationId: string;
+  applicationType: string;
+  pcLabel: string;
+  credentialRef: string;
+  hostHttpPort: number;
+  hostStreamUdpStart: number;
+  hostStreamUdpEnd: number;
+  hostStreamProxyRoute: string;
   tokenKind: string;
   instanceType: string;
   phase: string;

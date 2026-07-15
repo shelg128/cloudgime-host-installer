@@ -3,11 +3,12 @@ mod host_control;
 use tauri::Manager;
 
 use host_control::{
-    change_admin_password, claim_setup_token, get_shell_state, launch_emergency_uninstaller,
-    lock_app, preflight_host, recover_host_activation, redeem_activation_token,
-    reset_local_host_identity, run_host_action, save_audio_preferences, save_display_preferences,
-    save_preferences, send_heartbeat, set_admin_password, sync_host_binding,
-    toggle_dual_stream, uninstall_installed_host, unlock_app, upload_host_diagnostic, AppSession,
+    change_admin_password, claim_setup_token, get_shell_state, get_stream_readiness,
+    launch_emergency_uninstaller, lock_app, preflight_host, recover_host_activation,
+    redeem_activation_token, reset_local_host_identity, run_host_action, save_audio_preferences,
+    save_display_preferences, save_preferences, send_heartbeat, set_admin_password,
+    sync_host_binding, toggle_dual_stream, uninstall_installed_host, unlock_app,
+    upload_host_diagnostic, AppSession,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -25,6 +26,7 @@ pub fn run() {
         }))
         .invoke_handler(tauri::generate_handler![
             get_shell_state,
+            get_stream_readiness,
             set_admin_password,
             unlock_app,
             lock_app,

@@ -3653,10 +3653,27 @@ impl ConnectionListenerC for StreamConnectionListener {
     }
 
     fn log_message(&mut self, message: &str) {
-        if self.upgrade_current().is_none() {
+        let Some(stream) = self.upgrade_current() else {
+            return;
+        };
+
+        let message = message.trim();
+        if message.is_empty() {
             return;
         }
-        info!(target: "moonlight", "{}", message.trim());
+
+        if should_forward_moonlight_diagnostic(message) {
+            warn!(target: "moonlight", "{message}");
+            let mut ipc_sender = stream.ipc_sender.clone();
+            ipc_sender.blocking_send(StreamerIpcMessage::WebSocket(
+                StreamServerMessage::DebugLog {
+                    message: format!("MOONLIGHT {message}"),
+                    ty: Some(LogMessageType::InformError),
+                },
+            ));
+        } else {
+            info!(target: "moonlight", "{message}");
+        }
     }
 
     fn connection_status_update(&mut self, status: ConnectionStatus) {
@@ -3678,4 +3695,19 @@ impl ConnectionListenerC for StreamConnectionListener {
                 .await
         })
     }
+}
+
+fn should_forward_moonlight_diagnostic(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    lowered.contains("disconnect")
+        || lowered.contains("termination")
+        || lowered.contains("terminated")
+        || lowered.contains("failed")
+        || lowered.contains("no video")
+        || lowered.contains("no audio")
+        || lowered.contains("received first")
+        || lowered.contains("control stream")
+        || lowered.contains("audio receive")
+        || lowered.contains("video receive")
+        || lowered.contains("rtsp")
 }

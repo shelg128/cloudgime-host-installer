@@ -5,7 +5,7 @@ use std::{
     io::Write,
     net::{IpAddr, Ipv4Addr, UdpSocket},
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{Command as StdCommand, Stdio},
     sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     sync::{Arc, LazyLock},
     time::Duration,
@@ -59,14 +59,16 @@ use windows_sys::Win32::{
         TOKEN_QUERY, TokenLinkedToken, TokenPrimary,
     },
     System::RemoteDesktop::{
-        WTS_SESSION_INFOW, WTSActive, WTSConnected, WTSEnumerateSessionsW, WTSFreeMemory,
-        WTSGetActiveConsoleSessionId, WTSQueryUserToken,
+        ProcessIdToSessionId, WTS_INFO_CLASS, WTS_SESSION_INFOW, WTSActive, WTSConnected,
+        WTSDomainName, WTSEnumerateSessionsW, WTSFreeMemory, WTSGetActiveConsoleSessionId,
+        WTSQuerySessionInformationW, WTSQueryUserToken, WTSUserName,
     },
     System::Threading::{
-        CREATE_NO_WINDOW, CreateProcessAsUserW, GetExitCodeProcess, NORMAL_PRIORITY_CLASS,
-        OpenProcess, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
-        PROCESS_SET_INFORMATION, STARTF_USESHOWWINDOW, STARTUPINFOW, SetPriorityClass,
-        TerminateProcess, WaitForSingleObject,
+        CREATE_NO_WINDOW, CreateProcessAsUserW, CreateProcessWithTokenW, GetCurrentProcessId,
+        GetExitCodeProcess, LOGON_WITH_PROFILE, NORMAL_PRIORITY_CLASS, OpenProcess,
+        PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION,
+        STARTF_USESHOWWINDOW, STARTUPINFOW, SetPriorityClass, TerminateProcess,
+        WaitForSingleObject,
     },
     UI::WindowsAndMessaging::{GetSystemMetrics, SM_REMOTESESSION, SW_HIDE},
 };
@@ -918,6 +920,15 @@ fn pending_capture_prestart_refresh_reason(max_age: Duration) -> Option<String> 
     };
     if completed_at == 0 || now.saturating_sub(completed_at) > max_age_ms {
         return None;
+    }
+    if recovery_source == "supervisor_recent_incident_capture_init_failed" {
+        let ready_since = value
+            .get("ready_since_unix_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        if ready_since >= completed_at {
+            return None;
+        }
     }
 
     let consumed_at = value
@@ -3754,11 +3765,27 @@ pub(super) struct HelperCommandOutput {
 
 #[cfg(windows)]
 fn helper_stdout_capture_dir() -> PathBuf {
-    std::env::temp_dir().join("cloudgime-helper-captures")
+    std::env::var_os("PUBLIC")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Users\Public"))
+        .join("CloudGime")
+        .join("HelperCaptures")
+}
+
+#[cfg(windows)]
+fn current_process_session_id() -> Option<u32> {
+    let mut session_id = 0u32;
+    let current_process_id = unsafe { GetCurrentProcessId() };
+    let ok = unsafe { ProcessIdToSessionId(current_process_id, &mut session_id) } != 0;
+    if ok { Some(session_id) } else { None }
 }
 
 #[cfg(windows)]
 fn helper_should_prefer_active_user_session() -> bool {
+    if current_process_session_id() == Some(0) {
+        return true;
+    }
+
     std::env::var("USERNAME")
         .map(|value| value.eq_ignore_ascii_case("SYSTEM"))
         .unwrap_or(false)
@@ -3840,6 +3867,194 @@ fn enumerate_interactive_user_session_candidates() -> Vec<u32> {
 }
 
 #[cfg(windows)]
+fn query_wts_session_string(session_id: u32, info_class: WTS_INFO_CLASS) -> Option<String> {
+    let mut buffer: *mut u16 = std::ptr::null_mut();
+    let mut bytes_returned = 0u32;
+    let ok = unsafe {
+        WTSQuerySessionInformationW(
+            std::ptr::null_mut(),
+            session_id,
+            info_class,
+            &mut buffer,
+            &mut bytes_returned,
+        )
+    } != 0;
+    if !ok || buffer.is_null() || bytes_returned < 2 {
+        if !buffer.is_null() {
+            unsafe {
+                WTSFreeMemory(buffer.cast());
+            }
+        }
+        return None;
+    }
+
+    let wide_len = (bytes_returned as usize / 2).saturating_sub(1);
+    let value = unsafe { std::slice::from_raw_parts(buffer, wide_len) };
+    let value = String::from_utf16_lossy(value)
+        .trim_matches(char::from(0))
+        .trim()
+        .to_string();
+    unsafe {
+        WTSFreeMemory(buffer.cast());
+    }
+
+    if value.is_empty() { None } else { Some(value) }
+}
+
+#[cfg(windows)]
+fn interactive_task_user_for_session(session_id: u32) -> Option<String> {
+    let username = query_wts_session_string(session_id, WTSUserName)?;
+    let domain = query_wts_session_string(session_id, WTSDomainName).unwrap_or_default();
+    if domain.trim().is_empty() {
+        Some(username)
+    } else {
+        Some(format!("{domain}\\{username}"))
+    }
+}
+
+#[cfg(windows)]
+fn command_output_summary(output: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    format!(
+        "status={} stdout={} stderr={}",
+        output.status.code().unwrap_or(1),
+        sanitize_trace_value(&stdout),
+        sanitize_trace_value(&stderr)
+    )
+}
+
+#[cfg(windows)]
+fn run_helper_via_interactive_scheduled_task_blocking(
+    active_session_id: u32,
+    helper_path: &Path,
+    helper_arguments: &[String],
+    timeout_duration: Duration,
+    capture_dir: &Path,
+) -> Result<HelperCommandOutput, String> {
+    let run_as_user = interactive_task_user_for_session(active_session_id)
+        .ok_or_else(|| format!("no interactive username found for session {active_session_id}"))?;
+    let capture_id = Uuid::new_v4().to_string();
+    let task_name = format!("CloudGimeDisplayHelper-{active_session_id}-{capture_id}");
+    let stdout_path = capture_dir.join(format!("{capture_id}.task.stdout"));
+    let stderr_path = capture_dir.join(format!("{capture_id}.task.stderr"));
+    let exit_path = capture_dir.join(format!("{capture_id}.task.exit"));
+    let script_path = capture_dir.join(format!("{capture_id}.task.cmd"));
+
+    let helper_command = std::iter::once(quote_batch_argument(&helper_path.to_string_lossy()))
+        .chain(
+            helper_arguments
+                .iter()
+                .map(|argument| quote_batch_argument(argument)),
+        )
+        .collect::<Vec<_>>()
+        .join(" ");
+    let script_contents = format!(
+        "@echo off\r\n{} 1>{} 2>{}\r\nset CG_HELPER_EXIT=%errorlevel%\r\necho %CG_HELPER_EXIT%>{}\r\nexit /b %CG_HELPER_EXIT%\r\n",
+        helper_command,
+        quote_batch_argument(&stdout_path.to_string_lossy()),
+        quote_batch_argument(&stderr_path.to_string_lossy()),
+        quote_batch_argument(&exit_path.to_string_lossy())
+    );
+    fs::write(&script_path, script_contents)
+        .map_err(|err| format!("failed to write scheduled helper script: {err}"))?;
+
+    let task_command = format!(
+        "cmd.exe /d /c {}",
+        quote_batch_argument(&script_path.to_string_lossy())
+    );
+    let _ = StdCommand::new("schtasks")
+        .args(["/Delete", "/TN", &task_name, "/F"])
+        .output();
+    let create_output = StdCommand::new("schtasks")
+        .args([
+            "/Create",
+            "/TN",
+            &task_name,
+            "/SC",
+            "DAILY",
+            "/ST",
+            "00:00",
+            "/TR",
+            &task_command,
+            "/RU",
+            &run_as_user,
+            "/IT",
+            "/F",
+        ])
+        .output()
+        .map_err(|err| format!("failed to invoke schtasks /Create: {err}"))?;
+    if !create_output.status.success() {
+        let _ = fs::remove_file(&script_path);
+        return Err(format!(
+            "schtasks /Create failed for {run_as_user}: {}",
+            command_output_summary(&create_output)
+        ));
+    }
+
+    let run_output = StdCommand::new("schtasks")
+        .args(["/Run", "/TN", &task_name])
+        .output()
+        .map_err(|err| format!("failed to invoke schtasks /Run: {err}"))?;
+    if !run_output.status.success() {
+        let _ = StdCommand::new("schtasks")
+            .args(["/Delete", "/TN", &task_name, "/F"])
+            .output();
+        let _ = fs::remove_file(&script_path);
+        return Err(format!(
+            "schtasks /Run failed for {run_as_user}: {}",
+            command_output_summary(&run_output)
+        ));
+    }
+
+    let started = std::time::Instant::now();
+    while started.elapsed() < timeout_duration {
+        if exit_path.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    let query_output = StdCommand::new("schtasks")
+        .args(["/Query", "/TN", &task_name, "/V", "/FO", "LIST"])
+        .output();
+    let _ = StdCommand::new("schtasks")
+        .args(["/Delete", "/TN", &task_name, "/F"])
+        .output();
+
+    if !exit_path.exists() {
+        let _ = fs::remove_file(&script_path);
+        let _ = fs::remove_file(&stdout_path);
+        let _ = fs::remove_file(&stderr_path);
+        let query_summary = query_output
+            .as_ref()
+            .map(command_output_summary)
+            .unwrap_or_else(|err| format!("failed to query task: {err}"));
+        return Err(format!(
+            "scheduled display helper timed out after {}s for session {active_session_id}; {query_summary}",
+            timeout_duration.as_secs()
+        ));
+    }
+
+    let stdout = fs::read_to_string(&stdout_path).unwrap_or_default();
+    let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
+    let exit_code = fs::read_to_string(&exit_path)
+        .ok()
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .unwrap_or(1);
+    let _ = fs::remove_file(&stdout_path);
+    let _ = fs::remove_file(&stderr_path);
+    let _ = fs::remove_file(&exit_path);
+    let _ = fs::remove_file(&script_path);
+
+    Ok(HelperCommandOutput {
+        stdout: stdout.trim().to_string(),
+        stderr: stderr.trim().to_string(),
+        exit_code,
+    })
+}
+
+#[cfg(windows)]
 fn run_helper_in_active_user_session_blocking(
     helper_path: PathBuf,
     helper_arguments: Vec<String>,
@@ -3866,7 +4081,9 @@ fn run_helper_in_active_user_session_blocking(
         }
 
         // Try to get the linked elevated token (e.g. if the user is an admin but run with UAC filtered token)
-        let mut linked_token_info = TOKEN_LINKED_TOKEN { LinkedToken: std::ptr::null_mut() };
+        let mut linked_token_info = TOKEN_LINKED_TOKEN {
+            LinkedToken: std::ptr::null_mut(),
+        };
         let mut return_length = 0u32;
         let get_info_ok = unsafe {
             GetTokenInformation(
@@ -3878,16 +4095,20 @@ fn run_helper_in_active_user_session_blocking(
             )
         } != 0;
 
-        let target_user_token = if get_info_ok && !linked_token_info.LinkedToken.is_null() {
-            info!("Successfully retrieved linked elevated token for session {active_session_id}");
+        if get_info_ok && !linked_token_info.LinkedToken.is_null() {
+            // The linked elevated token can fail CreateProcessAsUser from a service with
+            // ERROR_ACCESS_DENIED. Display APIs need the interactive desktop token more than
+            // elevation here, so prefer the WTS session token.
             unsafe {
-                CloseHandle(user_token);
+                CloseHandle(linked_token_info.LinkedToken);
             }
-            linked_token_info.LinkedToken
         } else {
-            debug!("No linked elevated token found for session {active_session_id} or failed to query (win32={}). Falling back to standard user token.", unsafe { GetLastError() });
-            user_token
-        };
+            debug!(
+                "No linked elevated token found for session {active_session_id} or failed to query (win32={}). Using standard user token.",
+                unsafe { GetLastError() }
+            );
+        }
+        let target_user_token = user_token;
 
         let mut primary_token: HANDLE = std::ptr::null_mut();
         let duplicate_ok = unsafe {
@@ -3939,10 +4160,11 @@ fn run_helper_in_active_user_session_blocking(
 
         let cmd_path = std::env::var("ComSpec")
             .unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".to_string());
-        let mut command_line = wide_null(&format!(
+        let command_line_text = format!(
             "cmd.exe /d /c {}",
             quote_batch_argument(&script_path.to_string_lossy())
-        ));
+        );
+        let mut command_line = wide_null(&command_line_text);
         let application_name = wide_null(&cmd_path);
         let current_directory = wide_null(
             helper_path
@@ -3963,7 +4185,9 @@ fn run_helper_in_active_user_session_blocking(
             ..unsafe { std::mem::zeroed() }
         };
 
-        let created = unsafe {
+        let creation_flags = CREATE_NO_WINDOW | NORMAL_PRIORITY_CLASS;
+        let mut launch_method = "CreateProcessAsUserW";
+        let created_as_user = unsafe {
             CreateProcessAsUserW(
                 primary_token,
                 application_name.as_ptr(),
@@ -3971,13 +4195,45 @@ fn run_helper_in_active_user_session_blocking(
                 std::ptr::null(),
                 std::ptr::null(),
                 0,
-                CREATE_NO_WINDOW | NORMAL_PRIORITY_CLASS,
+                creation_flags,
                 std::ptr::null(),
                 current_directory.as_ptr(),
                 &startup_info,
                 &mut process_information,
             )
         } != 0;
+        let created = if created_as_user {
+            true
+        } else {
+            let create_as_user_error = unsafe { GetLastError() };
+            process_information = PROCESS_INFORMATION {
+                ..unsafe { std::mem::zeroed() }
+            };
+            let mut token_command_line = wide_null(&command_line_text);
+            let created_with_token = unsafe {
+                CreateProcessWithTokenW(
+                    primary_token,
+                    LOGON_WITH_PROFILE,
+                    application_name.as_ptr(),
+                    token_command_line.as_mut_ptr(),
+                    creation_flags,
+                    std::ptr::null(),
+                    current_directory.as_ptr(),
+                    &startup_info,
+                    &mut process_information,
+                )
+            } != 0;
+            if created_with_token {
+                launch_method = "CreateProcessWithTokenW";
+                true
+            } else {
+                let create_with_token_error = unsafe { GetLastError() };
+                failures.push(format!(
+                    "CreateProcessAsUserW(session={active_session_id}) failed with win32={create_as_user_error}; CreateProcessWithTokenW(session={active_session_id}) failed with win32={create_with_token_error}"
+                ));
+                false
+            }
+        };
 
         unsafe {
             CloseHandle(primary_token);
@@ -3985,12 +4241,12 @@ fn run_helper_in_active_user_session_blocking(
 
         if !created {
             let _ = fs::remove_file(&script_path);
-            failures.push(format!(
-                "CreateProcessAsUserW(session={active_session_id}) failed with win32={}",
-                unsafe { GetLastError() }
-            ));
             continue;
         }
+        append_host_stream_trace(&format!(
+            "DISPLAY_HELPER_INTERACTIVE_LAUNCHED session={} method={}",
+            active_session_id, launch_method
+        ));
 
         let wait_millis = timeout_duration.as_millis().min(u32::MAX as u128) as u32;
         let wait_result = unsafe { WaitForSingleObject(process_information.hProcess, wait_millis) };
@@ -4035,10 +4291,43 @@ fn run_helper_in_active_user_session_blocking(
         }
 
         let stdout = fs::read_to_string(&stdout_path).unwrap_or_default();
-        let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
+        let mut stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
         let _ = fs::remove_file(&stdout_path);
         let _ = fs::remove_file(&stderr_path);
         let _ = fs::remove_file(&script_path);
+
+        if exit_code != 0 && stdout.trim().is_empty() && stderr.trim().is_empty() {
+            append_host_stream_trace(&format!(
+                "DISPLAY_HELPER_INTERACTIVE_TASK_FALLBACK_BEGIN session={} previous_method={} previous_exit_code={}",
+                active_session_id, launch_method, exit_code as i32
+            ));
+            match run_helper_via_interactive_scheduled_task_blocking(
+                active_session_id,
+                &helper_path,
+                &helper_arguments,
+                timeout_duration,
+                &capture_dir,
+            ) {
+                Ok(task_output) => {
+                    append_host_stream_trace(&format!(
+                        "DISPLAY_HELPER_INTERACTIVE_TASK_FALLBACK_OK session={} exit_code={} stdout_bytes={} stderr_bytes={}",
+                        active_session_id,
+                        task_output.exit_code,
+                        task_output.stdout.len(),
+                        task_output.stderr.len()
+                    ));
+                    return Ok(task_output);
+                }
+                Err(error) => {
+                    append_host_stream_trace(&format!(
+                        "DISPLAY_HELPER_INTERACTIVE_TASK_FALLBACK_FAILED session={} error={}",
+                        active_session_id,
+                        sanitize_trace_value(&error)
+                    ));
+                    stderr = format!("interactive scheduled task fallback failed: {error}");
+                }
+            }
+        }
 
         return Ok(HelperCommandOutput {
             stdout: stdout.trim().to_string(),
@@ -4058,6 +4347,14 @@ pub(super) async fn run_display_helper_command(
     helper_action: Option<&str>,
 ) -> Result<HelperCommandOutput, String> {
     if helper_should_prefer_active_user_session() {
+        let helper_action = helper_action.unwrap_or("command");
+        append_host_stream_trace(&format!(
+            "DISPLAY_HELPER_INTERACTIVE_BEGIN action={} process_session={}",
+            sanitize_trace_value(helper_action),
+            current_process_session_id()
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        ));
         let helper_path = helper_path.to_path_buf();
         let helper_arguments = helper_arguments.to_vec();
         match spawn_blocking(move || {
@@ -4069,13 +4366,32 @@ pub(super) async fn run_display_helper_command(
         })
         .await
         {
-            Ok(Ok(output)) => return Ok(output),
+            Ok(Ok(output)) => {
+                append_host_stream_trace(&format!(
+                    "DISPLAY_HELPER_INTERACTIVE_OK action={} exit_code={} stdout_bytes={} stderr_bytes={}",
+                    sanitize_trace_value(helper_action),
+                    output.exit_code,
+                    output.stdout.len(),
+                    output.stderr.len()
+                ));
+                return Ok(output);
+            }
             Ok(Err(error)) => {
+                append_host_stream_trace(&format!(
+                    "DISPLAY_HELPER_INTERACTIVE_FAILED action={} error={}",
+                    sanitize_trace_value(helper_action),
+                    sanitize_trace_value(&error)
+                ));
                 warn!(
                     "interactive display helper relay failed; falling back to service session: {error}"
                 );
             }
             Err(error) => {
+                append_host_stream_trace(&format!(
+                    "DISPLAY_HELPER_INTERACTIVE_TASK_FAILED action={} error={}",
+                    sanitize_trace_value(helper_action),
+                    sanitize_trace_value(&error.to_string())
+                ));
                 warn!(
                     "interactive display helper relay task failed; falling back to service session: {error}"
                 );
@@ -5158,21 +5474,21 @@ pub async fn start_host(
             }
         };
 
+        let desktop_app_index = apps
+            .iter()
+            .position(|app| app.title.eq_ignore_ascii_case("desktop"));
         let requested_app_index = apps.iter().position(|app| app.id == app_id);
-        let fallback_app_index = if requested_app_index.is_none() {
-            apps.iter()
-                .position(|app| app.title.eq_ignore_ascii_case("desktop"))
-                .or_else(|| (apps.len() == 1).then_some(0))
-        } else {
-            None
-        };
+        let fallback_app_index = (apps.len() == 1).then_some(0);
 
-        let app = match requested_app_index.or(fallback_app_index) {
+        let app = match desktop_app_index
+            .or(requested_app_index)
+            .or(fallback_app_index)
+        {
             Some(index) => {
                 let selected_app = apps.swap_remove(index);
                 if selected_app.id != app_id {
-                    let fallback_reason = if selected_app.title.eq_ignore_ascii_case("desktop") {
-                        "stale_app_id_desktop_fallback"
+                    let fallback_reason = if desktop_app_index == Some(index) {
+                        "forced_desktop_baseline"
                     } else {
                         "stale_app_id_single_app_fallback"
                     };
@@ -7830,7 +8146,8 @@ pub async fn start_host_mic(
                                 "MIC_SIDECAR_WS_TX {}",
                                 describe_mic_sidecar_server_message(&message)
                             ));
-                            if let Err(Closed) = send_json_ws_message(&mut write_session, message).await
+                            if let Err(Closed) =
+                                send_json_ws_message(&mut write_session, message).await
                                 && !warned_closed
                             {
                                 warn!(

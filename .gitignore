@@ -35,6 +35,7 @@ runtime/sunshine-legacy/config/sunshine_state.json
 runtime/moonlight/static/
 runtime/moonlight/*.exe
 runtime/moonlight/server/*.exe
+runtime/moonlight/system/*.exe
 runtime/sunshine-legacy/assets/
 runtime/sunshine-legacy/config/
 runtime/sunshine-legacy/scripts/

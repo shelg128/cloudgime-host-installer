@@ -21,7 +21,7 @@ use common::{
     config::{PortRange, WebRtcConfig},
     ipc::{ServerIpcMessage, StreamerIpcMessage},
 };
-use log::{debug, error, trace, warn};
+use log::{debug, error, info, trace, warn};
 use moonlight_common::stream::{
     audio::{AudioConfig, OpusMultistreamConfig},
     video::{DecodeResult, SupportedVideoFormats, VideoDecodeUnit, VideoSetup},
@@ -52,6 +52,7 @@ use webrtc::{
         configuration::RTCConfiguration,
         peer_connection_state::RTCPeerConnectionState,
         sdp::{sdp_type::RTCSdpType, session_description::RTCSessionDescription},
+        signaling_state::RTCSignalingState,
     },
 };
 
@@ -75,6 +76,10 @@ mod audio;
 mod sender;
 mod video;
 
+const LOCAL_OFFER_DEBOUNCE_DELAY: Duration = Duration::from_millis(80);
+const LOCAL_OFFER_STABLE_WAIT: Duration = Duration::from_secs(2);
+const LOCAL_OFFER_STABLE_POLL: Duration = Duration::from_millis(50);
+
 fn summarize_ice_candidate(candidate: &str) -> String {
     let parts: Vec<&str> = candidate.split_whitespace().collect();
     let address = parts.get(4).copied().unwrap_or("unknown");
@@ -91,6 +96,41 @@ fn summarize_ice_candidate(candidate: &str) -> String {
         })
         .unwrap_or("unknown");
     format!("type={candidate_type} protocol={protocol} address={address}:{port}")
+}
+
+fn sdp_has_media_section(sdp: &str, media: &str) -> bool {
+    let prefix = format!("m={media} ");
+    sdp.lines().any(|line| {
+        line.trim_start()
+            .get(..prefix.len())
+            .map_or(false, |head| head.eq_ignore_ascii_case(&prefix))
+    })
+}
+
+fn summarize_sdp_media_details(sdp: &str) -> String {
+    sdp.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.starts_with("a=group:")
+                || line.starts_with("m=")
+                || line.starts_with("a=mid:")
+                || line.starts_with("a=msid:")
+                || line.starts_with("a=ssrc:")
+                || line.starts_with("a=ssrc-group:")
+                || line.starts_with("a=rtpmap:")
+                || line.starts_with("a=fmtp:")
+                || line == "a=sendonly"
+                || line == "a=recvonly"
+                || line == "a=sendrecv"
+                || line == "a=inactive"
+            {
+                Some(line.to_string())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 fn is_overlay_interface_name(name: &str) -> bool {
@@ -113,10 +153,14 @@ fn should_allow_candidate_interface(name: &str) -> bool {
     !is_overlay_interface_name(name)
 }
 
-fn should_allow_candidate_ip(ip: IpAddr) -> bool {
+fn should_allow_candidate_ip(ip: IpAddr, include_loopback_candidates: bool) -> bool {
     match ip {
-        IpAddr::V4(ipv4) => !ipv4.is_loopback() && !ipv4.is_link_local(),
-        IpAddr::V6(ipv6) => !ipv6.is_loopback() && !ipv6.is_unspecified(),
+        IpAddr::V4(ipv4) => {
+            (include_loopback_candidates || !ipv4.is_loopback()) && !ipv4.is_link_local()
+        }
+        IpAddr::V6(ipv6) => {
+            (include_loopback_candidates || !ipv6.is_loopback()) && !ipv6.is_unspecified()
+        }
     }
 }
 
@@ -132,6 +176,7 @@ struct WebRtcInner {
     video: Mutex<WebRtcVideo>,
     audio: Mutex<WebRtcAudio>,
     remote_description_ready: AtomicBool,
+    pending_local_offer: Arc<AtomicBool>,
     pending_remote_ice_candidates: Mutex<VecDeque<RTCIceCandidateInit>>,
     // Timeout / Terminate
     pub timeout_terminate_request: Mutex<Option<Instant>>,
@@ -187,8 +232,9 @@ pub async fn new(
         }
         allowed
     }));
-    api_settings.set_ip_filter(Box::new(|ip| {
-        let allowed = should_allow_candidate_ip(ip);
+    let include_loopback_candidates = config.include_loopback_candidates;
+    api_settings.set_ip_filter(Box::new(move |ip| {
+        let allowed = should_allow_candidate_ip(ip, include_loopback_candidates);
         if !allowed {
             warn!("[Stream]: filtering ICE ip '{ip}' because it is loopback/link-local");
         }
@@ -254,6 +300,7 @@ pub async fn new(
             audio_sample_queue_size,
         )),
         remote_description_ready: AtomicBool::new(false),
+        pending_local_offer: Arc::new(AtomicBool::new(false)),
         pending_remote_ice_candidates: Mutex::new(VecDeque::new()),
         timeout_terminate_request: Mutex::new(None),
     });
@@ -477,42 +524,74 @@ impl WebRtcInner {
         true
     }
     async fn send_offer(&self) -> bool {
-        let local_description = match self.peer.create_offer(None).await {
-            Err(err) => {
-                error!("[Signaling]: failed to create offer: {err:?}");
-                return false;
-            }
-            Ok(value) => value,
-        };
-
-        if let Err(err) = self
-            .peer
-            .set_local_description(local_description.clone())
-            .await
-        {
-            error!("[Signaling]: failed to set local description: {err:?}");
-            return false;
+        if self.pending_local_offer.swap(true, Ordering::AcqRel) {
+            debug!("[Signaling]: local offer already queued; coalescing renegotiation");
+            return true;
         }
 
-        debug!(
-            "[Signaling] Sending Local Description as Offer: {:?}",
-            local_description.sdp
-        );
+        let peer = self.peer.clone();
+        let event_sender = self.event_sender.clone();
+        let pending_local_offer = self.pending_local_offer.clone();
 
-        if let Err(err) = self
-            .event_sender
-            .send(TransportEvent::SendIpc(StreamerIpcMessage::WebSocket(
-                StreamServerMessage::WebRtc(StreamSignalingMessage::Description(
-                    RtcSessionDescription {
-                        ty: from_webrtc_sdp(local_description.sdp_type),
-                        sdp: local_description.sdp,
-                    },
-                )),
-            )))
-            .await
-        {
-            warn!("Failed to send local description (offer) via web socket from peer: {err:?}");
-        };
+        spawn(async move {
+            sleep(LOCAL_OFFER_DEBOUNCE_DELAY).await;
+
+            let wait_started = Instant::now();
+            while peer.signaling_state() != RTCSignalingState::Stable
+                && wait_started.elapsed() < LOCAL_OFFER_STABLE_WAIT
+            {
+                sleep(LOCAL_OFFER_STABLE_POLL).await;
+            }
+
+            if peer.signaling_state() != RTCSignalingState::Stable {
+                pending_local_offer.store(false, Ordering::Release);
+                warn!(
+                    "[Signaling]: skipped local offer because signaling state stayed {:?}",
+                    peer.signaling_state()
+                );
+                return;
+            }
+
+            let local_description = match peer.create_offer(None).await {
+                Err(err) => {
+                    error!("[Signaling]: failed to create offer: {err:?}");
+                    pending_local_offer.store(false, Ordering::Release);
+                    return;
+                }
+                Ok(value) => value,
+            };
+
+            if let Err(err) = peer.set_local_description(local_description.clone()).await {
+                error!("[Signaling]: failed to set local description: {err:?}");
+                pending_local_offer.store(false, Ordering::Release);
+                return;
+            }
+
+            info!(
+                "[Signaling] Sending coalesced Local Description media details: {}",
+                summarize_sdp_media_details(&local_description.sdp)
+            );
+            debug!(
+                "[Signaling] Sending coalesced Local Description as Offer: {:?}",
+                local_description.sdp
+            );
+
+            if let Err(err) = event_sender
+                .send(TransportEvent::SendIpc(StreamerIpcMessage::WebSocket(
+                    StreamServerMessage::WebRtc(StreamSignalingMessage::Description(
+                        RtcSessionDescription {
+                            ty: from_webrtc_sdp(local_description.sdp_type),
+                            sdp: local_description.sdp,
+                        },
+                    )),
+                )))
+                .await
+            {
+                warn!("Failed to send local description (offer) via web socket from peer: {err:?}");
+            };
+
+            pending_local_offer.store(false, Ordering::Release);
+        });
 
         true
     }
@@ -613,6 +692,37 @@ impl WebRtcInner {
             StreamClientMessage::WebRtc(StreamSignalingMessage::Description(description)) => {
                 debug!("[Signaling] Received Remote Description: {:?}", description);
 
+                let is_offer = matches!(&description.ty, RtcSdpType::Offer);
+                let offer_has_audio = is_offer && sdp_has_media_section(&description.sdp, "audio");
+                let offer_has_video = is_offer && sdp_has_media_section(&description.sdp, "video");
+
+                if is_offer {
+                    if offer_has_audio {
+                        let mut audio = self.audio.lock().await;
+                        if let Err(err) = audio.prepare(self).await {
+                            warn!(
+                                "[Stream] Failed to prepare WebRTC audio track before accepting offer: {err:?}"
+                            );
+                        }
+                    } else {
+                        debug!(
+                            "[Stream] Remote offer has no audio m-line; audio will be negotiated after StartStream"
+                        );
+                    }
+                    if offer_has_video {
+                        let mut video = self.video.lock().await;
+                        if let Err(err) = video.prepare().await {
+                            warn!(
+                                "[Stream] Failed to prepare WebRTC video track before accepting offer: {err:?}"
+                            );
+                        }
+                    } else {
+                        debug!(
+                            "[Stream] Remote offer has no video m-line; video will be negotiated after StartStream"
+                        );
+                    }
+                }
+
                 let description = match &description.ty {
                     RtcSdpType::Offer => RTCSessionDescription::offer(description.sdp),
                     RtcSdpType::Answer => RTCSessionDescription::answer(description.sdp),
@@ -632,17 +742,6 @@ impl WebRtcInner {
                 };
 
                 let remote_ty = description.sdp_type;
-
-                if remote_ty == RTCSdpType::Offer {
-                    {
-                        let mut audio = self.audio.lock().await;
-                        if let Err(err) = audio.prepare(self).await {
-                            warn!(
-                                "[Stream] Failed to prepare WebRTC audio track before accepting offer: {err:?}"
-                            );
-                        }
-                    }
-                }
 
                 if let Err(err) = self.peer.set_remote_description(description).await {
                     let err_text = format!("{err:?}");

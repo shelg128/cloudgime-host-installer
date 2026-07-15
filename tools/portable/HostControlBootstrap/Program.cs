@@ -25,7 +25,7 @@ internal static class Program
     private const string HostWindowsServiceName = "CloudgimeHost-Host";
     private const string RuntimeWindowsServiceName = "CloudgimeRuntime-Host";
     private const string HostUserDaemonTaskName = "CloudgimeHostUser-Host";
-    private const string HostKeeperTunnelTaskName = "CloudgimeHostKeeperTunnelAgent";
+    private const string HostKeeperTunnelTaskName = "CloudgimeHostTunnel";
     private const string HostKeepAwakeSystemTaskName = "CloudgimeHostKeepAwakeAgent";
     private const string HostKeepAwakeUserTaskName = "CloudgimeHostKeepAwakeAgentUser";
     private const string HostDisplayBootGuardTaskName = "CloudgimeHostDisplayBootGuard";
@@ -2014,17 +2014,20 @@ try {{ Start-ScheduledTask -TaskName $taskName }} catch {{ Write-Output ('displa
 
     private static void TryDeleteHostKeeperTunnelTask()
     {
-        try
+        foreach (var taskName in new[] { "CloudgimeHostKeeperTunnelAgent", HostKeeperTunnelTaskName })
         {
-            _ = StartProcessHiddenWithTimeout(
-                "schtasks.exe",
-                $"/Delete /TN \"{HostKeeperTunnelTaskName}\" /F",
-                Environment.SystemDirectory,
-                TimeSpan.FromSeconds(15));
-        }
-        catch (Exception ex)
-        {
-            Log($"delete-host-keeper-task ignored error: {ex}");
+            try
+            {
+                _ = StartProcessHiddenWithTimeout(
+                    "schtasks.exe",
+                    $"/Delete /TN \"{taskName}\" /F",
+                    Environment.SystemDirectory,
+                    TimeSpan.FromSeconds(15));
+            }
+            catch (Exception ex)
+            {
+                Log($"delete-host-keeper-task name={taskName} ignored error: {ex}");
+            }
         }
     }
 

@@ -147,7 +147,18 @@ function Get-Sha256([string]$Path) {
         throw "File tidak ditemukan untuk hash: $Path"
     }
 
-    return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToUpperInvariant()
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hashBytes = $sha256.ComputeHash($stream)
+            return ([System.BitConverter]::ToString($hashBytes) -replace '-', '').ToUpperInvariant()
+        } finally {
+            $sha256.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
 }
 
 function Assert-SameBinary([string]$ExpectedPath, [string]$ActualPath, [string]$Label) {
@@ -253,6 +264,12 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "cargo build streamer gagal dengan exit code $LASTEXITCODE"
     }
+
+    Write-Host "[BUILD] Membuild host installer dan runtime supervisor terbaru..." -ForegroundColor Cyan
+    cargo build --release --bin host_installer --bin host_supervisor | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "cargo build host installer/supervisor gagal dengan exit code $LASTEXITCODE"
+    }
 } finally {
     Pop-Location
 }
@@ -260,14 +277,21 @@ try {
 $webServerSourceExe = Resolve-ReleaseBinary "web-server.exe"
 $streamerSourceExe = Resolve-ReleaseBinary "streamer.exe"
 $micSidecarSourceExe = Resolve-ReleaseBinary "mic_sidecar.exe"
+$hostInstallerSourceExe = Resolve-ReleaseBinary "host_installer.exe"
+$hostSupervisorSourceExe = Resolve-ReleaseBinary "host_supervisor.exe"
 
 $runtimeMoonlightRoot = Join-Path $RepoRoot "runtime\moonlight"
 if (-not (Test-Path -LiteralPath $runtimeMoonlightRoot)) {
     throw "Runtime moonlight root tidak ditemukan: $runtimeMoonlightRoot"
 }
+$runtimeMoonlightSystemRoot = Join-Path $runtimeMoonlightRoot "system"
+[System.IO.Directory]::CreateDirectory($runtimeMoonlightSystemRoot) | Out-Null
 Copy-Item -LiteralPath $webServerSourceExe -Destination (Join-Path $runtimeMoonlightRoot "web-server.exe") -Force
 Copy-Item -LiteralPath $streamerSourceExe -Destination (Join-Path $runtimeMoonlightRoot "streamer.exe") -Force
 Copy-Item -LiteralPath $micSidecarSourceExe -Destination (Join-Path $runtimeMoonlightRoot "mic_sidecar.exe") -Force
+Copy-Item -LiteralPath $hostInstallerSourceExe -Destination (Join-Path $runtimeMoonlightRoot "host_installer.exe") -Force
+Copy-Item -LiteralPath $hostSupervisorSourceExe -Destination (Join-Path $runtimeMoonlightRoot "host_supervisor.exe") -Force
+Copy-Item -LiteralPath $hostSupervisorSourceExe -Destination (Join-Path $runtimeMoonlightSystemRoot "cloudgime-runtime-agent.exe") -Force
 
 if ([string]::IsNullOrWhiteSpace($KeeperTunnelProject)) {
     $defaultKeeperTunnelProject = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot "..\power panel\KeeperTunnelAgent\KeeperTunnelAgent.csproj"))
@@ -295,6 +319,8 @@ if (-not (Test-Path -LiteralPath (Join-Path $BundleRoot "host-installer.exe"))) 
 Assert-SameBinary $webServerSourceExe (Join-Path $BundleRoot "moonlight\web-server.exe") "web-server.exe bundle"
 Assert-SameBinary $streamerSourceExe (Join-Path $BundleRoot "moonlight\streamer.exe") "streamer.exe bundle"
 Assert-SameBinary $micSidecarSourceExe (Join-Path $BundleRoot "moonlight\mic_sidecar.exe") "mic_sidecar.exe bundle"
+Assert-SameBinary $hostInstallerSourceExe (Join-Path $BundleRoot "host-installer.exe") "host-installer.exe bundle"
+Assert-SameBinary $hostSupervisorSourceExe (Join-Path $BundleRoot "moonlight\system\cloudgime-runtime-agent.exe") "cloudgime-runtime-agent.exe bundle"
 
 $prepareArgs = @("--bundle-root", $BundleRoot)
 if (-not [string]::IsNullOrWhiteSpace($KeeperTunnelProject)) {

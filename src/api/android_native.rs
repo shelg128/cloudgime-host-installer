@@ -337,10 +337,7 @@ fn normalize_display_control_action(action: &str) -> String {
     action.trim().to_ascii_lowercase().replace('-', "_")
 }
 
-async fn run_powershell_script(
-    script_path: &Path,
-    arguments: &[&str],
-) -> Result<String, String> {
+async fn run_powershell_script(script_path: &Path, arguments: &[&str]) -> Result<String, String> {
     let mut command = tokio::process::Command::new("powershell.exe");
     command
         .arg("-NoLogo")
@@ -361,8 +358,13 @@ async fn run_powershell_script(
         command.as_std_mut().creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
 
-    let child = command.spawn().map_err(|err| format!("Failed to spawn powershell: {err}"))?;
-    let output = child.wait_with_output().await.map_err(|err| format!("Failed to wait: {err}"))?;
+    let child = command
+        .spawn()
+        .map_err(|err| format!("Failed to spawn powershell: {err}"))?;
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|err| format!("Failed to wait: {err}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -378,7 +380,6 @@ async fn run_powershell_script(
         ))
     }
 }
-
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -697,13 +698,10 @@ fn pick_effective_launch_app_id(
     apps: Vec<crate::app::host::App>,
     requested_app_id: AppId,
 ) -> Result<AppId, AppError> {
-    if apps.iter().any(|app| app.id == requested_app_id) {
-        return Ok(requested_app_id);
-    }
-
     let selected_app = apps
         .iter()
         .find(|app| app.title.eq_ignore_ascii_case("Desktop"))
+        .or_else(|| apps.iter().find(|app| app.id == requested_app_id))
         .or_else(|| apps.first())
         .ok_or(AppError::BadRequest)?;
 
@@ -804,36 +802,68 @@ fn discover_streamer_host_address() -> Option<String> {
     }
 }
 
-fn extract_public_turn_host(ice_servers: &[RtcIceServer]) -> Option<String> {
+fn extract_turn_host_from_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let remainder = if let Some(val) = trimmed.strip_prefix("turn:") {
+        val
+    } else if let Some(val) = trimmed.strip_prefix("turns:") {
+        val
+    } else {
+        return None;
+    };
+
+    let host_part = remainder
+        .trim_start_matches("//")
+        .split('?')
+        .next()
+        .unwrap_or_default()
+        .split('@')
+        .last()
+        .unwrap_or_default()
+        .trim();
+
+    if host_part.is_empty() {
+        return None;
+    }
+
+    let host = if let Some(rest) = host_part.strip_prefix('[') {
+        rest.split(']').next().unwrap_or_default()
+    } else {
+        host_part.split(':').next().unwrap_or_default()
+    }
+    .trim();
+
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
+fn is_configured_turn_host(ice_servers: &[RtcIceServer], address: &str) -> bool {
+    let normalized_address = address.trim().trim_start_matches('[').trim_end_matches(']');
+    if normalized_address.is_empty() {
+        return false;
+    }
+
     for server in ice_servers {
         for url in &server.urls {
-            let remainder = if let Some(val) = url.strip_prefix("turn:") {
-                val
-            } else if let Some(val) = url.strip_prefix("turns:") {
-                val
-            } else {
+            let Some(turn_host) = extract_turn_host_from_url(url) else {
                 continue;
             };
 
-            let host_part = remainder
-                .trim_start_matches("//")
-                .split('?')
-                .next()
-                .unwrap_or_default()
-                .split('@')
-                .last()
-                .unwrap_or_default()
-                .split(':')
-                .next()
-                .unwrap_or_default()
-                .trim();
-
-            if !host_part.is_empty() && is_public_remote_host_address(host_part) {
-                return Some(host_part.to_string());
+            if turn_host.eq_ignore_ascii_case(normalized_address) {
+                return true;
             }
         }
     }
-    None
+
+    false
+}
+
+fn is_public_direct_remote_host_address(app: &App, address: &str) -> bool {
+    is_public_remote_host_address(address)
+        && !is_configured_turn_host(&app.config().webrtc.ice_servers, address)
 }
 
 fn resolve_android_native_host_address(app: &App, detailed: &DetailedHost) -> String {
@@ -843,23 +873,19 @@ fn resolve_android_native_host_address(app: &App, detailed: &DetailedHost) -> St
         None
     };
 
-    if is_usable_public_host_address(&detailed.address, local_ip) {
+    if is_usable_public_host_address(&detailed.address, local_ip)
+        && !is_configured_turn_host(&app.config().webrtc.ice_servers, &detailed.address)
+    {
         return detailed.address.clone();
     }
 
     if let Some(public_ip) = app.config().webrtc.nat_1to1.as_ref().and_then(|mapping| {
-        mapping
-            .ips
-            .iter()
-            .find(|ip| is_usable_public_host_address(ip, local_ip))
+        mapping.ips.iter().find(|ip| {
+            is_usable_public_host_address(ip, local_ip)
+                && !is_configured_turn_host(&app.config().webrtc.ice_servers, ip)
+        })
     }) {
         return public_ip.clone();
-    }
-
-    if let Some(turn_host) = extract_public_turn_host(&app.config().webrtc.ice_servers) {
-        if is_usable_public_host_address(&turn_host, local_ip) {
-            return turn_host;
-        }
     }
 
     if let Some(discovered_ip) =
@@ -1014,7 +1040,7 @@ async fn resolve_remote_candidate(
 ) -> Option<AndroidNativeRemoteCandidate> {
     let local_ip = host_binding.local_ip.as_deref();
 
-    if is_public_remote_host_address(&host_binding.address) {
+    if is_public_direct_remote_host_address(app, &host_binding.address) {
         return Some(AndroidNativeRemoteCandidate {
             address: host_binding.address.clone(),
             source: "host_binding.address".to_string(),
@@ -1022,10 +1048,10 @@ async fn resolve_remote_candidate(
     }
 
     if let Some(public_ip) = app.config().webrtc.nat_1to1.as_ref().and_then(|mapping| {
-        mapping
-            .ips
-            .iter()
-            .find(|ip| is_usable_public_host_address(ip, local_ip))
+        mapping.ips.iter().find(|ip| {
+            is_usable_public_host_address(ip, local_ip)
+                && !is_configured_turn_host(&app.config().webrtc.ice_servers, ip)
+        })
     }) {
         return Some(AndroidNativeRemoteCandidate {
             address: public_ip.clone(),
@@ -1033,16 +1059,11 @@ async fn resolve_remote_candidate(
         });
     }
 
-    if let Some(turn_host) = extract_public_turn_host(&app.config().webrtc.ice_servers) {
-        if is_usable_public_host_address(&turn_host, local_ip) {
-            return Some(AndroidNativeRemoteCandidate {
-                address: turn_host,
-                source: "ice_servers.turn_host".to_string(),
-            });
-        }
+    if let Some(stun_candidate) = discover_remote_candidate_from_stun(app, local_ip).await {
+        return Some(stun_candidate);
     }
 
-    discover_remote_candidate_from_stun(app, local_ip).await
+    None
 }
 
 async fn build_transport_policy(
@@ -1691,7 +1712,9 @@ pub async fn post_android_native_display_control(
             if let Some(bundle_root) = current_bundle_root() {
                 let mut script_path = bundle_root.join("fix-host-vdd-and-sunshine.ps1");
                 if !script_path.exists() {
-                    script_path = bundle_root.join("tools").join("fix-host-vdd-and-sunshine.ps1");
+                    script_path = bundle_root
+                        .join("tools")
+                        .join("fix-host-vdd-and-sunshine.ps1");
                 }
 
                 if !script_path.exists() {
@@ -1701,7 +1724,8 @@ pub async fn post_android_native_display_control(
                         Ok(_) => Ok(AndroidNativeDisplayControlHelperResult {
                             ok: true,
                             changed: true,
-                            reason: "Display driver dan Sunshine berhasil dipulihkan di PC Host.".to_string(),
+                            reason: "Display driver dan Sunshine berhasil dipulihkan di PC Host."
+                                .to_string(),
                             ..Default::default()
                         }),
                         Err(err) => Err(format!("Gagal menjalankan script perbaikan: {err}")),

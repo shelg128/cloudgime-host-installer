@@ -4,7 +4,7 @@ use std::{
         Arc, Weak,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::anyhow;
@@ -25,7 +25,11 @@ use webrtc::{
             playout_delay_extension::PlayoutDelayExtension,
         },
     },
-    rtp_transceiver::rtp_codec::{RTCRtpHeaderExtensionCapability, RTPCodecType},
+    rtp_transceiver::{
+        RTCRtpTransceiverInit,
+        rtp_codec::{RTCRtpHeaderExtensionCapability, RTPCodecType},
+        rtp_transceiver_direction::RTCRtpTransceiverDirection,
+    },
     sdp::extmap::ABS_SEND_TIME_URI,
     track::track_local::{
         TrackLocal, track_local_static_rtp::TrackLocalStaticRTP,
@@ -36,6 +40,9 @@ use webrtc::{
 const PLAYOUT_DELAY_URI: &str = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay";
 const VIDEO_PACKET_PACING_BATCH: usize = 8;
 const VIDEO_PACKET_PACING_DELAY_US: u64 = 350;
+const RTP_BINDING_UNPAUSE_WAIT: Duration = Duration::from_secs(5);
+const RTP_BINDING_UNPAUSE_POLL: Duration = Duration::from_millis(20);
+const RTP_WRITE_TIMEOUT: Duration = Duration::from_millis(1500);
 
 pub fn register_header_extensions(api_media: &mut MediaEngine) -> Result<(), webrtc::Error> {
     api_media.register_header_extension(
@@ -164,7 +171,18 @@ where
 
         let track_sender = match track_sender {
             Some(sender) => sender,
-            None => peer.add_track(rtp_track).await?,
+            None => {
+                let transceiver = peer
+                    .add_transceiver_from_track(
+                        rtp_track,
+                        Some(RTCRtpTransceiverInit {
+                            direction: RTCRtpTransceiverDirection::Sendonly,
+                            send_encodings: vec![],
+                        }),
+                    )
+                    .await?;
+                transceiver.sender().await
+            }
         };
 
         // Read incoming RTCP packets
@@ -228,6 +246,9 @@ async fn sample_sender<Track>(
     Track: TrackLike,
 {
     let mut first_write_logged = false;
+    let mut samples_written = 0u64;
+    let mut bytes_written_total = 0u64;
+    let mut last_stats_log_at = Instant::now();
     loop {
         let frame = {
             let Some(queue) = queue.upgrade() else {
@@ -259,7 +280,7 @@ async fn sample_sender<Track>(
             let now_secs = now.as_secs() as f64 + now.subsec_nanos() as f64 * 1e-9;
             let abs_send_time: u64 = (now_secs * 262_144.0) as u64;
 
-            if let Err(err) = track
+            match track
                 .write_with_extensions(
                     sample,
                     &[
@@ -271,10 +292,23 @@ async fn sample_sender<Track>(
                 )
                 .await
             {
-                warn!("[Stream]: {label} track.write_sample failed: {err}");
-            } else if !first_write_logged {
-                first_write_logged = true;
-                info!("[Stream]: first {label} WebRTC sample written");
+                Ok(bytes_written) => {
+                    samples_written = samples_written.saturating_add(1);
+                    bytes_written_total = bytes_written_total.saturating_add(bytes_written as u64);
+                    if !first_write_logged {
+                        first_write_logged = true;
+                        info!("[Stream]: first {label} WebRTC sample written");
+                    }
+                    if last_stats_log_at.elapsed() >= Duration::from_secs(5) {
+                        last_stats_log_at = Instant::now();
+                        info!(
+                            "[Stream]: {label} WebRTC RTP stats samples_written={samples_written} bytes_written={bytes_written_total}"
+                        );
+                    }
+                }
+                Err(err) => {
+                    warn!("[Stream]: {label} track.write_sample failed: {err}");
+                }
             }
         }
     }
@@ -287,7 +321,7 @@ pub trait TrackLike: Send + Sync + 'static {
         &self,
         sample: Self::Sample,
         extensions: &[HeaderExtension],
-    ) -> impl Future<Output = Result<(), anyhow::Error>> + Send;
+    ) -> impl Future<Output = Result<usize, anyhow::Error>> + Send;
 
     fn track(self: Arc<Self>) -> Arc<dyn TrackLocal + Send + Sync + 'static>;
 }
@@ -299,10 +333,12 @@ impl TrackLike for TrackLocalStaticSample {
         &self,
         sample: Self::Sample,
         extensions: &[HeaderExtension],
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<usize, anyhow::Error> {
+        let bytes_written = sample.data.len();
         self.write_sample_with_extensions(&sample, extensions)
             .await
-            .map_err(anyhow::Error::from)
+            .map_err(anyhow::Error::from)?;
+        Ok(bytes_written)
     }
 
     fn track(self: Arc<Self>) -> Arc<dyn TrackLocal + Send + Sync + 'static> {
@@ -333,18 +369,30 @@ impl TrackLike for SequencedTrackLocalStaticRTP {
         &self,
         mut sample: Self::Sample,
         extensions: &[HeaderExtension],
-    ) -> Result<(), anyhow::Error> {
-        let (any_paused, all_paused) = (
-            self.track.any_binding_paused().await,
-            self.track.all_binding_paused().await,
-        );
+    ) -> Result<usize, anyhow::Error> {
+        let mut any_paused = self.track.any_binding_paused().await;
+        let mut all_paused = self.track.all_binding_paused().await;
 
         if all_paused {
             if !self.all_paused_logged.swap(true, Ordering::Relaxed) {
-                warn!("[Stream]: RTP write skipped because all bindings are paused");
+                warn!("[Stream]: RTP write waiting because all bindings are paused");
             }
-            // Abort already here to not increment sequence numbers.
-            return Ok(());
+
+            let wait_started = tokio::time::Instant::now();
+            while all_paused && wait_started.elapsed() < RTP_BINDING_UNPAUSE_WAIT {
+                tokio::time::sleep(RTP_BINDING_UNPAUSE_POLL).await;
+                any_paused = self.track.any_binding_paused().await;
+                all_paused = self.track.all_binding_paused().await;
+            }
+
+            if all_paused {
+                warn!("[Stream]: RTP write skipped because all bindings stayed paused");
+                // Abort already here to not increment sequence numbers.
+                return Ok(0);
+            }
+
+            self.all_paused_logged.store(false, Ordering::Relaxed);
+            info!("[Stream]: RTP write resumed after bindings became active");
         }
         if any_paused {
             warn!("WebRTC: not all paused but any paused");
@@ -354,17 +402,29 @@ impl TrackLike for SequencedTrackLocalStaticRTP {
         sample.header.sequence_number = *sequence_number;
         *sequence_number = sequence_number.wrapping_add(1);
 
-        let bytes_written = self
-            .track
-            .write_rtp_with_extensions(&sample, extensions)
-            .await
-            .map_err(anyhow::Error::from)?;
+        let bytes_written = match tokio::time::timeout(
+            RTP_WRITE_TIMEOUT,
+            self.track.write_rtp_with_extensions(&sample, extensions),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(anyhow::Error::from)?,
+            Err(_) => {
+                warn!(
+                    "[Stream]: RTP write timed out after {}ms; dropping packet seq={} payload_bytes={}",
+                    RTP_WRITE_TIMEOUT.as_millis(),
+                    sample.header.sequence_number,
+                    sample.payload.len()
+                );
+                return Ok(0);
+            }
+        };
 
         if bytes_written == 0 {
             warn!("[Stream]: RTP write completed with 0 bytes");
         }
 
-        Ok(())
+        Ok(bytes_written)
     }
 
     fn track(self: Arc<Self>) -> Arc<dyn TrackLocal + Send + Sync + 'static> {

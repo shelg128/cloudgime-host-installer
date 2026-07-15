@@ -1,4 +1,4 @@
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
@@ -2716,6 +2716,12 @@ internal static class Program
                     detail = sustainedProbe.Ok
                         ? (runtime.Legacy ? "probe_ok:nvenc_stream_sanity_legacy" : "probe_ok:nvenc_stream_sanity")
                         : $"nvenc_stream_sanity_failed {SummarizeEncoderProbeFailure(candidate.EncoderKey, $"{sustainedProbe.StdOut}\n{sustainedProbe.StdErr}")}";
+
+                    if (ok && TryDetectRecentSunshineNvencFailure(runtime.ConfigPath, out var runtimeFailureDetail))
+                    {
+                        ok = false;
+                        detail = runtimeFailureDetail;
+                    }
                 }
 
                 probes.Add(new EncoderProbeResult
@@ -2748,6 +2754,60 @@ internal static class Program
             null,
             45000
         );
+    }
+
+    private static bool TryDetectRecentSunshineNvencFailure(string configPath, out string detail)
+    {
+        detail = string.Empty;
+
+        try
+        {
+            var logPath = ResolveSunshineLogPath(configPath);
+            if (string.IsNullOrWhiteSpace(logPath) || !File.Exists(logPath))
+            {
+                return false;
+            }
+
+            var logInfo = new FileInfo(logPath);
+            if (DateTime.UtcNow - logInfo.LastWriteTimeUtc > TimeSpan.FromHours(12))
+            {
+                return false;
+            }
+
+            var text = ReadTextFileShared(logPath);
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return false;
+            }
+
+            var tail = text.Length > 160_000 ? text[^160_000..] : text;
+            if (!tail.Contains("nvenc", StringComparison.OrdinalIgnoreCase) &&
+                !tail.Contains("NvEnc", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            var failures = ExtractMatchingLines(
+                tail,
+                "encode wait timeout",
+                "NVENC returned empty packet",
+                "Could not encode video packet",
+                "Failed to create encoder D3D11 device",
+                "Could not open codec [h264_nvenc]",
+                "Failed to create encoder [h264_nvenc]");
+            if (string.IsNullOrWhiteSpace(failures))
+            {
+                return false;
+            }
+
+            detail = $"sunshine_runtime_nvenc_recent_failure {CompactProcessOutput(failures)}";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            detail = $"sunshine_runtime_nvenc_log_check_failed {CompactProcessOutput(ex.Message)}";
+            return false;
+        }
     }
 
     private static bool IsBundledFfmpegSource(string? source) =>
@@ -3040,15 +3100,6 @@ internal static class Program
                 reason = legacyNvenc.Reason;
                 return legacyNvenc.Runtime;
             }
-
-            var modernSoftware = Pick("software", runtime => !runtime.Legacy, "ffmpeg_probe:software");
-            if (modernSoftware.Found)
-            {
-                selectedEncoder = modernSoftware.Encoder;
-                reason = modernSoftware.Reason;
-                return modernSoftware.Runtime;
-            }
-
             var legacyNvencRecovery = Pick(
                 "nvenc",
                 runtime => runtime.Legacy,
@@ -3114,15 +3165,6 @@ internal static class Program
                 return amdvce.Runtime;
             }
         }
-
-        var software = Pick("software", runtime => !runtime.Legacy, "ffmpeg_probe:software");
-        if (software.Found)
-        {
-            selectedEncoder = software.Encoder;
-            reason = software.Reason;
-            return software.Runtime;
-        }
-
         var anyHealthy = probes.FirstOrDefault(probe =>
             probe.Ok
             && runtimeByKey.TryGetValue(probe.RuntimeKey, out var runtime)
@@ -3130,7 +3172,9 @@ internal static class Program
         if (anyHealthy is not null && runtimeByKey.TryGetValue(anyHealthy.RuntimeKey, out var fallbackRuntime))
         {
             selectedEncoder = anyHealthy.EncoderKey;
-            reason = $"ffmpeg_probe:fallback:{fallbackRuntime.Key}";
+            reason = anyHealthy.EncoderKey.Equals("software", StringComparison.OrdinalIgnoreCase)
+                ? $"ffmpeg_probe:software:{fallbackRuntime.Key}"
+                : $"ffmpeg_probe:fallback:{fallbackRuntime.Key}";
             return fallbackRuntime;
         }
 
@@ -3208,20 +3252,7 @@ internal static class Program
         {
             SetConfigValue(lines, "encoder", profile.SelectedEncoder);
         }
-
-        if (profile.SelectedEncoder.Equals("software", StringComparison.OrdinalIgnoreCase))
-        {
-            SetConfigValue(lines, "sw_preset", "ultrafast");
-            SetConfigValue(lines, "sw_tune", "zerolatency");
-            SetConfigValue(lines, "min_threads", profile.SoftwareMinThreads.ToString());
-            RemoveConfigKey(lines, "nvenc_preset");
-            RemoveConfigKey(lines, "nvenc_twopass");
-            RemoveConfigKey(lines, "nvenc_spatial_aq");
-            RemoveConfigKey(lines, "nvenc_vbv_increase");
-            RemoveConfigKey(lines, "nvenc_realtime_hags");
-            RemoveConfigKey(lines, "nvenc_latency_over_power");
-        }
-        else if (profile.SelectedEncoder.Equals("nvenc", StringComparison.OrdinalIgnoreCase))
+        if (profile.SelectedEncoder.Equals("nvenc", StringComparison.OrdinalIgnoreCase))
         {
             SetConfigValue(lines, "nvenc_preset", "1");
             SetConfigValue(lines, "nvenc_twopass", "disabled");
@@ -3232,6 +3263,18 @@ internal static class Program
             RemoveConfigKey(lines, "sw_preset");
             RemoveConfigKey(lines, "sw_tune");
             RemoveConfigKey(lines, "min_threads");
+        }
+        else if (profile.SelectedEncoder.Equals("software", StringComparison.OrdinalIgnoreCase))
+        {
+            SetConfigValue(lines, "sw_preset", "superfast");
+            SetConfigValue(lines, "sw_tune", "zerolatency");
+            SetConfigValue(lines, "min_threads", Math.Max(1, profile.SoftwareMinThreads).ToString(CultureInfo.InvariantCulture));
+            RemoveConfigKey(lines, "nvenc_preset");
+            RemoveConfigKey(lines, "nvenc_twopass");
+            RemoveConfigKey(lines, "nvenc_spatial_aq");
+            RemoveConfigKey(lines, "nvenc_vbv_increase");
+            RemoveConfigKey(lines, "nvenc_realtime_hags");
+            RemoveConfigKey(lines, "nvenc_latency_over_power");
         }
         else
         {
@@ -3358,18 +3401,8 @@ internal static class Program
                 lines.RemoveAt(lines.Count - 1);
             }
 
-            var outputName = ShouldUseSunshinePrimaryCapture(streamDisplay)
-                ? null
-                : ResolveSunshineCaptureOutputName(configPath, streamDisplay) ?? streamDisplay.DeviceName;
-            if (string.IsNullOrWhiteSpace(outputName))
-            {
-                RemoveConfigKey(lines, "output_name");
-            }
-            else
-            {
-                SetConfigValue(lines, "output_name", outputName);
-            }
-            // Keep Sunshine on automatic GPU selection. A stale adapter_name can
+            var outputName = "primary-display";
+            RemoveConfigKey(lines, "output_name");
             // block capture when the selected display changes between QEMU, MTT, and Parsec.
             RemoveConfigKey(lines, "adapter_name");
 
@@ -8862,7 +8895,7 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
             modeText = $"{modeText} @{display.Frequency}Hz";
         }
 
-        return $"{descriptor} · {modeText} · {string.Join(" · ", flags)}";
+        return $"{descriptor} Â· {modeText} Â· {string.Join(" Â· ", flags)}";
     }
 
     private static StreamDisplayPreference ReadStreamDisplayPreference(string bundleRoot)
@@ -9031,10 +9064,28 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
         var mode = NormalizeStreamDisplayMode(preference.Mode);
         if (mode is "mtt_vdd")
         {
-            var currentDisplays = EnsureVddOnline(displays, requestedMode);
-            var target = FindVddDisplay(currentDisplays, requireActive: true)
-                ?? throw new InvalidOperationException("Cloudgime VDD display is not active for stream.");
-            return (currentDisplays, target);
+            try
+            {
+                var currentDisplays = EnsureVddOnline(displays, requestedMode);
+                var target = FindVddDisplay(currentDisplays, requireActive: true);
+                if (target is not null)
+                {
+                    return (currentDisplays, target);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Warning: Failed to bring VDD online: {ex.Message}");
+            }
+
+            var fallback = FindPrimaryDisplay(displays) ?? displays.FirstOrDefault(d => d.Active);
+            if (fallback is not null)
+            {
+                Console.Error.WriteLine($"Warning: VDD did not come online. Falling back to active display: {fallback.DeviceName}");
+                return (displays, fallback);
+            }
+
+            throw new InvalidOperationException("Cloudgime VDD display is not active for stream, and no fallback display was found.");
         }
 
         if (mode is "parsec_vda")
@@ -9106,8 +9157,9 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
             {
                 return EnsureVddOnline(displays, requestedMode);
             }
-            catch when (stateMode is not "mtt_vdd")
+            catch (Exception ex)
             {
+                Console.Error.WriteLine($"Warning: Failed to ensure VDD online for resize: {ex.Message}. Continuing with current displays.");
                 return displays;
             }
         }
@@ -9680,3 +9732,10 @@ internal static class NativeMethods
         dmSize = (short)Marshal.SizeOf<DEVMODE>(),
     };
 }
+
+
+
+
+
+
+

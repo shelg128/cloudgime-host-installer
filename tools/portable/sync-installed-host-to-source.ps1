@@ -169,9 +169,14 @@ Write-Host "[SYNC] Menyalin helper runtime aktif ke source..." -ForegroundColor 
 New-Item -ItemType Directory -Force -Path $toolsRoot | Out-Null
 Copy-FileSafe (Join-Path $InstalledRoot "bundle-process-manager.exe") (Join-Path $toolsRoot "bundle-process-manager.exe")
 
-$keeperTunnelExe = Join-Path $InstalledRoot "keeper-tunnel\KeeperTunnelAgent.exe"
+$keeperTunnelExe = Join-Path $InstalledRoot "keeper-tunnel\cloudgimehosttunnel.exe"
 if (Test-Path -LiteralPath $keeperTunnelExe) {
-    Copy-FileSafe $keeperTunnelExe (Join-Path $toolsRoot "keeper-tunnel\KeeperTunnelAgent.exe")
+    Copy-FileSafe $keeperTunnelExe (Join-Path $toolsRoot "keeper-tunnel\cloudgimehosttunnel.exe")
+} else {
+    $legacyKeeperTunnelExe = Join-Path $InstalledRoot "keeper-tunnel\KeeperTunnelAgent.exe"
+    if (Test-Path -LiteralPath $legacyKeeperTunnelExe) {
+        Copy-FileSafe $legacyKeeperTunnelExe (Join-Path $toolsRoot "keeper-tunnel\cloudgimehosttunnel.exe")
+    }
 }
 
 Write-Host "[SYNC] Source host sudah diselaraskan dengan runtime stabil dari mesin ini." -ForegroundColor Green

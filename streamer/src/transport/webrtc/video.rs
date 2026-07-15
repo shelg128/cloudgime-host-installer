@@ -92,6 +92,56 @@ impl WebRtcVideo {
         }
     }
 
+    pub async fn prepare(&mut self) -> Result<(), anyhow::Error> {
+        if matches!(self.active_format, Some(VideoFormat::H264)) && self.codec.is_some() {
+            return Ok(());
+        }
+
+        let Some(codec) = video_format_to_codec(VideoFormat::H264) else {
+            anyhow::bail!("missing H264 codec for WebRTC video prebind");
+        };
+
+        let needs_idr = self.needs_idr.clone();
+        self.sender
+            .create_track(
+                TrackLocalStaticRTP::new(
+                    codec.capability.clone(),
+                    "video".to_string(),
+                    "moonlight".to_string(),
+                )
+                .into(),
+                {
+                    let needs_idr = needs_idr.clone();
+
+                    move |packet| {
+                        let packet = packet.as_any();
+
+                        if packet.is::<PictureLossIndication>() {
+                            needs_idr.store(true, Ordering::Release);
+                        }
+                        if let Some(_max_bitrate) =
+                            packet.downcast_ref::<ReceiverEstimatedMaximumBitrate>()
+                        {
+                            // Moonlight doesn't support dynamic bitrate changing :(
+                        }
+                    }
+                },
+            )
+            .await?;
+
+        self.clock_rate = codec.capability.clock_rate;
+        self.codec = Some(VideoCodec::H264 {
+            nal_reader: H264Reader::new(Cursor::new(Vec::new()), 0),
+            payloader: Default::default(),
+        });
+        self.samples.clear();
+        self.sender.clear_queue(true).await;
+        self.active_format = Some(VideoFormat::H264);
+        info!("[Stream] WebRTC video track prepared");
+
+        Ok(())
+    }
+
     pub async fn set_codecs(&mut self, supported_codecs: SupportedVideoFormats) {
         self.supported_video_formats = supported_codecs;
     }

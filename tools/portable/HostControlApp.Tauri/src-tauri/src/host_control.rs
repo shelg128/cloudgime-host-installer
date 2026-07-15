@@ -61,6 +61,7 @@ pub struct ShellState {
     paths: PathView,
     host_user_daemon_task_health: Value,
     windows_native_diagnostic_reports: Value,
+    stream_readiness: StreamReadinessView,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -89,6 +90,14 @@ pub struct ActivationView {
     sentinel_pc_id: String,
     sentinel_device_id: String,
     keeper_entry_id: String,
+    application_activation_id: String,
+    application_type: String,
+    pc_label: String,
+    credential_ref: String,
+    host_http_port: i32,
+    host_stream_udp_start: i32,
+    host_stream_udp_end: i32,
+    host_stream_proxy_route: String,
     token_kind: String,
     instance_type: String,
     phase: String,
@@ -106,6 +115,25 @@ pub struct ActivationView {
 pub struct NetworkView {
     public_url: String,
     local_url: String,
+}
+
+#[derive(Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamReadinessComponent {
+    key: String,
+    label: String,
+    status: String,
+    message: String,
+    fix_action: String,
+    fix_label: String,
+}
+
+#[derive(Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamReadinessView {
+    components: Vec<StreamReadinessComponent>,
+    all_ready: bool,
+    evaluated_at: String,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -218,6 +246,16 @@ struct HostActivationStateRecord {
     sentinel_pc_id: String,
     sentinel_device_id: String,
     keeper_entry_id: String,
+    application_activation_id: String,
+    application_type: String,
+    pc_label: String,
+    credential_ref: String,
+    host_http_port: i32,
+    host_stream_udp_start: i32,
+    host_stream_udp_end: i32,
+    host_stream_proxy_route: String,
+    license_assignments: Value,
+    license_policies: Value,
     runtime_token: String,
     activated_at_utc: String,
     redeemed_at_utc: String,
@@ -357,6 +395,38 @@ where
     })
 }
 
+fn value_to_i32(value: &Value) -> i32 {
+    match value {
+        Value::Number(number) => number
+            .as_i64()
+            .unwrap_or_default()
+            .clamp(0, i32::MAX as i64) as i32,
+        Value::String(text) => text.trim().parse::<i32>().unwrap_or_default().max(0),
+        Value::Bool(value) => i32::from(*value),
+        _ => 0,
+    }
+}
+
+fn value_field_string(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .map(|item| match item {
+            Value::String(text) => text.trim().to_string(),
+            Value::Number(number) => number.to_string(),
+            Value::Bool(value) => value.to_string(),
+            _ => String::new(),
+        })
+        .unwrap_or_default()
+}
+
+fn value_field_i32(value: &Value, key: &str) -> i32 {
+    value.get(key).map(value_to_i32).unwrap_or_default()
+}
+
+fn assignment_value<'a>(assignments: &'a Value, key: &str) -> Option<&'a Value> {
+    assignments.get(key).filter(|value| value.is_object())
+}
+
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 struct RedeemPayload {
@@ -421,6 +491,19 @@ struct PresencePayload {
 #[serde(rename_all = "camelCase", default)]
 struct ClaimSetupTokenPayload {
     ok: bool,
+    #[serde(deserialize_with = "deserialize_stringish")]
+    application_activation_id: String,
+    #[serde(deserialize_with = "deserialize_stringish")]
+    application_type: String,
+    #[serde(deserialize_with = "deserialize_stringish")]
+    activation_status: String,
+    #[serde(deserialize_with = "deserialize_stringish")]
+    pc_label: String,
+    assignments: Value,
+    port_assignments: Value,
+    policies: Value,
+    #[serde(deserialize_with = "deserialize_stringish")]
+    credential_ref: String,
     #[serde(deserialize_with = "deserialize_stringish")]
     token_kind: String,
     #[serde(deserialize_with = "deserialize_stringish")]
@@ -632,7 +715,10 @@ pub async fn run_host_action(
         _ => return Err("Unsupported host action.".into()),
     };
 
-    if matches!(action.as_str(), "start_host" | "restart_runtime" | "start_service") {
+    if matches!(
+        action.as_str(),
+        "start_host" | "restart_runtime" | "start_service"
+    ) {
         configure_host_keeper_tunnel(&bundle_root, &activation, None)?;
     }
 
@@ -1078,7 +1164,8 @@ pub async fn claim_setup_token(
 
     let mut actual_setup_token = normalized_setup_token.clone();
     if normalized_setup_token.starts_with("cgpair_") {
-        if let Some((parsed_token, parsed_base_url)) = decode_cgpair_token(&normalized_setup_token) {
+        if let Some((parsed_token, parsed_base_url)) = decode_cgpair_token(&normalized_setup_token)
+        {
             actual_setup_token = parsed_token;
             if let Ok(normalized_url) = normalize_control_plane(&parsed_base_url) {
                 activation.control_plane_url = normalized_url;
@@ -1121,7 +1208,11 @@ pub async fn claim_setup_token(
     if !status.is_success() || !payload.ok {
         return Err(build_friendly_claim_error(status.as_u16(), &payload, &raw));
     }
-    if payload.token_kind.trim().eq_ignore_ascii_case("control_node") {
+    if payload
+        .token_kind
+        .trim()
+        .eq_ignore_ascii_case("control_node")
+    {
         return Err(
             "Lisensi Aktivasi ini adalah Control Node. Aktifkan dari Power Panel/Keeper, lalu gunakan Lisensi Instance Pair atau Always-On Host di Cloudgime Host.".into(),
         );
@@ -1156,6 +1247,7 @@ pub async fn claim_setup_token(
     if !payload.keeper_entry_id.trim().is_empty() {
         activation.keeper_entry_id = payload.keeper_entry_id.trim().into();
     }
+    apply_license_assignment_from_claim(&mut activation, &payload);
     if !payload.control_plane_url.trim().is_empty() {
         activation.control_plane_url = normalize_control_plane(&payload.control_plane_url)?;
     } else {
@@ -1167,11 +1259,7 @@ pub async fn claim_setup_token(
         activation.activation_state = "activated".into();
     }
     save_activation_state(&bundle_root, &activation)?;
-    configure_host_keeper_tunnel(
-        &bundle_root,
-        &activation,
-        Some(payload.device_token.trim()),
-    )?;
+    configure_host_keeper_tunnel(&bundle_root, &activation, Some(payload.device_token.trim()))?;
 
     let activation_token = normalize_activation_token(&payload.activation_token);
     if false {
@@ -1199,6 +1287,77 @@ pub async fn claim_setup_token(
     };
     outcome.message = format!("{} siap. {}", binding_copy, outcome.message);
     Ok(outcome)
+}
+
+fn apply_license_assignment_from_claim(
+    activation: &mut HostActivationStateRecord,
+    payload: &ClaimSetupTokenPayload,
+) {
+    if !payload.application_activation_id.trim().is_empty() {
+        activation.application_activation_id = payload.application_activation_id.trim().into();
+    }
+    if !payload.application_type.trim().is_empty() {
+        activation.application_type = payload.application_type.trim().into();
+    } else if !activation.application_activation_id.trim().is_empty() {
+        activation.application_type = "CLOUDGIME_HOST".into();
+    }
+    if !payload.pc_label.trim().is_empty() {
+        activation.pc_label = payload.pc_label.trim().into();
+    } else if !payload.slot_label.trim().is_empty() {
+        activation.pc_label = payload.slot_label.trim().into();
+    }
+    if !payload.credential_ref.trim().is_empty() {
+        activation.credential_ref = payload.credential_ref.trim().into();
+    }
+
+    let host_http_port = value_field_i32(&payload.port_assignments, "HOST_HTTP").max(
+        assignment_value(&payload.assignments, "HOST_HTTP")
+            .map(|value| value_field_i32(value, "port"))
+            .unwrap_or_default(),
+    );
+    if host_http_port > 0 {
+        activation.host_http_port = host_http_port;
+    }
+
+    let host_stream_udp_start = value_field_i32(&payload.port_assignments, "HOST_STREAM_UDP_START")
+        .max(
+            assignment_value(&payload.assignments, "HOST_STREAM_UDP")
+                .map(|value| value_field_i32(value, "portStart"))
+                .unwrap_or_default(),
+        );
+    if host_stream_udp_start > 0 {
+        activation.host_stream_udp_start = host_stream_udp_start;
+    }
+
+    let host_stream_udp_end = value_field_i32(&payload.port_assignments, "HOST_STREAM_UDP_END")
+        .max(
+            assignment_value(&payload.assignments, "HOST_STREAM_UDP")
+                .map(|value| value_field_i32(value, "portEnd"))
+                .unwrap_or_default(),
+        );
+    if host_stream_udp_end > 0 {
+        activation.host_stream_udp_end = host_stream_udp_end;
+    }
+
+    let host_stream_proxy_route = assignment_value(&payload.assignments, "HOST_STREAM_PROXY_ROUTE")
+        .map(|value| value_field_string(value, "value"))
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            assignment_value(&payload.assignments, "HOST_ROUTE_NAMESPACE")
+                .map(|value| value_field_string(value, "value"))
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_default();
+    if !host_stream_proxy_route.trim().is_empty() {
+        activation.host_stream_proxy_route = host_stream_proxy_route;
+    }
+
+    if payload.assignments.is_object() {
+        activation.license_assignments = payload.assignments.clone();
+    }
+    if payload.policies.is_object() {
+        activation.license_policies = payload.policies.clone();
+    }
 }
 
 #[tauri::command]
@@ -1250,6 +1409,16 @@ pub async fn reset_local_host_identity(
         sentinel_pc_id: String::new(),
         sentinel_device_id: String::new(),
         keeper_entry_id: String::new(),
+        application_activation_id: String::new(),
+        application_type: String::new(),
+        pc_label: String::new(),
+        credential_ref: String::new(),
+        host_http_port: 0,
+        host_stream_udp_start: 0,
+        host_stream_udp_end: 0,
+        host_stream_proxy_route: String::new(),
+        license_assignments: Value::Null,
+        license_policies: Value::Null,
         runtime_token: String::new(),
         activated_at_utc: String::new(),
         redeemed_at_utc: String::new(),
@@ -1411,6 +1580,16 @@ fn reset_stale_local_activation(activation: &mut HostActivationStateRecord) {
     activation.redeemed_at_utc.clear();
     activation.last_heartbeat_at_utc.clear();
     activation.last_ready_for_stream = false;
+    activation.application_activation_id.clear();
+    activation.application_type.clear();
+    activation.pc_label.clear();
+    activation.credential_ref.clear();
+    activation.host_http_port = 0;
+    activation.host_stream_udp_start = 0;
+    activation.host_stream_udp_end = 0;
+    activation.host_stream_proxy_route.clear();
+    activation.license_assignments = Value::Null;
+    activation.license_policies = Value::Null;
 }
 
 fn should_reset_stale_local_activation(activation: &HostActivationStateRecord) -> bool {
@@ -1434,6 +1613,16 @@ fn prepare_fresh_setup_token_identity(activation: &mut HostActivationStateRecord
     activation.sentinel_pc_id.clear();
     activation.sentinel_device_id.clear();
     activation.keeper_entry_id.clear();
+    activation.application_activation_id.clear();
+    activation.application_type.clear();
+    activation.pc_label.clear();
+    activation.credential_ref.clear();
+    activation.host_http_port = 0;
+    activation.host_stream_udp_start = 0;
+    activation.host_stream_udp_end = 0;
+    activation.host_stream_proxy_route.clear();
+    activation.license_assignments = Value::Null;
+    activation.license_policies = Value::Null;
     reset_stale_local_activation(activation);
 }
 
@@ -1518,9 +1707,9 @@ pub async fn send_heartbeat(session: State<'_, AppSession>) -> Result<ActionOutc
 
     Ok(ActionOutcome {
         message: if payload.ready_for_stream {
-            "Heartbeat sent. Host is ready for stream.".into()
+            "Siap untuk stream. Runtime aktif dan heartbeat terakhir sudah dikirim.".into()
         } else {
-            "Heartbeat sent. Host runtime is not fully ready yet.".into()
+            "Heartbeat terakhir sudah dikirim.".into()
         },
         state: build_shell_state(true)?,
     })
@@ -1893,6 +2082,14 @@ fn build_shell_state(unlocked: bool) -> Result<ShellState, String> {
                 sentinel_pc_id: activation.sentinel_pc_id.clone(),
                 sentinel_device_id: activation.sentinel_device_id.clone(),
                 keeper_entry_id: activation.keeper_entry_id.clone(),
+                application_activation_id: activation.application_activation_id.clone(),
+                application_type: activation.application_type.clone(),
+                pc_label: activation.pc_label.clone(),
+                credential_ref: activation.credential_ref.clone(),
+                host_http_port: activation.host_http_port,
+                host_stream_udp_start: activation.host_stream_udp_start,
+                host_stream_udp_end: activation.host_stream_udp_end,
+                host_stream_proxy_route: activation.host_stream_proxy_route.clone(),
                 token_kind: activation.setup_token_kind.clone(),
                 instance_type: activation.instance_type.clone(),
                 phase: activation.activation_state.clone(),
@@ -1915,6 +2112,7 @@ fn build_shell_state(unlocked: bool) -> Result<ShellState, String> {
             paths: build_paths(&bundle_root, &HostStatusData::default()),
             host_user_daemon_task_health: Value::Null,
             windows_native_diagnostic_reports: Value::Null,
+            stream_readiness: StreamReadinessView::default(),
         });
     }
 
@@ -1945,6 +2143,14 @@ fn build_shell_state(unlocked: bool) -> Result<ShellState, String> {
             sentinel_pc_id: activation.sentinel_pc_id.clone(),
             sentinel_device_id: activation.sentinel_device_id.clone(),
             keeper_entry_id: activation.keeper_entry_id.clone(),
+            application_activation_id: activation.application_activation_id.clone(),
+            application_type: activation.application_type.clone(),
+            pc_label: activation.pc_label.clone(),
+            credential_ref: activation.credential_ref.clone(),
+            host_http_port: activation.host_http_port,
+            host_stream_udp_start: activation.host_stream_udp_start,
+            host_stream_udp_end: activation.host_stream_udp_end,
+            host_stream_proxy_route: activation.host_stream_proxy_route.clone(),
             token_kind: activation.setup_token_kind.clone(),
             instance_type: activation.instance_type.clone(),
             phase: activation.activation_state.clone(),
@@ -1993,6 +2199,7 @@ fn build_shell_state(unlocked: bool) -> Result<ShellState, String> {
             raw_status_json: status.raw_json.clone(),
         },
         paths,
+        stream_readiness: eval_stream_readiness(&bundle_root, &activation, &status, &network),
         host_user_daemon_task_health: read_json_file_value(
             &bundle_root
                 .join("moonlight")
@@ -2290,13 +2497,15 @@ fn resolve_bundle_root() -> Result<PathBuf, String> {
 
     if let Some(layout) = load_installed_layout() {
         let candidate = PathBuf::from(layout.bundle_root.trim());
-        if host_installer_path(&candidate).exists() {
+        if host_installer_path(&candidate).exists() || has_activation_state_at(&candidate) {
             return Ok(candidate);
         }
     }
 
     let installed_default = default_installed_bundle_root();
-    if host_installer_path(&installed_default).exists() {
+    if host_installer_path(&installed_default).exists()
+        || has_activation_state_at(&installed_default)
+    {
         return Ok(installed_default);
     }
 
@@ -2329,6 +2538,14 @@ fn resolve_bundle_root() -> Result<PathBuf, String> {
 
 fn host_installer_path(bundle_root: &Path) -> PathBuf {
     bundle_root.join("host-installer.exe")
+}
+
+fn has_activation_state_at(bundle_root: &Path) -> bool {
+    bundle_root
+        .join("moonlight")
+        .join("server")
+        .join("host_activation_state.json")
+        .exists()
 }
 
 fn host_bootstrap_path(install_root: &Path) -> PathBuf {
@@ -2511,7 +2728,10 @@ fn host_keeper_status_path(bundle_root: &Path) -> PathBuf {
 }
 
 fn legacy_keeper_data_root() -> PathBuf {
-    program_data_root().join("Cloudgime").join("Keeper").join("data")
+    program_data_root()
+        .join("Cloudgime")
+        .join("Keeper")
+        .join("data")
 }
 
 fn legacy_keeper_env_path() -> PathBuf {
@@ -2524,7 +2744,11 @@ fn normalize_pc_id_value(value: &str) -> String {
         return String::new();
     }
     let normalized = digits.trim_start_matches('0').to_string();
-    let candidate = if normalized.is_empty() { "0" } else { normalized.as_str() };
+    let candidate = if normalized.is_empty() {
+        "0"
+    } else {
+        normalized.as_str()
+    };
     match candidate.parse::<u32>() {
         Ok(parsed) if parsed > 0 => parsed.to_string(),
         _ => String::new(),
@@ -2602,7 +2826,10 @@ fn write_host_keeper_env(
 ) -> Result<(), String> {
     let agent_path = host_keeper_agent_path(bundle_root);
     if !agent_path.exists() {
-        return Err("cloudgimehosttunnel.exe belum ikut di bundle host ini. Build Host Setup terbaru dulu.".into());
+        return Err(
+            "cloudgimehosttunnel.exe belum ikut di bundle host ini. Build Host Setup terbaru dulu."
+                .into(),
+        );
     }
 
     let device_id = activation.sentinel_device_id.trim().to_string();
@@ -2618,11 +2845,17 @@ fn write_host_keeper_env(
     };
 
     if device_id.is_empty() || device_token.trim().is_empty() || pc_id.is_empty() {
-        return Err("Binding Lisensi Aktivasi belum lengkap. deviceId, deviceToken, dan pcId wajib terisi.".into());
+        return Err(
+            "Binding Lisensi Aktivasi belum lengkap. deviceId, deviceToken, dan pcId wajib terisi."
+                .into(),
+        );
     }
 
-    let env_lines = [
-        format!("CLOUDRENTAL_API_BASE={}", activation.control_plane_url.trim()),
+    let mut env_lines = vec![
+        format!(
+            "CLOUDRENTAL_API_BASE={}",
+            activation.control_plane_url.trim()
+        ),
         format!("CLOUDRENTAL_DEVICE_ID_DEFAULT={device_id}"),
         format!("CLOUDRENTAL_DEVICE_TOKEN={}", device_token.trim()),
         format!("CLOUDRENTAL_PC_ID_DEFAULT={pc_id}"),
@@ -2631,10 +2864,57 @@ fn write_host_keeper_env(
         format!("CLOUDRENTAL_KEEPER_ENTRY_ID={keeper_entry_id}"),
         "CLOUDRENTAL_TUNNEL_ROUTES=moonlight".into(),
     ];
+    if !activation.application_activation_id.trim().is_empty() {
+        env_lines.push(format!(
+            "CLOUDRENTAL_APPLICATION_ACTIVATION_ID={}",
+            activation.application_activation_id.trim()
+        ));
+    }
+    if !activation.application_type.trim().is_empty() {
+        env_lines.push(format!(
+            "CLOUDRENTAL_APPLICATION_TYPE={}",
+            activation.application_type.trim()
+        ));
+    }
+    if !activation.credential_ref.trim().is_empty() {
+        env_lines.push(format!(
+            "CLOUDRENTAL_CREDENTIAL_REF={}",
+            activation.credential_ref.trim()
+        ));
+    }
+    if activation.host_http_port > 0 {
+        env_lines.push(format!(
+            "CLOUDRENTAL_HOST_HTTP_PORT={}",
+            activation.host_http_port
+        ));
+        let host_stream_local_url =
+            format!("http://127.0.0.1:{}/stream/", activation.host_http_port);
+        env_lines.push(format!("HOST_STREAM_LOCAL_URL={host_stream_local_url}"));
+        env_lines.push(format!(
+            "CLOUDGIME_HOST_STREAM_LOCAL_URL={host_stream_local_url}"
+        ));
+    }
+    if activation.host_stream_udp_start > 0
+        && activation.host_stream_udp_end >= activation.host_stream_udp_start
+    {
+        env_lines.push(format!(
+            "CLOUDRENTAL_HOST_STREAM_UDP_START={}",
+            activation.host_stream_udp_start
+        ));
+        env_lines.push(format!(
+            "CLOUDRENTAL_HOST_STREAM_UDP_END={}",
+            activation.host_stream_udp_end
+        ));
+    }
+    if !activation.host_stream_proxy_route.trim().is_empty() {
+        env_lines.push(format!(
+            "CLOUDRENTAL_HOST_STREAM_PROXY_ROUTE={}",
+            activation.host_stream_proxy_route.trim()
+        ));
+    }
 
     if let Some(parent) = host_keeper_env_path(bundle_root).parent() {
-        fs::create_dir_all(parent)
-            .map_err(|_| "Could not create the host keeper data folder.")?;
+        fs::create_dir_all(parent).map_err(|_| "Could not create the host keeper data folder.")?;
     }
 
     write_text_file_with_retry(
@@ -2645,7 +2925,10 @@ fn write_host_keeper_env(
 }
 
 fn read_host_keeper_device_token(bundle_root: &Path) -> String {
-    let current = read_simple_env_value(&host_keeper_env_path(bundle_root), "CLOUDRENTAL_DEVICE_TOKEN");
+    let current = read_simple_env_value(
+        &host_keeper_env_path(bundle_root),
+        "CLOUDRENTAL_DEVICE_TOKEN",
+    );
     if !current.trim().is_empty() {
         return current;
     }
@@ -2662,12 +2945,9 @@ fn read_host_keeper_device_id(bundle_root: &Path) -> String {
         return current.trim().to_string();
     }
 
-    read_simple_env_value(
-        &legacy_keeper_env_path(),
-        "CLOUDRENTAL_DEVICE_ID_DEFAULT",
-    )
-    .trim()
-    .to_string()
+    read_simple_env_value(&legacy_keeper_env_path(), "CLOUDRENTAL_DEVICE_ID_DEFAULT")
+        .trim()
+        .to_string()
 }
 
 fn read_host_keeper_pc_id(bundle_root: &Path) -> String {
@@ -2698,10 +2978,7 @@ fn read_host_keeper_entry_id(bundle_root: &Path, pc_number: &str) -> String {
     }
 
     normalize_keeper_entry_id_value(
-        &read_simple_env_value(
-            &legacy_keeper_env_path(),
-            "CLOUDRENTAL_KEEPER_ENTRY_ID",
-        ),
+        &read_simple_env_value(&legacy_keeper_env_path(), "CLOUDRENTAL_KEEPER_ENTRY_ID"),
         pc_number,
     )
 }
@@ -2710,13 +2987,17 @@ fn activation_allows_local_runtime(
     bundle_root: &Path,
     activation: &HostActivationStateRecord,
 ) -> bool {
-    if activation.activation_state.eq_ignore_ascii_case("activated")
+    if activation
+        .activation_state
+        .eq_ignore_ascii_case("activated")
         && !activation.host_id.trim().is_empty()
     {
         return true;
     }
 
-    let phase_ready = activation.activation_state.eq_ignore_ascii_case("prepared_local")
+    let phase_ready = activation
+        .activation_state
+        .eq_ignore_ascii_case("prepared_local")
         || activation
             .activation_state
             .eq_ignore_ascii_case("locked_waiting_token");
@@ -2749,11 +3030,13 @@ fn write_host_keeper_status(bundle_root: &Path) -> Result<(), String> {
                 "name": "panel",
                 "localUrl": DEFAULT_HOST_PANEL_LOCAL_URL,
                 "panelLocalUrl": DEFAULT_HOST_PANEL_LOCAL_URL,
+                "connected": true,
             },
             {
                 "name": "moonlight",
                 "localUrl": local_url,
                 "moonlightLocalUrl": local_url,
+                "connected": true,
             }
         ]
     });
@@ -2855,12 +3138,9 @@ fn run_hidden_powershell_script(
 
 fn register_host_keeper_tunnel_task(bundle_root: &Path) -> Result<(), String> {
     let task_name = escape_powershell_literal(HOST_KEEPER_TUNNEL_TASK_NAME);
-    let exe_path = escape_powershell_literal(
-        &host_keeper_agent_path(bundle_root).to_string_lossy(),
-    );
-    let working_dir = escape_powershell_literal(
-        &host_keeper_root(bundle_root).to_string_lossy(),
-    );
+    let exe_path =
+        escape_powershell_literal(&host_keeper_agent_path(bundle_root).to_string_lossy());
+    let working_dir = escape_powershell_literal(&host_keeper_root(bundle_root).to_string_lossy());
     let script_template = concat!(
         "$ErrorActionPreference = 'Stop';",
         "$taskName = '__TASK_NAME__';",
@@ -3038,13 +3318,16 @@ fn configure_host_keeper_tunnel(
         .unwrap_or_else(|| read_host_keeper_device_token(bundle_root));
     if device_token.trim().is_empty() {
         if explicit_request {
-            return Err("Aktivasi Lisensi berhasil, tapi device token keeper belum ikut dikirim backend.".into());
+            return Err(
+                "Aktivasi Lisensi berhasil, tapi device token keeper belum ikut dikirim backend."
+                    .into(),
+            );
         }
         return Ok(());
     }
 
-    write_host_keeper_env(bundle_root, activation, &device_token)?; 
-    write_host_keeper_status(bundle_root)?; 
+    write_host_keeper_env(bundle_root, activation, &device_token)?;
+    write_host_keeper_status(bundle_root)?;
     stop_keeper_tunnel_processes(bundle_root);
     unregister_host_keeper_tunnel_task(bundle_root);
 
@@ -3183,6 +3466,32 @@ mod tests {
 
         assert!(verify_password_store(&store_path, "rahasia").unwrap());
         assert!(verify_password_store(&store_path, "  rahasia  ").unwrap());
+
+        fs::remove_dir_all(&test_root).unwrap();
+    }
+
+    #[test]
+    fn host_keeper_env_uses_assigned_host_http_stream_route() {
+        let test_root = env::temp_dir().join(format!("host-keeper-env-{}", Uuid::new_v4()));
+        let agent_path = host_keeper_agent_path(&test_root);
+        fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
+        fs::write(&agent_path, b"test-agent").unwrap();
+
+        let mut activation = default_activation_state();
+        activation.control_plane_url = "https://cloudgime.example".into();
+        activation.sentinel_device_id = "PC-09".into();
+        activation.sentinel_pc_id = "9".into();
+        activation.keeper_entry_id = "pc-09".into();
+        activation.host_http_port = 18081;
+
+        write_host_keeper_env(&test_root, &activation, "test-device-token").unwrap();
+
+        let env_file = fs::read_to_string(host_keeper_env_path(&test_root)).unwrap();
+        assert!(env_file.contains("CLOUDRENTAL_HOST_HTTP_PORT=18081"));
+        assert!(env_file.contains("HOST_STREAM_LOCAL_URL=http://127.0.0.1:18081/stream/"));
+        assert!(env_file.contains(
+            "CLOUDGIME_HOST_STREAM_LOCAL_URL=http://127.0.0.1:18081/stream/"
+        ));
 
         fs::remove_dir_all(&test_root).unwrap();
     }
@@ -3358,6 +3667,24 @@ fn save_activation_state(
     }
     next.setup_token_kind = next.setup_token_kind.trim().to_string();
     next.instance_type = next.instance_type.trim().to_string();
+    next.application_activation_id = next.application_activation_id.trim().to_string();
+    next.application_type = next.application_type.trim().to_string();
+    next.pc_label = next.pc_label.trim().to_string();
+    next.credential_ref = next.credential_ref.trim().to_string();
+    next.host_http_port = next.host_http_port.max(0);
+    next.host_stream_udp_start = next.host_stream_udp_start.max(0);
+    next.host_stream_udp_end = next.host_stream_udp_end.max(0);
+    if next.host_stream_udp_end < next.host_stream_udp_start {
+        next.host_stream_udp_start = 0;
+        next.host_stream_udp_end = 0;
+    }
+    next.host_stream_proxy_route = next.host_stream_proxy_route.trim().to_string();
+    if !next.license_assignments.is_object() {
+        next.license_assignments = Value::Null;
+    }
+    if !next.license_policies.is_object() {
+        next.license_policies = Value::Null;
+    }
     let _ = repair_setup_token_metadata(&mut next);
     if next.control_plane_url.trim().is_empty() {
         next.control_plane_url = DEFAULT_CONTROL_PLANE.into();
@@ -3385,6 +3712,16 @@ fn default_activation_state() -> HostActivationStateRecord {
         sentinel_pc_id: String::new(),
         sentinel_device_id: String::new(),
         keeper_entry_id: String::new(),
+        application_activation_id: String::new(),
+        application_type: String::new(),
+        pc_label: String::new(),
+        credential_ref: String::new(),
+        host_http_port: 0,
+        host_stream_udp_start: 0,
+        host_stream_udp_end: 0,
+        host_stream_proxy_route: String::new(),
+        license_assignments: Value::Null,
+        license_policies: Value::Null,
         runtime_token: String::new(),
         activated_at_utc: String::new(),
         redeemed_at_utc: String::new(),
@@ -3396,20 +3733,11 @@ fn default_activation_state() -> HostActivationStateRecord {
 }
 
 fn repair_setup_token_metadata(state: &mut HostActivationStateRecord) -> bool {
-    if !looks_like_always_on_host_state(state) {
-        return false;
-    }
-
-    let mut changed = false;
     if state.setup_token_kind.trim().is_empty() {
-        state.setup_token_kind = "always_on_host".into();
-        changed = true;
+        state.setup_token_kind = "instance_pair".into();
+        return true;
     }
-    if state.instance_type.trim().is_empty() {
-        state.instance_type = "always-on".into();
-        changed = true;
-    }
-    changed
+    false
 }
 
 fn looks_like_always_on_host_state(state: &HostActivationStateRecord) -> bool {
@@ -3425,10 +3753,7 @@ fn looks_like_always_on_host_state(state: &HostActivationStateRecord) -> bool {
             .setup_token_kind
             .trim()
             .eq_ignore_ascii_case("always_on_host")
-        || state
-            .instance_type
-            .trim()
-            .eq_ignore_ascii_case("always-on")
+        || state.instance_type.trim().eq_ignore_ascii_case("always-on")
 }
 
 fn load_shared_pc_identity() -> Option<SharedPcIdentityRecord> {
@@ -3904,7 +4229,10 @@ fn load_audio_view(bundle_root: &Path, status: &HostStatusData) -> AudioView {
 
 fn load_display_view(bundle_root: &Path) -> DisplayView {
     let preferences = read_display_preferences(bundle_root);
-    let force_wgc_path = bundle_root.join("moonlight").join("server").join("force-wgc.txt");
+    let force_wgc_path = bundle_root
+        .join("moonlight")
+        .join("server")
+        .join("force-wgc.txt");
     let dual_stream_enabled = force_wgc_path.exists();
     DisplayView {
         mode: preferences.mode.clone(),
@@ -3955,10 +4283,7 @@ fn read_capability_profile(bundle_root: &Path) -> CapabilityProfileRecord {
     let clean = raw.strip_prefix('\u{FEFF}').unwrap_or(&raw);
     let mut parsed = serde_json::from_str::<CapabilityProfileRecord>(clean).unwrap_or_default();
     parsed.selected_runtime_key = parsed.selected_runtime_key.trim().to_string();
-    parsed.selected_runtime_display_name = parsed
-        .selected_runtime_display_name
-        .trim()
-        .to_string();
+    parsed.selected_runtime_display_name = parsed.selected_runtime_display_name.trim().to_string();
     parsed.selected_runtime_version = parsed.selected_runtime_version.trim().to_string();
     parsed.selected_encoder = parsed.selected_encoder.trim().to_string();
     parsed.selected_capture = parsed.selected_capture.trim().to_string();
@@ -4175,6 +4500,373 @@ fn build_stream_not_ready_note(
     }
 
     "Host is still preparing the stream route.".to_string()
+}
+
+fn eval_stream_readiness(
+    bundle_root: &Path,
+    activation: &HostActivationStateRecord,
+    status: &HostStatusData,
+    network: &BundleNetworkConfig,
+) -> StreamReadinessView {
+    let mut components: Vec<StreamReadinessComponent> = Vec::new();
+    let now = chrono::Utc::now();
+
+    // 1. Activation state
+    let activated = activation
+        .activation_state
+        .eq_ignore_ascii_case("activated");
+    let has_recoverable_identity =
+        !activation.host_id.trim().is_empty() && !activation.machine_identity.trim().is_empty();
+    let is_prepared_local = activation
+        .activation_state
+        .eq_ignore_ascii_case("prepared_local");
+    let (activation_fix_action, activation_fix_label) = if activated {
+        ("".into(), "".into())
+    } else if is_prepared_local && has_recoverable_identity {
+        ("recover_activation".into(), "Pulihkan Aktivasi".into())
+    } else if is_prepared_local {
+        ("open_control_plane".into(), "Klaim Lisensi".into())
+    } else {
+        ("open_control_plane".into(), "Buka Control Plane".into())
+    };
+    components.push(StreamReadinessComponent {
+        key: "activation".into(),
+        label: "Aktivasi Lisensi".into(),
+        status: if activated {
+            "ok".into()
+        } else {
+            "error".into()
+        },
+        message: if activated {
+            "Lisensi aktivasi sudah aktif.".into()
+        } else if is_prepared_local && has_recoverable_identity {
+            "Aktivasi belum diklaim. Klik Pulihkan untuk recover dari server.".into()
+        } else {
+            format!(
+                "Status aktivasi: {} — buka control plane untuk aktivasi.",
+                activation.activation_state
+            )
+        },
+        fix_action: activation_fix_action,
+        fix_label: activation_fix_label,
+    });
+
+    // 2. Capability profile
+    let profile = read_capability_profile(bundle_root);
+    let profile_valid = !profile.selected_runtime_key.trim().is_empty()
+        || !profile.selected_capture.trim().is_empty()
+        || !profile.runtime_candidates.is_empty();
+    components.push(StreamReadinessComponent {
+        key: "capability_profile".into(),
+        label: "Profil Kemampuan".into(),
+        status: if profile_valid {
+            "ok".into()
+        } else {
+            "error".into()
+        },
+        message: if profile_valid {
+            format!(
+                "Runtime: {}, Capture: {}",
+                profile.selected_runtime_key, profile.selected_capture
+            )
+        } else {
+            "Profil kemampuan tampilan tidak ditemukan. Refresh Host Control.".into()
+        },
+        fix_action: if profile_valid {
+            "".into()
+        } else {
+            "refresh".into()
+        },
+        fix_label: if profile_valid {
+            "".into()
+        } else {
+            "Refresh".into()
+        },
+    });
+
+    // 3. Display capture route (VDD check)
+    let (display_ok, display_note) = evaluate_stream_display_route(bundle_root, &profile);
+    let has_vdd = capability_profile_has_virtual_display_driver(&profile);
+    components.push(StreamReadinessComponent {
+        key: "display_capture".into(),
+        label: "Rute Capture Display".into(),
+        status: if display_ok {
+            "ok".into()
+        } else {
+            "error".into()
+        },
+        message: if display_ok {
+            format!(
+                "Capture: {} ({})",
+                profile.selected_capture,
+                profile.selected_capture_reason.as_deref().unwrap_or("ok")
+            )
+        } else {
+            display_note.unwrap_or_else(|| "Rute capture display belum valid.".into())
+        },
+        fix_action: if display_ok {
+            "".into()
+        } else {
+            "fix_preflight".into()
+        },
+        fix_label: if display_ok {
+            "".into()
+        } else {
+            "Perbaiki (Preflight)".into()
+        },
+    });
+
+    // 4. Virtual Display Driver
+    components.push(StreamReadinessComponent {
+        key: "virtual_display".into(),
+        label: "Virtual Display Driver".into(),
+        status: if has_vdd { "ok".into() } else { "error".into() },
+        message: if has_vdd {
+            "Virtual Display Driver terdeteksi.".into()
+        } else {
+            "Virtual Display Driver (MTT VDD) tidak terdeteksi. Dibutuhkan untuk capture mode DDX."
+                .into()
+        },
+        fix_action: if has_vdd {
+            "".into()
+        } else {
+            "fix_preflight".into()
+        },
+        fix_label: if has_vdd {
+            "".into()
+        } else {
+            "Perbaiki (Preflight)".into()
+        },
+    });
+
+    // 5. Lifecycle phase
+    let lifecycle_ready = status.lifecycle_phase.eq_ignore_ascii_case("ready");
+    let lifecycle_failed = status.lifecycle_phase.eq_ignore_ascii_case("failed");
+    let (lifecycle_fix_action, lifecycle_fix_label): (String, String) = if lifecycle_ready {
+        ("".into(), "".into())
+    } else if lifecycle_failed && profile.selected_capture.eq_ignore_ascii_case("ddx") {
+        ("fix_preflight".into(), "Prepare Host".into())
+    } else {
+        ("start_runtime".into(), "Mulai Runtime".into())
+    };
+    components.push(StreamReadinessComponent {
+        key: "lifecycle".into(),
+        label: "Fase Lifecycle".into(),
+        status: if lifecycle_ready {
+            "ok".into()
+        } else {
+            "error".into()
+        },
+        message: if lifecycle_ready {
+            "Runtime dalam fase ready.".into()
+        } else {
+            format!(
+                "Fase lifecycle: {} — runtime belum siap.",
+                status.lifecycle_phase
+            )
+        },
+        fix_action: lifecycle_fix_action.clone(),
+        fix_label: lifecycle_fix_label.clone(),
+    });
+
+    // 6. Local HTTP ready
+    components.push(StreamReadinessComponent {
+        key: "local_http".into(),
+        label: "HTTP Lokal (port 18080)".into(),
+        status: if status.local_http_ready {
+            "ok".into()
+        } else {
+            "error".into()
+        },
+        message: if status.local_http_ready {
+            "HTTP endpoint lokal siap.".into()
+        } else {
+            "HTTP endpoint lokal (port 18080) tidak merespon — runtime belum sepenuhnya hidup."
+                .into()
+        },
+        fix_action: if status.local_http_ready {
+            "".into()
+        } else {
+            lifecycle_fix_action.clone()
+        },
+        fix_label: if status.local_http_ready {
+            "".into()
+        } else {
+            lifecycle_fix_label.clone()
+        },
+    });
+
+    // 7. Required processes ready
+    components.push(StreamReadinessComponent {
+        key: "processes".into(),
+        label: "Proses Wajib".into(),
+        status: if status.required_processes_ready {
+            "ok".into()
+        } else {
+            "error".into()
+        },
+        message: if status.required_processes_ready {
+            "Semua proses wajib berjalan.".into()
+        } else {
+            "Ada proses wajib yang tidak berjalan — restart runtime untuk memperbaiki.".into()
+        },
+        fix_action: if status.required_processes_ready {
+            "".into()
+        } else {
+            lifecycle_fix_action
+        },
+        fix_label: if status.required_processes_ready {
+            "".into()
+        } else {
+            lifecycle_fix_label
+        },
+    });
+
+    // 8. Keeper Tunnel
+    let keeper_online = keeper_tunnel_moonlight_online(bundle_root);
+    components.push(StreamReadinessComponent {
+        key: "keeper_tunnel".into(),
+        label: "Keeper Tunnel (Moonlight)".into(),
+        status: if keeper_online {
+            "ok".into()
+        } else {
+            "warning".into()
+        },
+        message: if keeper_online {
+            "Keeper Tunnel route moonlight terhubung.".into()
+        } else {
+            "Keeper Tunnel route moonlight belum terkonfirmasi — sync binding jika perlu.".into()
+        },
+        fix_action: if keeper_online {
+            "".into()
+        } else {
+            "sync_tunnel".into()
+        },
+        fix_label: if keeper_online {
+            "".into()
+        } else {
+            "Sync Binding".into()
+        },
+    });
+
+    // 9. Heartbeat recency
+    let heartbeat_ok = if let Ok(heartbeat) =
+        chrono::DateTime::parse_from_rfc3339(&activation.last_heartbeat_at_utc)
+    {
+        let elapsed = now.signed_duration_since(heartbeat);
+        elapsed.num_minutes() < 15
+    } else {
+        false
+    };
+    components.push(StreamReadinessComponent {
+        key: "heartbeat".into(),
+        label: "Heartbeat ke Server".into(),
+        status: if heartbeat_ok {
+            "ok".into()
+        } else {
+            "error".into()
+        },
+        message: if heartbeat_ok {
+            format!("Heartbeat terakhir: {}", activation.last_heartbeat_at_utc)
+        } else {
+            format!(
+                "Heartbeat terakhir: {} (>15 menit yang lalu). Kirim heartbeat manual.",
+                activation.last_heartbeat_at_utc
+            )
+        },
+        fix_action: if heartbeat_ok {
+            "".into()
+        } else {
+            "heartbeat".into()
+        },
+        fix_label: if heartbeat_ok {
+            "".into()
+        } else {
+            "Kirim Heartbeat".into()
+        },
+    });
+
+    // 10. Public URL
+    let has_public_url = !network.public_url.trim().is_empty();
+    components.push(StreamReadinessComponent {
+        key: "public_url".into(),
+        label: "URL Publik Stream".into(),
+        status: if has_public_url {
+            "ok".into()
+        } else {
+            "warning".into()
+        },
+        message: if has_public_url {
+            format!("Public URL: {}", network.public_url)
+        } else {
+            "URL publik belum tersedia — kirim heartbeat untuk mendapatkan URL dari server.".into()
+        },
+        fix_action: if has_public_url {
+            "".into()
+        } else {
+            "heartbeat".into()
+        },
+        fix_label: if has_public_url {
+            "".into()
+        } else {
+            "Kirim Heartbeat".into()
+        },
+    });
+
+    let all_ready = components.iter().all(|c| c.status == "ok");
+
+    StreamReadinessView {
+        components,
+        all_ready,
+        evaluated_at: now.to_rfc3339(),
+    }
+}
+
+fn keeper_tunnel_moonlight_online(bundle_root: &Path) -> bool {
+    let path = bundle_root
+        .join("keeper-tunnel")
+        .join("data")
+        .join("keeper-tunnel-status.json");
+    if !path.exists() {
+        return false;
+    }
+    let raw = match fs::read_to_string(&path) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RouteStatus {
+        name: String,
+        connected: Option<bool>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ConnectionStatus {
+        routes: Vec<RouteStatus>,
+    }
+    let parsed: Result<ConnectionStatus, _> = serde_json::from_str(&raw);
+    match parsed {
+        Ok(status) => status
+            .routes
+            .iter()
+            .any(|r| r.name == "moonlight" && r.connected.unwrap_or(false)),
+        Err(_) => false,
+    }
+}
+
+#[tauri::command]
+pub fn get_stream_readiness() -> Result<StreamReadinessView, String> {
+    let bundle_root = resolve_bundle_root()?;
+    let activation = load_activation_state(&bundle_root)?;
+    let status = load_host_status(&bundle_root).unwrap_or_default();
+    let network = load_network_config(&bundle_root).unwrap_or_default();
+    Ok(eval_stream_readiness(
+        &bundle_root,
+        &activation,
+        &status,
+        &network,
+    ))
 }
 
 fn read_audio_preferences(bundle_root: &Path) -> AudioPreferenceRecord {
@@ -4509,7 +5201,10 @@ fn build_paths(bundle_root: &Path, status: &HostStatusData) -> PathView {
 }
 
 fn restart_runtime_engine(bundle_root: &Path) -> Result<CommandOutput, String> {
-    let force_wgc_path = bundle_root.join("moonlight").join("server").join("force-wgc.txt");
+    let force_wgc_path = bundle_root
+        .join("moonlight")
+        .join("server")
+        .join("force-wgc.txt");
     if force_wgc_path.exists() {
         let script = r#"
 Stop-Process -Name sunshine -Force -ErrorAction SilentlyContinue
@@ -4527,10 +5222,14 @@ Start-ScheduledTask -TaskName "CloudgimeUserSunshine" -ErrorAction SilentlyConti
         let _ = cmd.output();
 
         // Jalankan preflight refresh
-        let helper = bundle_root.join("moonlight").join("server").join("display-prepare-helper.exe");
+        let helper = bundle_root
+            .join("moonlight")
+            .join("server")
+            .join("display-prepare-helper.exe");
         if helper.exists() {
             let mut helper_cmd = Command::new(helper);
-            helper_cmd.arg("preflight")
+            helper_cmd
+                .arg("preflight")
                 .arg("--bundle-root")
                 .arg(bundle_root)
                 .arg("--refresh")
@@ -4829,7 +5528,8 @@ fn decode_cgpair_token(input: &str) -> Option<(String, String)> {
         return None;
     }
     let encoded = &input["cgpair_".len()..];
-    let decoded_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded.as_bytes())
+    let decoded_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded.as_bytes())
         .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(encoded.as_bytes()))
         .ok()?;
     let decoded_str = String::from_utf8(decoded_bytes).ok()?;
@@ -5082,11 +5782,7 @@ if (Test-Path $helper) {{
     & $helper preflight --bundle-root "{}" --refresh
 }}
 "#,
-            bundle_root_str,
-            bundle_root_str,
-            bundle_root_str,
-            bundle_root_str,
-            bundle_root_str
+            bundle_root_str, bundle_root_str, bundle_root_str, bundle_root_str, bundle_root_str
         )
     } else {
         format!(
@@ -5119,24 +5815,24 @@ if (Test-Path $helper) {{
     & $helper preflight --bundle-root "{}" --refresh
 }}
 "#,
-            bundle_root_str,
-            bundle_root_str,
-            bundle_root_str
+            bundle_root_str, bundle_root_str, bundle_root_str
         )
     };
 
     let mut cmd = Command::new("powershell");
     cmd.arg("-NoProfile")
-       .arg("-NonInteractive")
-       .arg("-Command")
-       .arg(script);
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg(script);
 
     #[cfg(target_os = "windows")]
     {
         cmd.creation_flags(0x08000000);
     }
 
-    let output = cmd.output().map_err(|e| format!("Failed to run PowerShell script: {}", e))?;
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Failed to run PowerShell script: {}", e))?;
     if !output.status.success() {
         let err_msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(format!("PowerShell script failed: {}", err_msg));
