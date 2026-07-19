@@ -5,7 +5,10 @@
 !define PRODUCT_NAME "Cloudgime Host"
 !endif
 !ifndef PRODUCT_VERSION
-!define PRODUCT_VERSION "0.1.0"
+!define PRODUCT_VERSION "1.1.2"
+!endif
+!ifndef PRODUCT_VERSION_QUAD
+!define PRODUCT_VERSION_QUAD "1.1.2.0"
 !endif
 !ifndef OUTPUT_DIR
 !define OUTPUT_DIR "."
@@ -19,6 +22,11 @@
 
 Name "${PRODUCT_NAME}"
 OutFile "${OUTPUT_DIR}\CloudgimeHostSetup.exe"
+VIProductVersion "${PRODUCT_VERSION_QUAD}"
+VIAddVersionKey "ProductName" "${PRODUCT_NAME}"
+VIAddVersionKey "ProductVersion" "${PRODUCT_VERSION}"
+VIAddVersionKey "FileDescription" "${PRODUCT_NAME} offline installer"
+VIAddVersionKey "FileVersion" "${PRODUCT_VERSION}"
 InstallDir "$PROGRAMFILES64\Cloudgime Host"
 RequestExecutionLevel admin
 ShowInstDetails hide

@@ -21,6 +21,7 @@ internal static class Program
 {
     private const string DefaultProductName = "Cloudgime Host";
     private const string DefaultAppProductName = "Cloudgime Host Control";
+    private const string ProductDisplayVersion = "1.1.2";
     private const string DefaultUninstallRegistryKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\CloudgimeHostControl";
     private const string HostWindowsServiceName = "CloudgimeHost-Host";
     private const string RuntimeWindowsServiceName = "CloudgimeRuntime-Host";
@@ -1384,7 +1385,7 @@ internal static class Program
             ? $"{uninstallString} --silent"
             : uninstallString;
         uninstallKey.SetValue("DisplayName", productName, RegistryValueKind.String);
-        uninstallKey.SetValue("DisplayVersion", "0.1.0", RegistryValueKind.String);
+        uninstallKey.SetValue("DisplayVersion", ProductDisplayVersion, RegistryValueKind.String);
         uninstallKey.SetValue("Publisher", "Cloudgime", RegistryValueKind.String);
         uninstallKey.SetValue("InstallLocation", installRoot, RegistryValueKind.String);
         uninstallKey.SetValue("DisplayIcon", appExePath, RegistryValueKind.String);
