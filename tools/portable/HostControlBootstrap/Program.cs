@@ -40,6 +40,12 @@ internal static class Program
     private static readonly Regex MachineIdentityRegex = new("^cgm-[a-f0-9]{32}$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex InstallInstanceRegex = new("^cgi-[a-f0-9]{16}$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    private sealed class ActivationStateSnapshot
+    {
+        public required JsonObject ActivationState { get; init; }
+        public JsonObject? SharedIdentity { get; init; }
+    }
+
     [STAThread]
     private static int Main(string[] args)
     {
@@ -99,6 +105,7 @@ internal static class Program
         var resetLocalIdentity = args.HasFlag("reset-local-identity") || overwriteData;
         var launchAfterInstall = args.HasFlag("launch-after-install");
         Log($"install installRoot={installRoot} dataRoot={dataRoot} releaseRoot={releaseRoot} bundleSourceRoot={bundleSourceRoot} overwriteData={overwriteData} resetLocalIdentity={resetLocalIdentity} launchAfterInstall={launchAfterInstall}");
+        var activationSnapshot = resetLocalIdentity ? null : CaptureActivationStateSnapshot(dataRoot);
 
         var appExeSource = Path.Combine(releaseRoot, "cloudgime-host-control.exe");
         if (!File.Exists(appExeSource))
@@ -181,6 +188,7 @@ internal static class Program
         {
             Log("install running finalize bundle");
             FinalizeBundle(dataRoot, releaseRoot, resetLocalIdentity, args.GetValue("auto-logon-password"));
+            RestoreActivationSnapshotIfInstallerReset(dataRoot, activationSnapshot);
         }
         else
         {
@@ -244,6 +252,7 @@ internal static class Program
         TryRunHostInstallerCommand(bundleRoot, "uninstall-service", OptionalInstallerActionTimeout);
         TryDeleteHostKeepAwakeTasks();
         StopProcessesWithinRoots(new[] { bundleRoot, installRoot }, TimeSpan.FromSeconds(20));
+        BackupActivationStateForReinstall(bundleRoot);
 
         if (!string.IsNullOrWhiteSpace(appInstallerProductCode))
         {
@@ -1025,6 +1034,157 @@ internal static class Program
         WriteJsonObject(sharedIdentityPath, sharedIdentity);
         WriteJsonObject(activationPath, state);
     }
+
+    private static ActivationStateSnapshot? CaptureActivationStateSnapshot(string bundleRoot)
+    {
+        var localSnapshot = ReadActivationStateSnapshotFromBundle(bundleRoot);
+        if (localSnapshot is not null)
+        {
+            BackupActivationStateSnapshot(localSnapshot);
+            return localSnapshot;
+        }
+
+        var backupSnapshot = ReadActivationStateSnapshotBackup();
+        if (backupSnapshot is not null)
+        {
+            Log("activation-state snapshot loaded from reinstall backup");
+        }
+
+        return backupSnapshot;
+    }
+
+    private static void BackupActivationStateForReinstall(string bundleRoot)
+    {
+        var snapshot = ReadActivationStateSnapshotFromBundle(bundleRoot);
+        if (snapshot is null)
+        {
+            Log("activation-state reinstall backup skipped because no usable activated state was found");
+            return;
+        }
+
+        BackupActivationStateSnapshot(snapshot);
+    }
+
+    private static void RestoreActivationSnapshotIfInstallerReset(string bundleRoot, ActivationStateSnapshot? snapshot)
+    {
+        if (snapshot is null)
+        {
+            return;
+        }
+
+        var activationPath = GetActivationStatePath(bundleRoot);
+        var currentState = ReadJsonObject(activationPath);
+        if (IsUsableActivatedState(currentState))
+        {
+            BackupActivationStateSnapshot(new ActivationStateSnapshot
+            {
+                ActivationState = CloneJsonObject(currentState!),
+                SharedIdentity = ReadJsonObject(GetSharedIdentityPath()) is { } sharedIdentity
+                    ? CloneJsonObject(sharedIdentity)
+                    : null,
+            });
+            return;
+        }
+
+        WriteJsonObject(activationPath, CloneJsonObject(snapshot.ActivationState));
+        WriteJsonObject(
+            GetSharedIdentityPath(),
+            snapshot.SharedIdentity is not null
+                ? CloneJsonObject(snapshot.SharedIdentity)
+                : BuildSharedIdentityFromActivation(snapshot.ActivationState));
+        BackupActivationStateSnapshot(snapshot);
+        Log("activation-state snapshot restored after installer reset");
+    }
+
+    private static ActivationStateSnapshot? ReadActivationStateSnapshotFromBundle(string bundleRoot)
+    {
+        var activationState = ReadJsonObject(GetActivationStatePath(bundleRoot));
+        if (!IsUsableActivatedState(activationState))
+        {
+            return null;
+        }
+
+        var sharedIdentity = ReadJsonObject(GetSharedIdentityPath());
+        return new ActivationStateSnapshot
+        {
+            ActivationState = CloneJsonObject(activationState!),
+            SharedIdentity = sharedIdentity is not null ? CloneJsonObject(sharedIdentity) : null,
+        };
+    }
+
+    private static ActivationStateSnapshot? ReadActivationStateSnapshotBackup()
+    {
+        var activationState = ReadJsonObject(Path.Combine(GetActivationStateBackupRoot(), "host_activation_state.json"));
+        if (!IsUsableActivatedState(activationState))
+        {
+            return null;
+        }
+
+        var sharedIdentity = ReadJsonObject(Path.Combine(GetActivationStateBackupRoot(), "pc_identity.json"));
+        return new ActivationStateSnapshot
+        {
+            ActivationState = CloneJsonObject(activationState!),
+            SharedIdentity = sharedIdentity is not null ? CloneJsonObject(sharedIdentity) : null,
+        };
+    }
+
+    private static void BackupActivationStateSnapshot(ActivationStateSnapshot snapshot)
+    {
+        var backupRoot = GetActivationStateBackupRoot();
+        WriteJsonObject(Path.Combine(backupRoot, "host_activation_state.json"), CloneJsonObject(snapshot.ActivationState));
+        if (snapshot.SharedIdentity is not null)
+        {
+            WriteJsonObject(Path.Combine(backupRoot, "pc_identity.json"), CloneJsonObject(snapshot.SharedIdentity));
+        }
+    }
+
+    private static bool IsUsableActivatedState(JsonObject? state)
+    {
+        if (state is null)
+        {
+            return false;
+        }
+
+        var activationState = GetString(state, "ActivationState");
+        if (!activationState.Equals("activated", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var runtimeToken = GetString(state, "RuntimeToken");
+        var activationRecordId = GetString(state, "ActivationRecordId");
+        var applicationActivationId = GetString(state, "ApplicationActivationId");
+        var hostId = GetString(state, "HostId");
+
+        return !string.IsNullOrWhiteSpace(runtimeToken)
+            && (!string.IsNullOrWhiteSpace(activationRecordId) || !string.IsNullOrWhiteSpace(applicationActivationId))
+            && !string.IsNullOrWhiteSpace(hostId);
+    }
+
+    private static JsonObject BuildSharedIdentityFromActivation(JsonObject activationState)
+    {
+        return new JsonObject
+        {
+            ["schemaVersion"] = 1,
+            ["hostId"] = GetString(activationState, "HostId"),
+            ["machineIdentity"] = GetString(activationState, "MachineIdentity"),
+            ["sentinelPcId"] = GetString(activationState, "SentinelPcId"),
+            ["sentinelDeviceId"] = GetString(activationState, "SentinelDeviceId"),
+            ["keeperEntryId"] = GetString(activationState, "KeeperEntryId"),
+            ["updatedAtUtc"] = DateTime.UtcNow.ToString("o"),
+        };
+    }
+
+    private static JsonObject CloneJsonObject(JsonObject obj) => (JsonObject)obj.DeepClone();
+
+    private static string GetActivationStatePath(string bundleRoot)
+        => Path.Combine(bundleRoot, "moonlight", "server", "host_activation_state.json");
+
+    private static string GetSharedIdentityPath()
+        => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Cloudgime", "pc_identity.json");
+
+    private static string GetActivationStateBackupRoot()
+        => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Cloudgime", "HostActivationBackup");
 
     private static void RepairSetupTokenMetadata(JsonObject state)
     {
