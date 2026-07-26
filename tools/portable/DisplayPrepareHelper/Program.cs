@@ -665,6 +665,12 @@ internal static class Program
         Height = 1080,
         Frequency = 60,
     };
+    private static readonly SavedDisplayState DefaultHostIdleMode = new()
+    {
+        Width = 1366,
+        Height = 720,
+        Frequency = 60,
+    };
     private static readonly bool DisableOtherDisplaysDuringStream = true;
     private static readonly bool SuspendCompetingRemoteAppsDuringStream = false;
     private static readonly bool LowerCompetingRemoteAppsDuringStream = false;
@@ -739,6 +745,8 @@ internal static class Program
         (1344, 2160, 60),
         (1440, 2560, 30),
         (2160, 3840, 30),
+        (1366, 720, 30),
+        (1366, 720, 60),
         (1360, 720, 30),
         (1408, 720, 30),
         (1440, 720, 30),
@@ -5611,13 +5619,25 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
         var state = ReadState();
         if (state is null)
         {
+            var idleModeChanged = false;
+            try
+            {
+                idleModeChanged = TryNormalizeHostIdleDisplayMode(new PrepareStateFile(), EnumerateDisplays());
+            }
+            catch
+            {
+                idleModeChanged = false;
+            }
+
             return new HelperResult
             {
                 Ok = true,
-                Changed = false,
+                Changed = idleModeChanged,
                 Restored = false,
-                Skipped = true,
-                Reason = "no_saved_state",
+                Skipped = !idleModeChanged,
+                Reason = idleModeChanged
+                    ? "no_saved_state_idle_1366x720"
+                    : "no_saved_state",
             };
         }
 
@@ -5695,6 +5715,7 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
                 currentDisplays = EnumerateDisplays();
             }
 
+            var idleModeChanged = false;
             if (state.PreviousPrimary is not null)
             {
                 currentDisplays = EnumerateDisplays();
@@ -5733,6 +5754,8 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
                     currentDisplays = EnumerateDisplays();
                 }
                 RestoreWindowsToPreviousPrimaryBeforeStreamDisplayShutdown(state, currentDisplays);
+                currentDisplays = EnumerateDisplays();
+                idleModeChanged = TryNormalizeHostIdleDisplayMode(state, currentDisplays);
             }
 
             if (state.PreviousCursor is not null)
@@ -5750,15 +5773,100 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
             return new HelperResult
             {
                 Ok = true,
-                Changed = false,
+                Changed = idleModeChanged,
                 Restored = true,
                 Skipped = false,
-                Reason = "restored_previous_primary",
+                Reason = idleModeChanged
+                    ? "restored_previous_primary_idle_1366x720"
+                    : "restored_previous_primary",
             };
         }
         finally
         {
             RestoreRuntimeProcessMitigations(state);
+        }
+    }
+
+    private static bool TryNormalizeHostIdleDisplayMode(
+        PrepareStateFile state,
+        List<DisplaySnapshot> currentDisplays)
+    {
+        var targetDisplay = state.PreviousPrimary is not null
+            ? FindDisplay(currentDisplays, state.PreviousPrimary)
+            : null;
+        targetDisplay ??= currentDisplays.FirstOrDefault(display =>
+            display.Active &&
+            display.Primary &&
+            !DisplayLooksLikeMttVdd(display));
+        targetDisplay ??= currentDisplays.FirstOrDefault(display => display.Active && display.Primary);
+        if (targetDisplay is null || !targetDisplay.Active)
+        {
+            return false;
+        }
+
+        var requestedMode = new SavedDisplayState
+        {
+            Width = DefaultHostIdleMode.Width,
+            Height = DefaultHostIdleMode.Height,
+            Frequency = DefaultHostIdleMode.Frequency,
+        };
+
+        if (DisplayLooksLikeMttVdd(targetDisplay))
+        {
+            var preferredIdentity = targetDisplay.ToSavedState();
+            try
+            {
+                currentDisplays = EnsureVddOnline(currentDisplays, requestedMode);
+                targetDisplay = FindDisplay(currentDisplays, preferredIdentity)
+                    ?? currentDisplays.FirstOrDefault(display => display.Active && DisplayLooksLikeMttVdd(display))
+                    ?? currentDisplays.FirstOrDefault(display => display.Active && display.Primary);
+            }
+            catch
+            {
+                targetDisplay = FindDisplay(EnumerateDisplays(), preferredIdentity)
+                    ?? targetDisplay;
+            }
+        }
+
+        if (targetDisplay is null || !targetDisplay.Active)
+        {
+            return false;
+        }
+
+        if (targetDisplay.Width == DefaultHostIdleMode.Width &&
+            targetDisplay.Height == DefaultHostIdleMode.Height &&
+            (DefaultHostIdleMode.Frequency <= 0 ||
+             targetDisplay.Frequency == DefaultHostIdleMode.Frequency))
+        {
+            return false;
+        }
+
+        var targetIdentity = targetDisplay.ToSavedState();
+        try
+        {
+            var result = SetExactDisplayMode(targetDisplay, requestedMode);
+            if (!result.Applied)
+            {
+                return false;
+            }
+
+            if (result.RequiresApply)
+            {
+                ApplyDisplayChanges();
+            }
+
+            Thread.Sleep(250);
+            var afterDisplay = FindDisplay(EnumerateDisplays(), targetIdentity);
+            return afterDisplay is not null &&
+                afterDisplay.Width == DefaultHostIdleMode.Width &&
+                afterDisplay.Height == DefaultHostIdleMode.Height &&
+                (afterDisplay.Width != targetDisplay.Width ||
+                 afterDisplay.Height != targetDisplay.Height ||
+                 afterDisplay.Frequency != targetDisplay.Frequency);
+        }
+        catch
+        {
+            return false;
         }
     }
 

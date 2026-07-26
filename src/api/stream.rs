@@ -4662,9 +4662,10 @@ async fn restore_prepared_stream_display(
 }
 
 fn should_skip_prepared_stream_restore_after_session_cleanup() -> bool {
-    // Cloudgime invariant: stream sessions always own the dedicated MTT VDD
-    // lane. A slow restore after close must not block the next session.
-    true
+    // Android users expect the host desktop to be usable immediately after a
+    // stream ends. Always run the display restore path; session superseding in
+    // the helper still prevents an old restore from winning over a new stream.
+    false
 }
 
 async fn restore_runtime_dynamic_display_if_active(active: &Arc<AtomicBool>, _session_token: &str) {

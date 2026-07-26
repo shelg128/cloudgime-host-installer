@@ -39,6 +39,8 @@
     <resolution><width>1344</width><height>2160</height><refresh_rate>60</refresh_rate></resolution>
     <resolution><width>1440</width><height>2560</height><refresh_rate>30</refresh_rate></resolution>
     <resolution><width>2160</width><height>3840</height><refresh_rate>30</refresh_rate></resolution>
+    <resolution><width>1366</width><height>720</height><refresh_rate>30</refresh_rate></resolution>
+    <resolution><width>1366</width><height>720</height><refresh_rate>60</refresh_rate></resolution>
     <resolution><width>1360</width><height>720</height><refresh_rate>30</refresh_rate></resolution>
     <resolution><width>1408</width><height>720</height><refresh_rate>30</refresh_rate></resolution>
     <resolution><width>1440</width><height>720</height><refresh_rate>30</refresh_rate></resolution>
