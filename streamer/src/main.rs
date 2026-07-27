@@ -2756,13 +2756,29 @@ impl StreamConnection {
         if current_settings.bitrate != requested.bitrate {
             let retry_delays_ms = [0_u64, 180_u64, 420_u64];
             let mut last_live_update_error: Option<MoonlightError> = None;
+            let mut last_live_update_join_error: Option<String> = None;
 
             for (attempt_index, delay_ms) in retry_delays_ms.iter().enumerate() {
                 if *delay_ms > 0 {
                     sleep(Duration::from_millis(*delay_ms)).await;
                 }
 
-                match self.moonlight.update_stream_bitrate(requested.bitrate) {
+                let moonlight = self.moonlight.clone();
+                let requested_bitrate = requested.bitrate;
+                let live_update_result = match spawn_blocking(move || {
+                    moonlight.update_stream_bitrate(requested_bitrate)
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(err) => {
+                        warn!("[Stream]: live RTSP bitrate update worker failed: {err}");
+                        last_live_update_join_error = Some(err.to_string());
+                        break;
+                    }
+                };
+
+                match live_update_result {
                     Ok(()) => {
                         {
                             let mut active_settings = self.active_stream_settings.lock().await;
@@ -2796,6 +2812,8 @@ impl StreamConnection {
                     "[Stream]: live RTSP bitrate update unavailable, requiring in-app reconnect apply: {err}"
                 );
                 classify_live_clarity_error(err)
+            } else if let Some(err) = last_live_update_join_error.as_ref() {
+                format!("live_rtsp_update_worker_failed:{err}")
             } else {
                 "live_rtsp_announce_failed".to_string()
             };
