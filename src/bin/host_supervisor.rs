@@ -3,7 +3,7 @@
 use std::{
     ffi::OsString,
     fs,
-    io::Write,
+    io::{Read, Seek, SeekFrom, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -33,11 +33,13 @@ use serde_json::Value;
 use windows_service::{
     define_windows_service,
     service::{
-        ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState as WindowsServiceState,
-        ServiceStatus, ServiceType,
+        ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
+        ServiceInfo, ServiceStartType, ServiceState as WindowsServiceState, ServiceStatus,
+        ServiceType,
     },
     service_control_handler::{self, ServiceControlHandlerResult},
     service_dispatcher,
+    service_manager::{ServiceManager, ServiceManagerAccess},
 };
 
 #[cfg(windows)]
@@ -56,7 +58,7 @@ use windows_sys::Win32::{
         },
         Threading::{
             CREATE_NO_WINDOW, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
-            PROCESS_TERMINATE, QueryFullProcessImageNameW,
+            PROCESS_TERMINATE, QueryFullProcessImageNameW, TerminateProcess,
         },
     },
     UI::WindowsAndMessaging::{
@@ -513,6 +515,8 @@ const STABLE_RECOVERY_CLEAR_MS: u64 = 30_000;
 const MAX_RECENT_INCIDENTS: usize = 8;
 const ACTIVATION_STATUS_SYNC_INTERVAL_SECS: u64 = 15;
 const ACTIVATION_HEARTBEAT_INTERVAL_SECS: u64 = 30;
+const LOW_VRAM_GPU_TOTAL_MIB: u64 = 1536;
+const LOW_VRAM_GPU_FREE_MIB: u64 = 512;
 
 fn push_recent_incident(
     state: &mut SupervisorState,
@@ -2339,17 +2343,12 @@ fn start_bundle_inner(paths: &BundlePaths) -> Result<()> {
     let web_server_path = paths.moonlight_dir.join("web-server.exe");
     let frpc_path = paths.frp_dir.join("frpc.exe");
 
-    let sunshine_pid = start_sunshine_runtime(paths, &runtime_dir)?;
+    let sunshine_pid =
+        start_sunshine_runtime_ready(paths, &runtime_dir, config.moonlight.default_http_port)?;
     append_supervisor_log(
         paths,
-        &format!("start_bundle_inner spawned sunshine pid={sunshine_pid}"),
+        &format!("start_bundle_inner sunshine ready pid={sunshine_pid}"),
     )?;
-    wait_for_tcp_ready(
-        "127.0.0.1",
-        config.moonlight.default_http_port,
-        Duration::from_secs(20),
-    )?;
-    append_supervisor_log(paths, "start_bundle_inner sunshine port ready")?;
 
     let web_server_pid = spawn_process(
         &web_server_path,
@@ -2453,17 +2452,12 @@ fn restart_runtime_inner(paths: &BundlePaths) -> Result<()> {
     let config = load_config(paths)?;
     let runtime_key = read_selected_runtime_key(paths);
     let runtime_dir = resolve_runtime_dir(paths, &runtime_key);
-    let sunshine_pid = start_sunshine_runtime(paths, &runtime_dir)?;
+    let sunshine_pid =
+        start_sunshine_runtime_ready(paths, &runtime_dir, config.moonlight.default_http_port)?;
     append_supervisor_log(
         paths,
-        &format!("restart_runtime_inner spawned sunshine pid={sunshine_pid}"),
+        &format!("restart_runtime_inner sunshine ready pid={sunshine_pid}"),
     )?;
-    wait_for_tcp_ready(
-        "127.0.0.1",
-        config.moonlight.default_http_port,
-        Duration::from_secs(20),
-    )?;
-    append_supervisor_log(paths, "restart_runtime_inner sunshine port ready")?;
 
     let mut state = read_state(paths).unwrap_or_default();
     state.sunshine_pid = Some(sunshine_pid);
@@ -3376,6 +3370,385 @@ fn stop_bundle_processes(paths: &BundlePaths, scope: StopScope) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NvidiaMemorySnapshot {
+    total_mib: u64,
+    free_mib: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SunshineEncoderStartupState {
+    Pending,
+    Ready(String),
+    Failed(String),
+}
+
+struct RemoteDesktopStartupRelief {
+    paths: BundlePaths,
+    restart_parsec: bool,
+    restored: bool,
+}
+
+impl RemoteDesktopStartupRelief {
+    fn begin(paths: &BundlePaths) -> Result<Self> {
+        let mut relief = Self {
+            paths: paths.clone(),
+            restart_parsec: false,
+            restored: false,
+        };
+
+        let snapshots = match query_nvidia_memory_snapshots() {
+            Ok(snapshots) => snapshots,
+            Err(error) => {
+                append_supervisor_log(
+                    paths,
+                    &format!("sunshine startup VRAM probe skipped err={error:#}"),
+                )?;
+                return Ok(relief);
+            }
+        };
+        let snapshot_text = format_nvidia_memory_snapshots(&snapshots);
+        if !should_release_remote_desktop_vram(&snapshots) {
+            append_supervisor_log(
+                paths,
+                &format!("sunshine startup VRAM sufficient gpus={snapshot_text}"),
+            )?;
+            return Ok(relief);
+        }
+
+        if !process_image_name_exists("parsecd.exe")? && !process_image_name_exists("pservice.exe")?
+        {
+            append_supervisor_log(
+                paths,
+                &format!(
+                    "sunshine startup low VRAM detected but Parsec processes are not running gpus={snapshot_text}"
+                ),
+            )?;
+            return Ok(relief);
+        }
+
+        relief.restart_parsec = true;
+        append_supervisor_log(
+            paths,
+            &format!("sunshine startup low VRAM relief begin service=Parsec gpus={snapshot_text}"),
+        )?;
+        if let Err(error) = stop_managed_windows_service(paths, "Parsec") {
+            append_supervisor_log(
+                paths,
+                &format!(
+                    "sunshine startup Parsec service stop fallback to process cleanup err={error:#}"
+                ),
+            )?;
+        }
+        release_parsec_processes(Duration::from_secs(8))?;
+        sleep(Duration::from_millis(1200));
+
+        let after = query_nvidia_memory_snapshots().unwrap_or_default();
+        append_supervisor_log(
+            paths,
+            &format!(
+                "sunshine startup low VRAM relief ready service=Parsec gpus={}",
+                format_nvidia_memory_snapshots(&after)
+            ),
+        )?;
+        Ok(relief)
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        if !self.restart_parsec || self.restored {
+            return Ok(());
+        }
+
+        restore_parsec_service(&self.paths)?;
+        self.restored = true;
+        append_supervisor_log(
+            &self.paths,
+            "sunshine startup low VRAM relief restored service=Parsec",
+        )
+    }
+}
+
+impl Drop for RemoteDesktopStartupRelief {
+    fn drop(&mut self) {
+        if self.restart_parsec && !self.restored {
+            let _ = restore_parsec_service(&self.paths);
+        }
+    }
+}
+
+fn start_sunshine_runtime_ready(
+    paths: &BundlePaths,
+    runtime_dir: &Path,
+    http_port: u16,
+) -> Result<u32> {
+    let mut remote_relief = RemoteDesktopStartupRelief::begin(paths)?;
+    let sunshine_log_path = runtime_dir.join("config").join("sunshine.log");
+    let sunshine_log_offset = fs::metadata(&sunshine_log_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or_default();
+
+    let startup_result = (|| {
+        let sunshine_pid = start_sunshine_runtime(paths, runtime_dir)?;
+        append_supervisor_log(
+            paths,
+            &format!("sunshine runtime spawned pid={sunshine_pid}"),
+        )?;
+        wait_for_tcp_ready("127.0.0.1", http_port, Duration::from_secs(20))?;
+        append_supervisor_log(paths, "sunshine runtime port ready")?;
+        wait_for_sunshine_encoder_ready(
+            &sunshine_log_path,
+            sunshine_log_offset,
+            Duration::from_secs(25),
+        )?;
+        append_supervisor_log(paths, "sunshine runtime H.264 encoder ready")?;
+        Ok(sunshine_pid)
+    })();
+    let restore_result = remote_relief.restore();
+
+    match (startup_result, restore_result) {
+        (Ok(pid), Ok(())) => Ok(pid),
+        (Err(startup_error), Ok(())) => Err(startup_error),
+        (Ok(_), Err(restore_error)) => Err(restore_error)
+            .context("Sunshine started but the temporary Parsec VRAM relief was not restored"),
+        (Err(startup_error), Err(restore_error)) => Err(anyhow!(
+            "Sunshine startup failed: {startup_error:#}; restoring Parsec also failed: {restore_error:#}"
+        )),
+    }
+}
+
+fn query_nvidia_memory_snapshots() -> Result<Vec<NvidiaMemorySnapshot>> {
+    let mut command = Command::new("nvidia-smi");
+    apply_background_spawn_flags(&mut command);
+    let output = command
+        .args([
+            "--query-gpu=memory.total,memory.free",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .context("failed to run nvidia-smi")?;
+    if !output.status.success() {
+        bail!(
+            "nvidia-smi memory query failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let snapshots = parse_nvidia_memory_snapshots(&String::from_utf8_lossy(&output.stdout));
+    if snapshots.is_empty() {
+        bail!("nvidia-smi returned no parseable GPU memory rows");
+    }
+    Ok(snapshots)
+}
+
+fn parse_nvidia_memory_snapshots(raw: &str) -> Vec<NvidiaMemorySnapshot> {
+    raw.lines()
+        .filter_map(|line| {
+            let mut fields = line.split(',').map(str::trim);
+            let total_mib = fields.next()?.parse::<u64>().ok()?;
+            let free_mib = fields.next()?.parse::<u64>().ok()?;
+            Some(NvidiaMemorySnapshot {
+                total_mib,
+                free_mib,
+            })
+        })
+        .collect()
+}
+
+fn should_release_remote_desktop_vram(snapshots: &[NvidiaMemorySnapshot]) -> bool {
+    snapshots.iter().any(|snapshot| {
+        snapshot.total_mib <= LOW_VRAM_GPU_TOTAL_MIB && snapshot.free_mib < LOW_VRAM_GPU_FREE_MIB
+    })
+}
+
+fn format_nvidia_memory_snapshots(snapshots: &[NvidiaMemorySnapshot]) -> String {
+    if snapshots.is_empty() {
+        return "unavailable".to_string();
+    }
+    snapshots
+        .iter()
+        .enumerate()
+        .map(|(index, snapshot)| {
+            format!(
+                "gpu{index}:total={}MiB,free={}MiB",
+                snapshot.total_mib, snapshot.free_mib
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn process_image_name_exists(image_name: &str) -> Result<bool> {
+    let target = image_name.to_ascii_lowercase();
+    for pid in enumerate_process_ids().context("failed to enumerate processes for VRAM relief")? {
+        let Some(path) = query_process_image_path(pid) else {
+            continue;
+        };
+        let matches = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase() == target)
+            .unwrap_or(false);
+        if matches {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn terminate_processes_by_image_name(image_name: &str) -> Result<()> {
+    let target = image_name.to_ascii_lowercase();
+    for pid in enumerate_process_ids().context("failed to enumerate processes for VRAM relief")? {
+        let Some(path) = query_process_image_path(pid) else {
+            continue;
+        };
+        let matches = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase() == target)
+            .unwrap_or(false);
+        if matches {
+            if terminate_pid_direct(pid).is_err() {
+                let _ = taskkill_pid(pid);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn release_parsec_processes(timeout: Duration) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        terminate_processes_by_image_name("parsecd.exe")?;
+        terminate_processes_by_image_name("pservice.exe")?;
+        sleep(Duration::from_millis(250));
+        if !process_image_name_exists("parsecd.exe")? && !process_image_name_exists("pservice.exe")?
+        {
+            return Ok(());
+        }
+        if started.elapsed() >= timeout {
+            bail!("timed out releasing Parsec processes for Sunshine startup");
+        }
+    }
+}
+
+fn restore_parsec_service(paths: &BundlePaths) -> Result<()> {
+    if process_image_name_exists("pservice.exe")? {
+        return Ok(());
+    }
+
+    let started = Instant::now();
+    loop {
+        match start_managed_windows_service(paths, "Parsec") {
+            Ok(()) => break,
+            Err(error) if started.elapsed() < Duration::from_secs(10) => {
+                append_supervisor_log(
+                    paths,
+                    &format!("waiting to restore Parsec service err={error:#}"),
+                )?;
+                sleep(Duration::from_millis(500));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    let started = Instant::now();
+    loop {
+        if process_image_name_exists("pservice.exe")? {
+            return Ok(());
+        }
+        if started.elapsed() >= Duration::from_secs(10) {
+            bail!("Parsec service started but pservice.exe did not appear");
+        }
+        sleep(Duration::from_millis(250));
+    }
+}
+
+fn wait_for_sunshine_encoder_ready(
+    log_path: &Path,
+    initial_offset: u64,
+    timeout: Duration,
+) -> Result<()> {
+    let started = Instant::now();
+    let mut last_log = String::new();
+    loop {
+        if let Ok(log) = read_log_since(log_path, initial_offset) {
+            last_log = log;
+            match classify_sunshine_encoder_startup(&last_log) {
+                SunshineEncoderStartupState::Ready(_) => return Ok(()),
+                SunshineEncoderStartupState::Failed(reason) => {
+                    bail!("Sunshine encoder initialization failed: {reason}")
+                }
+                SunshineEncoderStartupState::Pending => {}
+            }
+        }
+
+        if started.elapsed() >= timeout {
+            bail!(
+                "timed out waiting for Sunshine H.264 encoder readiness; latest log={}",
+                compact_log_tail(&last_log, 500)
+            );
+        }
+        sleep(Duration::from_millis(250));
+    }
+}
+
+fn read_log_since(path: &Path, initial_offset: u64) -> Result<String> {
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("failed to open Sunshine log {}", path.display()))?;
+    let length = file.metadata()?.len();
+    let offset = if length < initial_offset {
+        0
+    } else {
+        initial_offset
+    };
+    file.seek(SeekFrom::Start(offset))?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
+    Ok(content)
+}
+
+fn classify_sunshine_encoder_startup(raw: &str) -> SunshineEncoderStartupState {
+    if let Some(line) = raw
+        .lines()
+        .find(|line| line.to_ascii_lowercase().contains("found h.264 encoder:"))
+    {
+        return SunshineEncoderStartupState::Ready(line.trim().to_string());
+    }
+
+    let fatal_markers = [
+        "0x8007000e",
+        "failed to create a d3d11 device",
+        "couldn't find any working encoder",
+        "no working encoder",
+        "fatal: please check that a display is connected",
+    ];
+    for line in raw.lines() {
+        let lowered = line.to_ascii_lowercase();
+        if fatal_markers.iter().any(|marker| lowered.contains(marker)) {
+            return SunshineEncoderStartupState::Failed(line.trim().to_string());
+        }
+    }
+    SunshineEncoderStartupState::Pending
+}
+
+fn compact_log_tail(raw: &str, max_chars: usize) -> String {
+    let compact = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= max_chars {
+        return compact;
+    }
+    compact
+        .chars()
+        .rev()
+        .take(max_chars)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
+}
+
 fn start_sunshine_runtime(paths: &BundlePaths, runtime_dir: &Path) -> Result<u32> {
     let sunshine_service_binary = runtime_dir.join("tools").join("sunshinesvc.exe");
     if sunshine_service_binary.exists() {
@@ -3426,6 +3799,7 @@ fn resolve_sunshine_runtime_pid(paths: &BundlePaths) -> Result<Option<u32>> {
     Ok(service_pid)
 }
 
+#[cfg(windows)]
 fn ensure_managed_sunshine_service(paths: &BundlePaths, runtime_dir: &Path) -> Result<String> {
     let service_name = default_sunshine_service_name(paths);
     let display_name = format!(
@@ -3440,145 +3814,182 @@ fn ensure_managed_sunshine_service(paths: &BundlePaths, runtime_dir: &Path) -> R
         );
     }
 
-    let bin_path = format!("\"{}\"", service_bin.display());
-    let exists = Command::new("sc.exe")
-        .args(["qc", &service_name])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .with_context(|| format!("failed to query Windows service {}", service_name))?
-        .success();
-
-    let mut args = if exists {
-        vec![
-            "config".to_string(),
-            service_name.clone(),
-            "type=".to_string(),
-            "own".to_string(),
-            "start=".to_string(),
-            "demand".to_string(),
-            "error=".to_string(),
-            "normal".to_string(),
-            "binPath=".to_string(),
-            bin_path.clone(),
-        ]
-    } else {
-        vec![
-            "create".to_string(),
-            service_name.clone(),
-            "type=".to_string(),
-            "own".to_string(),
-            "start=".to_string(),
-            "demand".to_string(),
-            "error=".to_string(),
-            "normal".to_string(),
-            "binPath=".to_string(),
-            bin_path.clone(),
-            "DisplayName=".to_string(),
-            display_name.clone(),
-        ]
+    let service_info = ServiceInfo {
+        name: OsString::from(&service_name),
+        display_name: OsString::from(&display_name),
+        service_type: ServiceType::OWN_PROCESS,
+        start_type: ServiceStartType::OnDemand,
+        error_control: ServiceErrorControl::Normal,
+        executable_path: service_bin.clone(),
+        launch_arguments: Vec::new(),
+        dependencies: Vec::new(),
+        account_name: None,
+        account_password: None,
     };
-    if exists {
-        args.push("DisplayName=".to_string());
-        args.push(display_name.clone());
+    let manager = ServiceManager::local_computer(
+        None::<&str>,
+        ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
+    )
+    .context("failed to connect to the Windows service manager")?;
+    match manager.open_service(
+        &service_name,
+        ServiceAccess::QUERY_CONFIG | ServiceAccess::CHANGE_CONFIG,
+    ) {
+        Ok(service) => {
+            let current = service.query_config().with_context(|| {
+                format!("failed to query Windows service config {service_name}")
+            })?;
+            if current.executable_path != service_bin
+                || current.service_type != ServiceType::OWN_PROCESS
+                || current.start_type != ServiceStartType::OnDemand
+                || current.error_control != ServiceErrorControl::Normal
+                || current.display_name != OsString::from(&display_name)
+            {
+                service.change_config(&service_info).with_context(|| {
+                    format!("failed to update Windows service config {service_name}")
+                })?;
+            }
+        }
+        Err(error) if windows_service_error_code(&error) == Some(1060) => {
+            manager
+                .create_service(&service_info, ServiceAccess::QUERY_STATUS)
+                .with_context(|| format!("failed to create Windows service {service_name}"))?;
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to open Windows service {service_name}"));
+        }
     }
-
-    let output = Command::new("sc.exe")
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to configure Windows service {}", service_name))?;
-    if !output.status.success() {
-        let combined = format!(
-            "{} {}",
-            String::from_utf8_lossy(&output.stdout).trim(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        bail!(
-            "failed to configure Windows service {}: {}",
-            service_name,
-            combined.trim()
-        );
-    }
-
-    let description = format!(
-        "Cloudgime Runtime service for {}",
-        paths.bundle_root.display()
-    );
-    let _ = Command::new("sc.exe")
-        .args(["description", &service_name, &description])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
 
     Ok(service_name)
 }
 
+#[cfg(not(windows))]
+fn ensure_managed_sunshine_service(_paths: &BundlePaths, _runtime_dir: &Path) -> Result<String> {
+    bail!("managed Sunshine services are only supported on Windows")
+}
+
+#[cfg(windows)]
+fn windows_service_error_code(error: &windows_service::Error) -> Option<i32> {
+    match error {
+        windows_service::Error::Winapi(error) => error.raw_os_error(),
+        _ => None,
+    }
+}
+
+#[cfg(windows)]
 fn start_managed_windows_service(paths: &BundlePaths, service_name: &str) -> Result<()> {
-    let output = Command::new("sc.exe")
-        .args(["start", service_name])
-        .output()
-        .with_context(|| format!("failed to invoke sc.exe start for {}", service_name))?;
-    if output.status.success() {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .context("failed to connect to the Windows service manager")?;
+    let service = manager
+        .open_service(
+            service_name,
+            ServiceAccess::QUERY_STATUS | ServiceAccess::START,
+        )
+        .with_context(|| format!("failed to open Windows service {service_name} for start"))?;
+    let mut status = service
+        .query_status()
+        .with_context(|| format!("failed to query Windows service {service_name}"))?;
+
+    if status.current_state == WindowsServiceState::Running {
         append_supervisor_log(
             paths,
-            &format!("started managed Windows service {}", service_name),
+            &format!("managed Windows service {service_name} already running"),
         )?;
         return Ok(());
     }
-
-    let combined = format!(
-        "{} {}",
-        String::from_utf8_lossy(&output.stdout).trim(),
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    let lowered = combined.to_ascii_lowercase();
-    if lowered.contains("already running") || lowered.contains("1056") {
-        append_supervisor_log(
-            paths,
-            &format!("managed Windows service {} already running", service_name),
+    if status.current_state == WindowsServiceState::StopPending {
+        wait_for_service_api_state(
+            &service,
+            service_name,
+            WindowsServiceState::Stopped,
+            Duration::from_secs(35),
         )?;
-        return Ok(());
+        status = service.query_status()?;
     }
-
-    bail!(
-        "failed to start Windows service {}: {}",
+    if status.current_state != WindowsServiceState::StartPending {
+        service
+            .start::<&str>(&[])
+            .with_context(|| format!("failed to start Windows service {service_name}"))?;
+    }
+    wait_for_service_api_state(
+        &service,
         service_name,
-        combined.trim()
+        WindowsServiceState::Running,
+        Duration::from_secs(35),
+    )?;
+    append_supervisor_log(
+        paths,
+        &format!("started managed Windows service {service_name}"),
     )
 }
 
+#[cfg(not(windows))]
+fn start_managed_windows_service(_paths: &BundlePaths, service_name: &str) -> Result<()> {
+    bail!("Windows service {service_name} cannot be started on this platform")
+}
+
+#[cfg(windows)]
 fn stop_managed_windows_service(paths: &BundlePaths, service_name: &str) -> Result<()> {
-    let output = Command::new("sc.exe")
-        .args(["stop", service_name])
-        .output()
-        .with_context(|| format!("failed to invoke sc.exe stop for {}", service_name))?;
-    if output.status.success() {
-        append_supervisor_log(
-            paths,
-            &format!("stopped managed Windows service {}", service_name),
-        )?;
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .context("failed to connect to the Windows service manager")?;
+    let service = manager
+        .open_service(
+            service_name,
+            ServiceAccess::QUERY_STATUS | ServiceAccess::STOP,
+        )
+        .with_context(|| format!("failed to open Windows service {service_name} for stop"))?;
+    let status = service
+        .query_status()
+        .with_context(|| format!("failed to query Windows service {service_name}"))?;
+    if status.current_state == WindowsServiceState::Stopped {
         return Ok(());
     }
-
-    let combined = format!(
-        "{} {}",
-        String::from_utf8_lossy(&output.stdout).trim(),
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    let lowered = combined.to_ascii_lowercase();
-    if lowered.contains("service has not been started")
-        || lowered.contains("service does not exist")
-        || lowered.contains("1060")
-        || lowered.contains("1062")
-    {
-        return Ok(());
+    if status.current_state != WindowsServiceState::StopPending {
+        service
+            .stop()
+            .with_context(|| format!("failed to stop Windows service {service_name}"))?;
     }
-
-    bail!(
-        "failed to stop Windows service {}: {}",
+    wait_for_service_api_state(
+        &service,
         service_name,
-        combined.trim()
+        WindowsServiceState::Stopped,
+        Duration::from_secs(35),
+    )?;
+    append_supervisor_log(
+        paths,
+        &format!("stopped managed Windows service {service_name}"),
     )
+}
+
+#[cfg(not(windows))]
+fn stop_managed_windows_service(_paths: &BundlePaths, service_name: &str) -> Result<()> {
+    bail!("Windows service {service_name} cannot be stopped on this platform")
+}
+
+#[cfg(windows)]
+fn wait_for_service_api_state(
+    service: &windows_service::service::Service,
+    service_name: &str,
+    expected_state: WindowsServiceState,
+    timeout: Duration,
+) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        let status = service
+            .query_status()
+            .with_context(|| format!("failed to query Windows service {service_name}"))?;
+        if status.current_state == expected_state {
+            return Ok(());
+        }
+        if started.elapsed() >= timeout {
+            bail!(
+                "timed out waiting for Windows service {service_name} state={expected_state:?}; current={:?}",
+                status.current_state
+            );
+        }
+        sleep(Duration::from_millis(250));
+    }
 }
 
 fn purge_staged_runtime(paths: &BundlePaths) -> Result<()> {
@@ -3642,6 +4053,40 @@ fn taskkill_pid(pid: u32) -> Result<()> {
         bail!("taskkill returned non-zero status for pid {pid}: {status}");
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn terminate_pid_direct(pid: u32) -> Result<()> {
+    let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+    if handle.is_null() {
+        if !process_exists(pid)? {
+            return Ok(());
+        }
+        bail!(
+            "OpenProcess(PROCESS_TERMINATE) failed for pid {pid}: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+
+    let terminated = unsafe { TerminateProcess(handle, 1) };
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    if terminated == 0 {
+        if !process_exists(pid)? {
+            return Ok(());
+        }
+        bail!(
+            "TerminateProcess failed for pid {pid}: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn terminate_pid_direct(pid: u32) -> Result<()> {
+    taskkill_pid(pid)
 }
 
 fn wait_for_bundle_processes_closed(
@@ -3870,4 +4315,66 @@ fn now_unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_nvidia_memory_rows() {
+        assert_eq!(
+            parse_nvidia_memory_snapshots("1024, 296\n24576, 22000\ninvalid\n"),
+            vec![
+                NvidiaMemorySnapshot {
+                    total_mib: 1024,
+                    free_mib: 296,
+                },
+                NvidiaMemorySnapshot {
+                    total_mib: 24576,
+                    free_mib: 22000,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn releases_remote_desktop_vram_only_for_constrained_gpu() {
+        assert!(should_release_remote_desktop_vram(&[
+            NvidiaMemorySnapshot {
+                total_mib: 1024,
+                free_mib: 296,
+            }
+        ]));
+        assert!(!should_release_remote_desktop_vram(&[
+            NvidiaMemorySnapshot {
+                total_mib: 1024,
+                free_mib: 700,
+            },
+            NvidiaMemorySnapshot {
+                total_mib: 24576,
+                free_mib: 300,
+            },
+        ]));
+    }
+
+    #[test]
+    fn classifies_sunshine_encoder_readiness_and_failure() {
+        assert!(matches!(
+            classify_sunshine_encoder_startup(
+                "[time] Info: Found H.264 encoder: libx264 [software]"
+            ),
+            SunshineEncoderStartupState::Ready(_)
+        ));
+        assert!(matches!(
+            classify_sunshine_encoder_startup(
+                "[time] Error: Failed to create a D3D11 device: 0x8007000E"
+            ),
+            SunshineEncoderStartupState::Failed(_)
+        ));
+        assert_eq!(
+            classify_sunshine_encoder_startup("[time] Info: Web UI available"),
+            SunshineEncoderStartupState::Pending
+        );
+    }
 }

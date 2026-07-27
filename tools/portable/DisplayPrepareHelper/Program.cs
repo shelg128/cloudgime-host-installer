@@ -4998,7 +4998,8 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
         }
 
         var lowered = failure.Message.ToLowerInvariant();
-        return lowered.Contains("disp_change code -1") &&
+        return (lowered.Contains("disp_change code -1") ||
+                lowered.Contains("disp_change code -2")) &&
                (DisplayLooksLikeCompetingVirtual(currentDisplay) ||
                 SavedDisplayLooksLikeCompetingVirtual(savedDisplay) ||
                 DisplayLooksLikeCloudgimeVdd(currentDisplay) ||
@@ -5008,7 +5009,8 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
     private static bool CanIgnorePrimaryRestoreFailure(DisplaySnapshot display, Exception failure)
     {
         var lowered = failure.Message.ToLowerInvariant();
-        return lowered.Contains("disp_change code -1") &&
+        return (lowered.Contains("disp_change code -1") ||
+                lowered.Contains("disp_change code -2")) &&
                (DisplayLooksLikeCompetingVirtual(display) || DisplayLooksLikeCloudgimeVdd(display));
     }
 
@@ -5720,17 +5722,26 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
             }
 
             var idleModeChanged = false;
+            var usedActivePrimaryFallback = false;
             if (state.PreviousPrimary is not null)
             {
                 currentDisplays = EnumerateDisplays();
-                var previousPrimary = FindDisplay(currentDisplays, state.PreviousPrimary)
-                    ?? throw new InvalidOperationException("previous primary display is no longer available.");
-                if (!previousPrimary.Active)
+                var previousPrimary = FindDisplay(currentDisplays, state.PreviousPrimary);
+                if (previousPrimary is not { Active: true })
                 {
                     TryRunDisplaySwitchClone();
                     currentDisplays = EnumerateDisplays();
-                    previousPrimary = FindDisplay(currentDisplays, state.PreviousPrimary)
-                        ?? throw new InvalidOperationException("previous primary display is no longer available.");
+                    previousPrimary = FindDisplay(currentDisplays, state.PreviousPrimary);
+                }
+
+                if (previousPrimary is null || !previousPrimary.Active)
+                {
+                    previousPrimary = ResolveHostIdleDisplayTarget(state, currentDisplays)
+                        ?? throw new InvalidOperationException("no active display is available for host restore.");
+                    usedActivePrimaryFallback = true;
+                    Console.Error.WriteLine(
+                        $"Warning: Previous primary {state.PreviousPrimary.DeviceName} is unavailable; " +
+                        $"restoring active display {previousPrimary.DeviceName} instead.");
                 }
 
                 if (!previousPrimary.Primary || previousPrimary.PositionX != 0 || previousPrimary.PositionY != 0)
@@ -5749,7 +5760,8 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
                         TryRunDisplaySwitchClone();
                         currentDisplays = EnumerateDisplays();
                         previousPrimary = FindDisplay(currentDisplays, state.PreviousPrimary)
-                            ?? throw new InvalidOperationException("previous primary display is no longer available.");
+                            ?? ResolveHostIdleDisplayTarget(state, currentDisplays)
+                            ?? throw new InvalidOperationException("no active display is available for host restore.");
                         if (!previousPrimary.Primary || previousPrimary.PositionX != 0 || previousPrimary.PositionY != 0)
                         {
                             MakeDisplayPrimary(previousPrimary, currentDisplays, repositionOtherDisplays: false);
@@ -5758,13 +5770,14 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
                     currentDisplays = EnumerateDisplays();
                 }
                 RestoreWindowsToPreviousPrimaryBeforeStreamDisplayShutdown(state, currentDisplays);
-                currentDisplays = EnumerateDisplays();
-                idleModeChanged = TryNormalizeHostIdleDisplayModeWithRetry(
-                    state,
-                    currentDisplays,
-                    attempts: 8,
-                    delayMs: 650);
             }
+
+            currentDisplays = EnumerateDisplays();
+            idleModeChanged = TryNormalizeHostIdleDisplayModeWithRetry(
+                state,
+                currentDisplays,
+                attempts: 8,
+                delayMs: 650);
 
             if (state.PreviousCursor is not null)
             {
@@ -5784,9 +5797,13 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
                 Changed = idleModeChanged,
                 Restored = true,
                 Skipped = false,
-                Reason = idleModeChanged
-                    ? "restored_previous_primary_idle_1366x720"
-                    : "restored_previous_primary",
+                Reason = usedActivePrimaryFallback
+                    ? idleModeChanged
+                        ? "restored_active_primary_fallback_idle_1366x720"
+                        : "restored_active_primary_fallback"
+                    : idleModeChanged
+                        ? "restored_previous_primary_idle_1366x720"
+                        : "restored_previous_primary",
             };
         }
         finally
@@ -5799,14 +5816,7 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
         PrepareStateFile state,
         List<DisplaySnapshot> currentDisplays)
     {
-        var targetDisplay = state.PreviousPrimary is not null
-            ? FindDisplay(currentDisplays, state.PreviousPrimary)
-            : null;
-        targetDisplay ??= currentDisplays.FirstOrDefault(display =>
-            display.Active &&
-            display.Primary &&
-            !DisplayLooksLikeMttVdd(display));
-        targetDisplay ??= currentDisplays.FirstOrDefault(display => display.Active && display.Primary);
+        var targetDisplay = ResolveHostIdleDisplayTarget(state, currentDisplays);
         if (targetDisplay is null || !targetDisplay.Active)
         {
             return false;
@@ -5864,7 +5874,9 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
             }
 
             Thread.Sleep(250);
-            var afterDisplay = FindDisplay(EnumerateDisplays(), targetIdentity);
+            var afterDisplays = EnumerateDisplays();
+            var afterDisplay = FindDisplay(afterDisplays, targetIdentity)
+                ?? ResolveHostIdleDisplayTarget(state, afterDisplays);
             return afterDisplay is not null &&
                 afterDisplay.Width == DefaultHostIdleMode.Width &&
                 afterDisplay.Height == DefaultHostIdleMode.Height &&
@@ -5913,20 +5925,38 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
         PrepareStateFile state,
         List<DisplaySnapshot> currentDisplays)
     {
-        var targetDisplay = state.PreviousPrimary is not null
-            ? FindDisplay(currentDisplays, state.PreviousPrimary)
-            : null;
-        targetDisplay ??= currentDisplays.FirstOrDefault(display =>
-            display.Active &&
-            display.Primary &&
-            !DisplayLooksLikeMttVdd(display));
-        targetDisplay ??= currentDisplays.FirstOrDefault(display => display.Active && display.Primary);
+        var targetDisplay = ResolveHostIdleDisplayTarget(state, currentDisplays);
         return targetDisplay is not null &&
             targetDisplay.Active &&
             targetDisplay.Width == DefaultHostIdleMode.Width &&
             targetDisplay.Height == DefaultHostIdleMode.Height &&
             (DefaultHostIdleMode.Frequency <= 0 ||
              targetDisplay.Frequency == DefaultHostIdleMode.Frequency);
+    }
+
+    private static DisplaySnapshot? ResolveHostIdleDisplayTarget(
+        PrepareStateFile state,
+        IReadOnlyList<DisplaySnapshot> currentDisplays)
+    {
+        var savedPrimary = state.PreviousPrimary is not null
+            ? FindDisplay(currentDisplays, state.PreviousPrimary)
+            : null;
+        if (savedPrimary is { Active: true })
+        {
+            return savedPrimary;
+        }
+
+        return currentDisplays.FirstOrDefault(display =>
+                display.Active &&
+                display.Primary &&
+                !DisplayLooksLikeMttVdd(display) &&
+                !DisplayLooksLikeCompetingVirtual(display))
+            ?? currentDisplays.FirstOrDefault(display => display.Active && display.Primary)
+            ?? currentDisplays.FirstOrDefault(display =>
+                display.Active &&
+                DisplayLooksLikeMttVdd(display) &&
+                DisplayIsVisibleOnDesktop(display))
+            ?? currentDisplays.FirstOrDefault(display => display.Active);
     }
 
     private static void RestoreRuntimeProcessMitigations(PrepareStateFile state)
