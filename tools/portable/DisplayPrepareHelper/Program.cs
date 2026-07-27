@@ -5622,7 +5622,11 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
             var idleModeChanged = false;
             try
             {
-                idleModeChanged = TryNormalizeHostIdleDisplayMode(new PrepareStateFile(), EnumerateDisplays());
+                idleModeChanged = TryNormalizeHostIdleDisplayModeWithRetry(
+                    new PrepareStateFile(),
+                    EnumerateDisplays(),
+                    attempts: 10,
+                    delayMs: 750);
             }
             catch
             {
@@ -5755,7 +5759,11 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
                 }
                 RestoreWindowsToPreviousPrimaryBeforeStreamDisplayShutdown(state, currentDisplays);
                 currentDisplays = EnumerateDisplays();
-                idleModeChanged = TryNormalizeHostIdleDisplayMode(state, currentDisplays);
+                idleModeChanged = TryNormalizeHostIdleDisplayModeWithRetry(
+                    state,
+                    currentDisplays,
+                    attempts: 8,
+                    delayMs: 650);
             }
 
             if (state.PreviousCursor is not null)
@@ -5868,6 +5876,57 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
         {
             return false;
         }
+    }
+
+    private static bool TryNormalizeHostIdleDisplayModeWithRetry(
+        PrepareStateFile state,
+        List<DisplaySnapshot> currentDisplays,
+        int attempts,
+        int delayMs)
+    {
+        var snapshot = currentDisplays;
+        var totalAttempts = Math.Max(1, attempts);
+        for (var attempt = 0; attempt < totalAttempts; attempt++)
+        {
+            if (HostIdleModeAlreadyActive(state, snapshot))
+            {
+                return false;
+            }
+
+            if (TryNormalizeHostIdleDisplayMode(state, snapshot))
+            {
+                return true;
+            }
+
+            if (attempt == totalAttempts - 1)
+            {
+                break;
+            }
+
+            Thread.Sleep(Math.Max(0, delayMs));
+            snapshot = EnumerateDisplays();
+        }
+        return false;
+    }
+
+    private static bool HostIdleModeAlreadyActive(
+        PrepareStateFile state,
+        List<DisplaySnapshot> currentDisplays)
+    {
+        var targetDisplay = state.PreviousPrimary is not null
+            ? FindDisplay(currentDisplays, state.PreviousPrimary)
+            : null;
+        targetDisplay ??= currentDisplays.FirstOrDefault(display =>
+            display.Active &&
+            display.Primary &&
+            !DisplayLooksLikeMttVdd(display));
+        targetDisplay ??= currentDisplays.FirstOrDefault(display => display.Active && display.Primary);
+        return targetDisplay is not null &&
+            targetDisplay.Active &&
+            targetDisplay.Width == DefaultHostIdleMode.Width &&
+            targetDisplay.Height == DefaultHostIdleMode.Height &&
+            (DefaultHostIdleMode.Frequency <= 0 ||
+             targetDisplay.Frequency == DefaultHostIdleMode.Frequency);
     }
 
     private static void RestoreRuntimeProcessMitigations(PrepareStateFile state)

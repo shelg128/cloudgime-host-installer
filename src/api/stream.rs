@@ -7579,6 +7579,11 @@ pub async fn start_host(
             sleep(Duration::from_millis(500)).await;
             force_kill_child(&child, "Stream").await;
             cleanup_staged_child_binary(&staged_streamer_path);
+            restore_prepared_stream_display_best_effort(
+                &dynamic_display_session_token,
+                "post_connect_streamer_stopped",
+            )
+            .await;
             if let Some(window_watch_child) = current_window_watch_child.as_ref() {
                 force_kill_child(window_watch_child, "Window Watch").await;
             }
