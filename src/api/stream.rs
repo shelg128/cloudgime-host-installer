@@ -3562,6 +3562,9 @@ fn describe_mic_sidecar_client_message(message: &MicSidecarClientMessage) -> Str
         MicSidecarClientMessage::Heartbeat { ts_ms } => {
             format!("type=Heartbeat ts_ms={ts_ms}")
         }
+        MicSidecarClientMessage::SetGain { percent } => {
+            format!("type=SetGain percent={percent}")
+        }
         MicSidecarClientMessage::WebRtc(StreamSignalingMessage::Description(description)) => {
             format!("type=WebRtcDescription sdp={:?}", description.ty)
         }
@@ -3834,12 +3837,12 @@ fn enumerate_interactive_user_session_candidates() -> Vec<u32> {
         for session in sessions {
             let session_id = session.SessionId;
             let is_console = console_session_id != u32::MAX && session_id == console_session_id;
-            let rank = match (session.State, is_console) {
-                (WTSActive, false) => Some(0),
-                (WTSConnected, false) => Some(1),
-                (WTSActive, true) => Some(2),
-                (WTSConnected, true) => Some(3),
-                _ => None,
+            let rank = if session.State == WTSActive {
+                Some(if is_console { 2 } else { 0 })
+            } else if session.State == WTSConnected {
+                Some(if is_console { 3 } else { 1 })
+            } else {
+                None
             };
             if let Some(rank) = rank {
                 ranked_sessions.push((rank, session_id));

@@ -1122,6 +1122,9 @@ pub enum MicSidecarClientMessage {
     Init {
         host_id: u32,
     },
+    SetGain {
+        percent: u8,
+    },
     Heartbeat {
         #[ts(type = "number")]
         ts_ms: u64,

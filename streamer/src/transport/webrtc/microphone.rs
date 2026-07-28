@@ -658,13 +658,14 @@ fn queue_len_for_ms(channels: usize, duration_ms: usize) -> usize {
 
 pub struct HostMicrophoneLoopback {
     _stream: Stream,
-    default_mic_guard: Option<default_capture_endpoint::HostDefaultMicrophoneGuard>,
+    default_mic_guard: Arc<Mutex<Option<default_capture_endpoint::HostDefaultMicrophoneGuard>>>,
     queue: Arc<Mutex<VecDeque<f32>>>,
     decoder: OpusDecoder,
     decoded_channels: usize,
     output_channels: usize,
     output_device_name: String,
     capture_hint: Option<&'static str>,
+    gain: f32,
 }
 
 impl HostMicrophoneLoopback {
@@ -672,11 +673,6 @@ impl HostMicrophoneLoopback {
         let device = choose_output_device()?;
         let output_device_name = device.name().unwrap_or_else(|_| "unknown".to_owned());
         let capture_hint = capture_hint_for_output_device(&output_device_name);
-        if let Err(err) =
-            default_capture_endpoint::prepare_virtual_render_for_session(&output_device_name)
-        {
-            warn!("[WebRTC] Could not prepare microphone uplink output endpoint: {err}");
-        }
         let supported_config = choose_stream_config(&device)?;
         let output_channels = usize::from(supported_config.channels());
         let sample_format = supported_config.sample_format();
@@ -762,22 +758,38 @@ impl HostMicrophoneLoopback {
             .play()
             .map_err(|err| format!("failed to start output stream: {err}"))?;
 
-        let default_mic_guard = match default_capture_endpoint::promote_virtual_capture_for_session(
-            &output_device_name,
-            capture_hint,
-        ) {
-            Ok(guard) => {
-                info!(
-                    "[WebRTC] Host default microphone temporarily routed to '{}'",
-                    guard.capture_name
-                );
-                Some(guard)
-            }
-            Err(err) => {
-                warn!("[WebRTC] Could not auto-select host default microphone: {err}");
-                None
-            }
-        };
+        let default_mic_guard = Arc::new(Mutex::new(None));
+        let guard_for_routing = default_mic_guard.clone();
+        let output_name_for_routing = output_device_name.clone();
+        if let Err(err) = std::thread::Builder::new()
+            .name("mic-default-route".to_owned())
+            .spawn(move || {
+                if let Err(err) = default_capture_endpoint::prepare_virtual_render_for_session(
+                    &output_name_for_routing,
+                ) {
+                    warn!("[WebRTC] Could not prepare microphone uplink output endpoint: {err}");
+                }
+                match default_capture_endpoint::promote_virtual_capture_for_session(
+                    &output_name_for_routing,
+                    capture_hint,
+                ) {
+                    Ok(guard) => {
+                        info!(
+                            "[WebRTC] Host default microphone temporarily routed to '{}'",
+                            guard.capture_name
+                        );
+                        if let Ok(mut slot) = guard_for_routing.lock() {
+                            *slot = Some(guard);
+                        }
+                    }
+                    Err(err) => {
+                        warn!("[WebRTC] Could not auto-select host default microphone: {err}");
+                    }
+                }
+            })
+        {
+            warn!("[WebRTC] Could not start host microphone routing task: {err}");
+        }
 
         let decoded_channels = if preferred_channels >= 2 { 2 } else { 1 };
         let decoder = OpusDecoder::new(
@@ -817,7 +829,12 @@ impl HostMicrophoneLoopback {
             output_channels,
             output_device_name,
             capture_hint,
+            gain: 1.0,
         })
+    }
+
+    pub fn set_gain_percent(&mut self, percent: u8) {
+        self.gain = f32::from(percent.min(100)) / 100.0;
     }
 
     fn push_interleaved_i16(&self, pcm: &[i16]) {
@@ -834,7 +851,7 @@ impl HostMicrophoneLoopback {
 
         if self.decoded_channels == 1 {
             for sample in pcm {
-                let normalized = *sample as f32 / i16::MAX as f32;
+                let normalized = (*sample as f32 / i16::MAX as f32) * self.gain;
                 if self.output_channels <= 1 {
                     queue.push_back(normalized);
                 } else {
@@ -845,13 +862,15 @@ impl HostMicrophoneLoopback {
             }
         } else {
             for frame in pcm.chunks_exact(self.decoded_channels) {
-                let left = frame.first().copied().unwrap_or(0) as f32 / i16::MAX as f32;
+                let left =
+                    (frame.first().copied().unwrap_or(0) as f32 / i16::MAX as f32) * self.gain;
                 let right = frame
                     .get(1)
                     .copied()
                     .unwrap_or(frame.first().copied().unwrap_or(0))
                     as f32
-                    / i16::MAX as f32;
+                    / i16::MAX as f32
+                    * self.gain;
                 if self.output_channels <= 1 {
                     queue.push_back((left + right) * 0.5);
                 } else {
@@ -906,9 +925,25 @@ impl HostMicrophoneLoopback {
         self.capture_hint
     }
 
-    pub fn default_capture_name(&self) -> Option<&str> {
+    pub fn default_capture_name(&self) -> Option<String> {
         self.default_mic_guard
-            .as_ref()
-            .map(|guard| guard.capture_name.as_str())
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|value| value.capture_name.clone()))
+    }
+}
+
+impl Drop for HostMicrophoneLoopback {
+    fn drop(&mut self) {
+        let guard = self
+            .default_mic_guard
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        if let Some(guard) = guard {
+            let _ = std::thread::Builder::new()
+                .name("mic-default-restore".to_owned())
+                .spawn(move || drop(guard));
+        }
     }
 }

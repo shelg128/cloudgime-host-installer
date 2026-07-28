@@ -487,8 +487,11 @@ async fn get_app_image(
 pub fn api_service() -> impl HttpServiceFactory {
     web::scope("/api")
         .service(services![
+            post_android_native_launch_token_from_tunnel,
+            post_android_native_consume_launch,
             post_android_native_shared_session_consume_invite,
             post_android_native_shared_session_invite_loopback,
+            post_android_native_refresh_stream_ticket,
             stream::shared_session_player2_ws
         ])
         .service(
@@ -523,12 +526,9 @@ pub fn api_service() -> impl HttpServiceFactory {
                 .service(services![
                     // -- Android Native
                     post_android_native_launch_token,
-                    post_android_native_launch_token_from_tunnel,
                     post_android_native_bootstrap_web_session,
                     post_android_native_bootstrap_web_session_from_native_session,
-                    post_android_native_consume_launch,
                     post_android_native_display_control,
-                    post_android_native_refresh_stream_ticket,
                     post_android_native_session_event,
                     post_android_native_session_lifecycle,
                     post_android_native_shared_session_invite,
