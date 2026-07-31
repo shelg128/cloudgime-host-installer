@@ -654,6 +654,13 @@ internal sealed record DisplaySnapshot(
 
 internal static class Program
 {
+    private enum HostIdleNormalizeStatus
+    {
+        Failed,
+        AlreadyIdle,
+        Changed,
+    }
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
@@ -5621,10 +5628,10 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
         var state = ReadState();
         if (state is null)
         {
-            var idleModeChanged = false;
+            var idleStatus = HostIdleNormalizeStatus.Failed;
             try
             {
-                idleModeChanged = TryNormalizeHostIdleDisplayModeWithRetry(
+                idleStatus = NormalizeHostIdleDisplayModeWithRetry(
                     new PrepareStateFile(),
                     EnumerateDisplays(),
                     attempts: 10,
@@ -5632,18 +5639,23 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
             }
             catch
             {
-                idleModeChanged = false;
+                idleStatus = HostIdleNormalizeStatus.Failed;
             }
 
+            var idleHandled = idleStatus is HostIdleNormalizeStatus.AlreadyIdle or HostIdleNormalizeStatus.Changed;
             return new HelperResult
             {
                 Ok = true,
-                Changed = idleModeChanged,
-                Restored = false,
-                Skipped = !idleModeChanged,
-                Reason = idleModeChanged
-                    ? "no_saved_state_idle_1366x720"
-                    : "no_saved_state",
+                Changed = idleStatus == HostIdleNormalizeStatus.Changed,
+                Restored = idleHandled,
+                Skipped = !idleHandled,
+                Reason = idleStatus switch
+                {
+                    HostIdleNormalizeStatus.Changed => "no_saved_state_idle_1366x720",
+                    HostIdleNormalizeStatus.AlreadyIdle => "no_saved_state_already_idle_1366x720",
+                    _ => "no_saved_state_restore_unavailable",
+                },
+                Applied = idleHandled ? DefaultHostIdleMode : null,
             };
         }
 
@@ -5895,6 +5907,17 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
         List<DisplaySnapshot> currentDisplays,
         int attempts,
         int delayMs)
+        => NormalizeHostIdleDisplayModeWithRetry(
+            state,
+            currentDisplays,
+            attempts,
+            delayMs) == HostIdleNormalizeStatus.Changed;
+
+    private static HostIdleNormalizeStatus NormalizeHostIdleDisplayModeWithRetry(
+        PrepareStateFile state,
+        List<DisplaySnapshot> currentDisplays,
+        int attempts,
+        int delayMs)
     {
         var snapshot = currentDisplays;
         var totalAttempts = Math.Max(1, attempts);
@@ -5902,12 +5925,12 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
         {
             if (HostIdleModeAlreadyActive(state, snapshot))
             {
-                return false;
+                return HostIdleNormalizeStatus.AlreadyIdle;
             }
 
             if (TryNormalizeHostIdleDisplayMode(state, snapshot))
             {
-                return true;
+                return HostIdleNormalizeStatus.Changed;
             }
 
             if (attempt == totalAttempts - 1)
@@ -5918,7 +5941,7 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
             Thread.Sleep(Math.Max(0, delayMs));
             snapshot = EnumerateDisplays();
         }
-        return false;
+        return HostIdleNormalizeStatus.Failed;
     }
 
     private static bool HostIdleModeAlreadyActive(
