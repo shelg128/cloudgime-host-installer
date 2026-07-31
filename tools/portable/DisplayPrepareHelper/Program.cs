@@ -8632,18 +8632,6 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
         SavedDisplayState? requestedMode,
         bool exactModeFallback)
     {
-        if (exactModeFallback &&
-            requestedMode is not null &&
-            DisplayCanContainRequestedStreamSurface(display, requestedMode))
-        {
-            return new SavedDisplayState
-            {
-                Width = requestedMode.Width,
-                Height = requestedMode.Height,
-                Frequency = requestedMode.Frequency > 0 ? requestedMode.Frequency : display.Frequency,
-            };
-        }
-
         return display.ToSavedState();
     }
 

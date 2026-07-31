@@ -75,6 +75,7 @@ use windows_sys::Win32::{
 
 static ACTIVE_STREAM_CHILD: LazyLock<Mutex<Option<Arc<Mutex<Child>>>>> =
     LazyLock::new(|| Mutex::new(None));
+static ACTIVE_STREAM_GENERATION: AtomicU64 = AtomicU64::new(0);
 static ACTIVE_MIC_SIDECAR_CHILD: LazyLock<Mutex<Option<Arc<Mutex<Child>>>>> =
     LazyLock::new(|| Mutex::new(None));
 static ACTIVE_WINDOW_WATCH_CHILD: LazyLock<Mutex<Option<Arc<Mutex<Child>>>>> =
@@ -1087,6 +1088,10 @@ fn recent_host_recovery_gate_reason(
             return Some(format!("host_lifecycle_{phase}"));
         }
 
+        if is_benign_pre_connect_lifecycle_reason(&reason) {
+            return None;
+        }
+
         return Some(format!(
             "host_lifecycle_{phase}:{}",
             sanitize_trace_value(&reason)
@@ -1094,6 +1099,16 @@ fn recent_host_recovery_gate_reason(
     }
 
     None
+}
+
+fn is_benign_pre_connect_lifecycle_reason(reason: &str) -> bool {
+    let normalized = reason.trim().to_ascii_lowercase();
+    normalized == "session_stopped_before_connect" ||
+        normalized == "control_channel_receive_failed" ||
+        normalized == "control_channel_closed_before_start_forward" ||
+        normalized == "control_channel_receive_failed_before_start_forward" ||
+        normalized == "control_channel_ended_before_start_forward" ||
+        normalized == "control_channel_heartbeat_timeout_before_connect"
 }
 
 fn normalize_stream_display_mode(mode: &str) -> String {
@@ -1794,7 +1809,7 @@ fn same_stream_orientation(
 }
 
 fn should_preserve_requested_stream_surface_after_display_fallback(
-    _profile: Option<&HostCapabilityProfileSnapshot>,
+    profile: Option<&HostCapabilityProfileSnapshot>,
     requested_width: u32,
     requested_height: u32,
     applied_width: u32,
@@ -1802,6 +1817,10 @@ fn should_preserve_requested_stream_surface_after_display_fallback(
     reason: &str,
 ) -> bool {
     let fallback_reason = reason.trim().to_ascii_lowercase();
+    if profile.is_some_and(|profile| profile.selected_encoder.eq_ignore_ascii_case("software")) {
+        return false;
+    }
+
     reason_indicates_stream_surface_fallback(&fallback_reason)
         && requested_width > 0
         && requested_height > 0
@@ -3715,6 +3734,60 @@ async fn stop_active_window_watch(session_token: &str, reason: &str) {
     }
 }
 
+fn begin_active_stream_generation(session_token: &str) -> u64 {
+    let stream_generation = ACTIVE_STREAM_GENERATION
+        .fetch_add(1, Ordering::AcqRel)
+        .saturating_add(1);
+    append_host_stream_trace(&format!(
+        "STREAM_GENERATION_BEGIN token={} generation={}",
+        session_token, stream_generation
+    ));
+    stream_generation
+}
+
+fn stale_stream_generation(stream_generation: u64) -> Option<u64> {
+    if stream_generation == 0 {
+        return None;
+    }
+
+    let active_stream_generation = ACTIVE_STREAM_GENERATION.load(Ordering::Acquire);
+    (active_stream_generation != stream_generation).then_some(active_stream_generation)
+}
+
+fn append_stale_stream_generation_cleanup_skip(
+    session_token: &str,
+    stage: &str,
+    stream_generation: u64,
+    active_stream_generation: u64,
+) {
+    append_host_stream_trace(&format!(
+        "DISPLAY_RESTORE_BEST_EFFORT_SKIPPED token={} stage={} reason=stale_stream_generation generation={} active_generation={}",
+        session_token,
+        sanitize_trace_value(stage),
+        stream_generation,
+        active_stream_generation
+    ));
+}
+
+async fn stop_active_window_watch_if_current(
+    session_token: &str,
+    reason: &str,
+    stream_generation: u64,
+) {
+    if let Some(active_stream_generation) = stale_stream_generation(stream_generation) {
+        append_host_stream_trace(&format!(
+            "WINDOW_WATCH_STOP_SKIPPED token={} reason={} cleanup_generation={} active_generation={} detail=stale_stream_generation",
+            session_token,
+            sanitize_trace_value(reason),
+            stream_generation,
+            active_stream_generation
+        ));
+        return;
+    }
+
+    stop_active_window_watch(session_token, reason).await;
+}
+
 async fn preempt_active_stream_runtime(session_token: &str) {
     if let Some(previous_stream) = take_active_child(&ACTIVE_STREAM_CHILD).await {
         append_host_stream_trace(&format!(
@@ -4706,6 +4779,26 @@ async fn restore_prepared_stream_display_if_active(active: &Arc<AtomicBool>, ses
     }
 }
 
+async fn restore_prepared_stream_display_if_active_for_generation(
+    active: &Arc<AtomicBool>,
+    session_token: &str,
+    stage: &str,
+    stream_generation: u64,
+) {
+    if let Some(active_stream_generation) = stale_stream_generation(stream_generation) {
+        let _ = active.swap(false, Ordering::AcqRel);
+        append_stale_stream_generation_cleanup_skip(
+            session_token,
+            stage,
+            stream_generation,
+            active_stream_generation,
+        );
+        return;
+    }
+
+    restore_prepared_stream_display_if_active(active, session_token).await;
+}
+
 async fn restore_prepared_stream_display_best_effort(session_token: &str, stage: &str) {
     match restore_prepared_stream_display(session_token).await {
         Ok(result) => {
@@ -4728,6 +4821,24 @@ async fn restore_prepared_stream_display_best_effort(session_token: &str, stage:
             ));
         }
     }
+}
+
+async fn restore_prepared_stream_display_best_effort_for_generation(
+    session_token: &str,
+    stage: &str,
+    stream_generation: u64,
+) {
+    if let Some(active_stream_generation) = stale_stream_generation(stream_generation) {
+        append_stale_stream_generation_cleanup_skip(
+            session_token,
+            stage,
+            stream_generation,
+            active_stream_generation,
+        );
+        return;
+    }
+
+    restore_prepared_stream_display_best_effort(session_token, stage).await;
 }
 
 async fn forward_stream_server_message(
@@ -5043,6 +5154,7 @@ pub async fn start_host(
             host_id.0, app_id.0, dynamic_display_session_token, client_build, dynamic_display_match
         ));
 
+        let stream_generation = begin_active_stream_generation(&dynamic_display_session_token);
         preempt_active_stream_runtime(&dynamic_display_session_token).await;
         if let Some(profile) = runtime_profile_snapshot.as_ref() {
             append_host_stream_trace(&format!(
@@ -5760,6 +5872,7 @@ pub async fn start_host(
             let prepared_display_active = prepared_display_active.clone();
             let dynamic_display_session_token = dynamic_display_session_token.clone();
             let android_native_owner_session_id = android_native_owner_session_id.clone();
+            let stream_generation = stream_generation;
             async move {
                 let mut warned_closed = false;
                 let mut ipc_receiver_closed = false;
@@ -5856,9 +5969,10 @@ pub async fn start_host(
                     clear_shared_player2_bridge(owner_session_id).await;
                 }
 
-                stop_active_window_watch(
+                stop_active_window_watch_if_current(
                     &dynamic_display_session_token,
                     "ipc_receiver_closed_before_display_restore",
+                    stream_generation,
                 )
                 .await;
                 restore_runtime_dynamic_display_if_active(
@@ -5866,9 +5980,11 @@ pub async fn start_host(
                     &dynamic_display_session_token,
                 )
                 .await;
-                restore_prepared_stream_display_if_active(
+                restore_prepared_stream_display_if_active_for_generation(
                     &prepared_display_active,
                     &dynamic_display_session_token,
+                    "ipc_receiver_closed_before_display_restore",
+                    stream_generation,
                 )
                 .await;
 
@@ -5885,12 +6001,12 @@ pub async fn start_host(
                 // kill the streamer
                 force_kill_child(&child, "Stream").await;
                 cleanup_staged_child_binary(&staged_streamer_path);
-                if let Some(window_watch_child) = {
-                    let mut slot = ACTIVE_WINDOW_WATCH_CHILD.lock().await;
-                    slot.take()
-                } {
-                    force_kill_child(&window_watch_child, "Window Watch").await;
-                }
+                stop_active_window_watch_if_current(
+                    &dynamic_display_session_token,
+                    "ipc_receiver_closed_final_window_watch_cleanup",
+                    stream_generation,
+                )
+                .await;
             }
         });
 
@@ -7556,9 +7672,10 @@ pub async fn start_host(
                 "[Stream]: websocket control channel closed after connection; stopping staged streamer"
             );
             let _ = ipc_sender.send(ServerIpcMessage::Stop).await;
-            stop_active_window_watch(
+            stop_active_window_watch_if_current(
                 &dynamic_display_session_token,
                 "post_connect_control_channel_closed",
+                stream_generation,
             )
             .await;
             restore_runtime_dynamic_display_if_active(
@@ -7573,23 +7690,27 @@ pub async fn start_host(
                     dynamic_display_session_token
                 ));
             } else {
-                restore_prepared_stream_display_if_active(
+                restore_prepared_stream_display_if_active_for_generation(
                     &prepared_display_active,
                     &dynamic_display_session_token,
+                    "post_connect_control_channel_closed",
+                    stream_generation,
                 )
                 .await;
-                restore_prepared_stream_display_best_effort(
+                restore_prepared_stream_display_best_effort_for_generation(
                     &dynamic_display_session_token,
                     "post_connect_control_channel_closed",
+                    stream_generation,
                 )
                 .await;
             }
             sleep(Duration::from_millis(500)).await;
             force_kill_child(&child, "Stream").await;
             cleanup_staged_child_binary(&staged_streamer_path);
-            restore_prepared_stream_display_best_effort(
+            restore_prepared_stream_display_best_effort_for_generation(
                 &dynamic_display_session_token,
                 "post_connect_streamer_stopped",
+                stream_generation,
             )
             .await;
             if let Some(window_watch_child) = current_window_watch_child.as_ref() {
@@ -7600,28 +7721,36 @@ pub async fn start_host(
                 "post_connect_control_channel_closed_cleanup_completed",
             );
         } else {
+            let start_stream_was_received = start_stream_received.load(Ordering::Acquire);
             let stop_before_connect_reason = pre_connect_stop_reason
                 .clone()
                 .unwrap_or_else(|| "session_stopped_before_connect".to_string());
+            let benign_pre_connect_stop = !start_stream_was_received &&
+                is_benign_pre_connect_lifecycle_reason(&stop_before_connect_reason);
             append_host_stream_trace(&format!(
                 "STOP_BEFORE_CONNECT token={} start_stream_received={} reason={}",
                 dynamic_display_session_token,
-                start_stream_received.load(Ordering::Acquire),
+                start_stream_was_received,
                 sanitize_trace_value(&stop_before_connect_reason)
             ));
-            note_host_lifecycle_phase("failed", &stop_before_connect_reason);
-            if pre_connect_stop_reason.is_none() {
+            if benign_pre_connect_stop {
+                note_host_lifecycle_phase("ready", "pre_connect_client_closed_no_stream_started");
+            } else {
+                note_host_lifecycle_phase("failed", &stop_before_connect_reason);
+            }
+            if !benign_pre_connect_stop && pre_connect_stop_reason.is_none() {
                 maybe_schedule_host_failure_recovery("session_stopped_before_connect");
             }
             warn!(
                 "[Stream]: stopping before connection completed (start_stream_received={}, reason={})",
-                start_stream_received.load(Ordering::Acquire),
+                start_stream_was_received,
                 stop_before_connect_reason
             );
 
-            if pre_connect_stop_reason.is_none()
+            if !benign_pre_connect_stop
+                && pre_connect_stop_reason.is_none()
                 && legacy_runtime_selected_for_session
-                && start_stream_received.load(Ordering::Acquire)
+                && start_stream_was_received
             {
                 let failure_count = note_legacy_runtime_startup_failure().await;
                 append_host_stream_trace(&format!(
@@ -7638,9 +7767,10 @@ pub async fn start_host(
 
             ipc_sender.send(ServerIpcMessage::Stop).await;
 
-            stop_active_window_watch(
+            stop_active_window_watch_if_current(
                 &dynamic_display_session_token,
                 "pre_connect_stop_before_display_restore",
+                stream_generation,
             )
             .await;
             restore_runtime_dynamic_display_if_active(
@@ -7648,29 +7778,34 @@ pub async fn start_host(
                 &dynamic_display_session_token,
             )
             .await;
-            restore_prepared_stream_display_if_active(
+            restore_prepared_stream_display_if_active_for_generation(
                 &prepared_display_active,
                 &dynamic_display_session_token,
+                "pre_connect_stop_before_display_restore",
+                stream_generation,
             )
             .await;
             if start_stream_received.load(Ordering::Acquire) {
-                restore_prepared_stream_display_best_effort(
+                restore_prepared_stream_display_best_effort_for_generation(
                     &dynamic_display_session_token,
                     "pre_connect_stream_stopped",
+                    stream_generation,
                 )
                 .await;
             }
 
             let child = child.clone();
+            let cleanup_session_token = dynamic_display_session_token.clone();
+            let cleanup_stream_generation = stream_generation;
             spawn(async move {
                 sleep(Duration::from_secs(3)).await;
                 force_kill_child(&child, "Stream").await;
-                if let Some(window_watch_child) = {
-                    let mut slot = ACTIVE_WINDOW_WATCH_CHILD.lock().await;
-                    slot.take()
-                } {
-                    force_kill_child(&window_watch_child, "Window Watch").await;
-                }
+                stop_active_window_watch_if_current(
+                    &cleanup_session_token,
+                    "pre_connect_delayed_window_watch_cleanup",
+                    cleanup_stream_generation,
+                )
+                .await;
             });
         }
     });
