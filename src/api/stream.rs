@@ -1532,11 +1532,7 @@ fn apply_software_stream_limits(
 ) -> bool {
     let mut changed = false;
 
-    let max_fps = if (*width >= 1200 || *height >= 1200) && (*width >= 700 || *height >= 700) {
-        30
-    } else {
-        45
-    };
+    let max_fps = get_software_stream_max_fps(*width, *height);
     if *fps > max_fps {
         *fps = max_fps;
         changed = true;
@@ -1554,6 +1550,19 @@ fn apply_software_stream_limits(
     }
 
     changed
+}
+
+fn get_software_stream_max_fps(width: u32, height: u32) -> u32 {
+    let long_edge = width.max(height);
+    let short_edge = width.min(height);
+
+    if long_edge <= 1440 && short_edge <= 720 {
+        60
+    } else if long_edge <= 1600 && short_edge <= 900 {
+        45
+    } else {
+        30
+    }
 }
 
 fn apply_legacy_nvenc_stream_limits(
@@ -1727,11 +1736,7 @@ fn get_legacy_nvenc_surface_max_bitrate(width: u32, height: u32, fps: u32) -> u3
 }
 
 fn apply_software_resize_limits(width: u32, height: u32, fps: &mut u32) -> bool {
-    let max_fps = if (width >= 1200 || height >= 1200) && (width >= 700 || height >= 700) {
-        30
-    } else {
-        45
-    };
+    let max_fps = get_software_stream_max_fps(width, height);
     if *fps > max_fps {
         *fps = max_fps;
         return true;
