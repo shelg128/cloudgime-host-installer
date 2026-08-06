@@ -192,6 +192,13 @@ fn current_bundle_root() -> Option<PathBuf> {
 }
 
 fn resolve_display_prepare_helper_path() -> Option<PathBuf> {
+    if let Some(runtime_dir) = current_runtime_dir() {
+        let runtime_helper = runtime_dir.join("server").join("display-prepare-helper.exe");
+        if runtime_helper.exists() {
+            return Some(runtime_helper);
+        }
+    }
+
     Some(
         current_bundle_root()?
             .join("moonlight")

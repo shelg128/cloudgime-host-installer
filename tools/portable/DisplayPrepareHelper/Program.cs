@@ -8653,38 +8653,70 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
     private static DisplayModeApplyResult SetExactDisplayMode(DisplaySnapshot display, SavedDisplayState requestedMode)
     {
         var mode = GetCurrentMode(display.DeviceName, allowRegistryFallback: true);
-        var result = TryApplyDisplayMode(display, requestedMode, mode);
+        var preferNativeSurfaceFallback = ShouldPreferNativeSurfaceFallback(display, requestedMode);
 
-        if (result.Result == DispChangeSuccessful)
+        DisplayModeApplyResult? tryRequestedModes()
         {
-            return new DisplayModeApplyResult(true, false, result.RequiresApply);
-        }
+            var result = TryApplyDisplayMode(display, requestedMode, mode);
 
-        var requestedWithoutFrequency = new SavedDisplayState
-        {
-            Width = requestedMode.Width,
-            Height = requestedMode.Height,
-            Frequency = 0,
-        };
-        result = TryApplyDisplayMode(display, requestedWithoutFrequency, mode);
-
-        if (result.Result != DispChangeSuccessful)
-        {
-            foreach (var compatibleMode in SelectCompatibleFallbackDisplayModes(display.DeviceName, requestedMode))
+            if (result.Result == DispChangeSuccessful)
             {
-                result = TryApplyDisplayMode(display, compatibleMode, mode);
-
-                if (result.Result == DispChangeSuccessful)
-                {
-                    return new DisplayModeApplyResult(true, true, result.RequiresApply);
-                }
+                return new DisplayModeApplyResult(true, false, result.RequiresApply);
             }
 
-            return new DisplayModeApplyResult(false, true, false);
+            var requestedWithoutFrequency = new SavedDisplayState
+            {
+                Width = requestedMode.Width,
+                Height = requestedMode.Height,
+                Frequency = 0,
+            };
+            result = TryApplyDisplayMode(display, requestedWithoutFrequency, mode);
+
+            if (result.Result == DispChangeSuccessful)
+            {
+                return new DisplayModeApplyResult(true, false, result.RequiresApply);
+            }
+
+            return null;
         }
 
-        return new DisplayModeApplyResult(true, false, result.RequiresApply);
+        if (!preferNativeSurfaceFallback && tryRequestedModes() is { } exactResult)
+        {
+            return exactResult;
+        }
+
+        foreach (var compatibleMode in SelectCompatibleFallbackDisplayModes(display.DeviceName, requestedMode))
+        {
+            if (preferNativeSurfaceFallback && IsSameDisplayMode(compatibleMode, requestedMode))
+            {
+                continue;
+            }
+
+            var result = TryApplyDisplayMode(display, compatibleMode, mode);
+
+            if (result.Result == DispChangeSuccessful)
+            {
+                return new DisplayModeApplyResult(true, true, result.RequiresApply);
+            }
+        }
+
+        if (preferNativeSurfaceFallback && tryRequestedModes() is { } lastResortExactResult)
+        {
+            return lastResortExactResult;
+        }
+
+        return new DisplayModeApplyResult(false, true, false);
     }
+
+    private static bool ShouldPreferNativeSurfaceFallback(DisplaySnapshot display, SavedDisplayState requestedMode) =>
+        ShouldForceNativeSurfaceOrientation(display) &&
+        requestedMode.Width > 0 &&
+        requestedMode.Height > requestedMode.Width;
+
+    private static bool IsSameDisplayMode(SavedDisplayState candidate, SavedDisplayState requestedMode) =>
+        candidate.Width == requestedMode.Width &&
+        candidate.Height == requestedMode.Height &&
+        (requestedMode.Frequency <= 0 || candidate.Frequency == requestedMode.Frequency);
 
     private static DisplayModeAttempt TryApplyDisplayMode(
         DisplaySnapshot display,
@@ -8694,19 +8726,23 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
         var currentOrientation = NormalizeOrientation(baseMode.dmDisplayOrientation);
         var targetOrientation = DetermineRequestedOrientation(currentOrientation, requestedMode.Width, requestedMode.Height);
         var preferOrientationFallback = RequiresQuarterTurn(currentOrientation, targetOrientation);
-        var attempts = new List<(bool UseOrientationFallback, bool SwapForOrientationFallback)>
+        var attempts = new List<(bool UseOrientationFallback, bool SwapForOrientationFallback)>();
+        if (ShouldForceNativeSurfaceOrientation(display))
         {
-            (false, false),
-        };
-        if (preferOrientationFallback)
-        {
+            // DDX captures the raw VDD surface before Windows rotation is applied.
+            // Keep portrait modes native so Sunshine does not see 800x1280 as 1280x800.
             attempts.Add((true, false));
-            attempts.Add((true, true));
+            attempts.Add((false, false));
         }
         else
         {
+            attempts.Add((false, false));
             attempts.Add((true, false));
-            if (currentOrientation is Dmdo90 or Dmdo270)
+            if (preferOrientationFallback)
+            {
+                attempts.Add((true, true));
+            }
+            else if (currentOrientation is Dmdo90 or Dmdo270)
             {
                 attempts.Add((true, true));
             }
@@ -8877,7 +8913,9 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
         if (useOrientationFallback)
         {
             var currentOrientation = NormalizeOrientation(baseMode.dmDisplayOrientation);
-            var targetOrientation = DetermineRequestedOrientation(currentOrientation, requestedMode.Width, requestedMode.Height);
+            var targetOrientation = ShouldForceNativeSurfaceOrientation(display)
+                ? DmdoDefault
+                : DetermineRequestedOrientation(currentOrientation, requestedMode.Width, requestedMode.Height);
             if (swapForOrientationFallback && targetOrientation is Dmdo90 or Dmdo270)
             {
                 (targetWidth, targetHeight) = (targetHeight, targetWidth);
@@ -8930,6 +8968,9 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
             _ => requestedLandscape ? DmdoDefault : Dmdo90,
         };
     }
+
+    private static bool ShouldForceNativeSurfaceOrientation(DisplaySnapshot display) =>
+        DisplayLooksLikeMttVdd(display);
 
     private static bool RequiresQuarterTurn(int currentOrientation, int targetOrientation)
     {

@@ -1809,7 +1809,7 @@ fn same_stream_orientation(
 }
 
 fn should_preserve_requested_stream_surface_after_display_fallback(
-    profile: Option<&HostCapabilityProfileSnapshot>,
+    _profile: Option<&HostCapabilityProfileSnapshot>,
     requested_width: u32,
     requested_height: u32,
     applied_width: u32,
@@ -1817,10 +1817,10 @@ fn should_preserve_requested_stream_surface_after_display_fallback(
     reason: &str,
 ) -> bool {
     let fallback_reason = reason.trim().to_ascii_lowercase();
-    if profile.is_some_and(|profile| profile.selected_encoder.eq_ignore_ascii_case("software")) {
-        return false;
-    }
-
+    // The fallback display may be larger than the requested phone surface
+    // (for example 1200x1920 VDD backing a requested 800x1280 stream).
+    // Keep encoding at the requested size for software too; otherwise CPU load
+    // and bitrate jump exactly when we need the most stable recovery path.
     reason_indicates_stream_surface_fallback(&fallback_reason)
         && requested_width > 0
         && requested_height > 0
