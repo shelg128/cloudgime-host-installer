@@ -783,13 +783,24 @@ fn run_service_main() -> Result<()> {
         ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
     )?;
     append_supervisor_log(&paths, "service status RUNNING")?;
-    let config = load_config(&paths)?;
     let mut last_watchdog_tick = Instant::now();
     let mut last_watchdog_recovery_at: Option<Instant> = None;
     let mut last_activation_status_sync_at: Option<Instant> = None;
     let mut last_activation_heartbeat_at: Option<Instant> = None;
     while !stop_requested.load(Ordering::SeqCst) {
         if last_watchdog_tick.elapsed() >= Duration::from_secs(5) {
+            let config = match load_config(&paths) {
+                Ok(value) => value,
+                Err(err) => {
+                    append_supervisor_log(
+                        &paths,
+                        &format!("service config reload error: {err:#}"),
+                    )?;
+                    last_watchdog_tick = Instant::now();
+                    sleep(Duration::from_millis(250));
+                    continue;
+                }
+            };
             if let Err(err) = service_watchdog_tick(&paths, &config, &mut last_watchdog_recovery_at)
             {
                 append_supervisor_log(&paths, &format!("service watchdog error: {err:#}"))?;
@@ -1915,7 +1926,6 @@ fn daemon_event_loop(
     daemon_pid: u32,
     stop_requested: Option<&AtomicBool>,
 ) -> Result<()> {
-    let config = load_config(paths)?;
     let mut last_idle_cursor_restore_tick = Instant::now()
         .checked_sub(Duration::from_secs(5))
         .unwrap_or_else(Instant::now);
@@ -1935,6 +1945,15 @@ fn daemon_event_loop(
         }
 
         if last_activation_tick.elapsed() >= Duration::from_secs(5) {
+            let config = match load_config(paths) {
+                Ok(value) => value,
+                Err(err) => {
+                    append_supervisor_log(paths, &format!("daemon config reload error: {err:#}"))?;
+                    last_activation_tick = Instant::now();
+                    sleep(Duration::from_millis(250));
+                    continue;
+                }
+            };
             if let Err(err) = service_activation_tick(
                 paths,
                 &config,
