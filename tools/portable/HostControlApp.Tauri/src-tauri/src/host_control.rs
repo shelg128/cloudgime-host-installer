@@ -1262,7 +1262,7 @@ pub async fn claim_setup_token(
     configure_host_keeper_tunnel(&bundle_root, &activation, Some(payload.device_token.trim()))?;
 
     let activation_token = normalize_activation_token(&payload.activation_token);
-    if false {
+    if activation_token.trim().is_empty() {
         return Err(
             "Aktivasi lisensi berhasil, tapi payload token aktivasi runtime belum lengkap.".into(),
         );
