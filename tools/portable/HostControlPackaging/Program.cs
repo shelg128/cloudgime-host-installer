@@ -1083,6 +1083,7 @@ internal static class Program
         var projectCandidates = NormalizeCandidates(
         [
             args.GetValue("keeper-tunnel-project"),
+            Path.Combine(repoRoot, "..", "05 POWER PANEL", "KeeperTunnelAgent", "KeeperTunnelAgent.csproj"),
             Path.Combine(repoRoot, "..", "power panel", "KeeperTunnelAgent", "KeeperTunnelAgent.csproj"),
             @"C:\projek-rdp-web-clean-final\KeeperTunnelAgent\KeeperTunnelAgent.csproj"
         ]);

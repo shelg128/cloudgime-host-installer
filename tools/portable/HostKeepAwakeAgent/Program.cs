@@ -238,17 +238,14 @@ internal static class Program
             $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"Start-ScheduledTask -TaskName '{HostKeeperTunnelTaskName}' -ErrorAction SilentlyContinue\"",
             Environment.SystemDirectory,
             TimeSpan.FromSeconds(20));
-        Thread.Sleep(TimeSpan.FromSeconds(3));
-
-        if (IsProcessRunningForExecutable(KeeperTunnelProcessName, agentPath))
+        if (WaitForProcessRunningForExecutable(KeeperTunnelProcessName, agentPath, TimeSpan.FromSeconds(8)))
         {
             return KeeperTunnelKeepaliveResult.ActionOk("start_task");
         }
 
         if (TryStartProcessDetached(agentPath, string.Empty, keeperRoot, out var directStartError))
         {
-            Thread.Sleep(TimeSpan.FromSeconds(2));
-            if (IsProcessRunningForExecutable(KeeperTunnelProcessName, agentPath))
+            if (WaitForProcessRunningForExecutable(KeeperTunnelProcessName, agentPath, TimeSpan.FromSeconds(5)))
             {
                 return KeeperTunnelKeepaliveResult.ActionOk("spawn_direct");
             }
@@ -1277,6 +1274,23 @@ internal static class Program
         }
 
         return false;
+    }
+
+    private static bool WaitForProcessRunningForExecutable(string processName, string executablePath, TimeSpan timeout)
+    {
+        var deadline = DateTimeOffset.UtcNow.Add(timeout);
+        do
+        {
+            if (IsProcessRunningForExecutable(processName, executablePath))
+            {
+                return true;
+            }
+
+            Thread.Sleep(TimeSpan.FromMilliseconds(500));
+        }
+        while (DateTimeOffset.UtcNow < deadline);
+
+        return IsProcessRunningForExecutable(processName, executablePath);
     }
 
     private static string GetProcessExecutablePathSafe(Process process)

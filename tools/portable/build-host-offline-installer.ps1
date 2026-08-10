@@ -294,9 +294,15 @@ Copy-Item -LiteralPath $hostSupervisorSourceExe -Destination (Join-Path $runtime
 Copy-Item -LiteralPath $hostSupervisorSourceExe -Destination (Join-Path $runtimeMoonlightSystemRoot "cloudgime-runtime-agent.exe") -Force
 
 if ([string]::IsNullOrWhiteSpace($KeeperTunnelProject)) {
-    $defaultKeeperTunnelProject = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot "..\power panel\KeeperTunnelAgent\KeeperTunnelAgent.csproj"))
-    if (Test-Path -LiteralPath $defaultKeeperTunnelProject) {
-        $KeeperTunnelProject = $defaultKeeperTunnelProject
+    $defaultKeeperTunnelProjects = @(
+        [System.IO.Path]::GetFullPath((Join-Path $RepoRoot "..\05 POWER PANEL\KeeperTunnelAgent\KeeperTunnelAgent.csproj")),
+        [System.IO.Path]::GetFullPath((Join-Path $RepoRoot "..\power panel\KeeperTunnelAgent\KeeperTunnelAgent.csproj"))
+    )
+    foreach ($candidate in $defaultKeeperTunnelProjects) {
+        if (Test-Path -LiteralPath $candidate) {
+            $KeeperTunnelProject = $candidate
+            break
+        }
     }
 }
 

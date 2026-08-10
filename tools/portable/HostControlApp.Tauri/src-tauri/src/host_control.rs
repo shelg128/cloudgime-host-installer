@@ -3223,12 +3223,19 @@ fn register_host_keeper_tunnel_task(bundle_root: &Path) -> Result<(), String> {
         .replace("__EXE_PATH__", &exe_path)
         .replace("__WORKING_DIR__", &working_dir);
 
-    run_hidden_powershell_script(
+    let output = run_hidden_powershell_script(
         &script,
         &host_keeper_root(bundle_root),
         Duration::from_secs(45),
-    )
-    .map(|_| ())
+    )?;
+    if output.success {
+        Ok(())
+    } else {
+        Err(format!(
+            "Could not register the host keeper tunnel scheduled task: {}",
+            summarize_command_issue(&join_output(&output))
+        ))
+    }
 }
 
 fn unregister_host_keeper_tunnel_task(bundle_root: &Path) {
@@ -3254,6 +3261,42 @@ fn unregister_host_keeper_tunnel_task(bundle_root: &Path) {
     let working_dir = host_keeper_root(bundle_root);
     let _ = run_hidden_powershell_script(&stop_script, &working_dir, Duration::from_secs(20));
     let _ = run_hidden_powershell_script(&delete_script, &working_dir, Duration::from_secs(20));
+}
+
+fn is_host_keeper_agent_running(bundle_root: &Path) -> bool {
+    let agent_path = escape_powershell_literal(&host_keeper_agent_path(bundle_root).to_string_lossy());
+    let script = format!(
+        concat!(
+            "$ErrorActionPreference = 'SilentlyContinue';",
+            "$agentPath = '{agent_path}';",
+            "$process = Get-CimInstance Win32_Process -Filter \"Name = 'cloudgimehosttunnel.exe'\" | ",
+            "Where-Object {{ $_.ExecutablePath -and $_.ExecutablePath.Equals($agentPath, [System.StringComparison]::OrdinalIgnoreCase) }} | ",
+            "Select-Object -First 1;",
+            "if ($null -ne $process) {{ exit 0 }};",
+            "exit 1;"
+        ),
+        agent_path = agent_path,
+    );
+    run_hidden_powershell_script(
+        &script,
+        &host_keeper_root(bundle_root),
+        Duration::from_secs(8),
+    )
+    .map(|output| output.success)
+    .unwrap_or(false)
+}
+
+fn wait_for_host_keeper_agent(bundle_root: &Path, timeout: Duration) -> bool {
+    let started_at = Instant::now();
+    loop {
+        if is_host_keeper_agent_running(bundle_root) {
+            return true;
+        }
+        if started_at.elapsed() >= timeout {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
 }
 
 fn spawn_host_keeper_agent_hidden(bundle_root: &Path) -> Result<(), String> {
@@ -3332,11 +3375,31 @@ fn configure_host_keeper_tunnel(
     unregister_host_keeper_tunnel_task(bundle_root);
 
     let task_result = register_host_keeper_tunnel_task(bundle_root);
-    let spawn_result = spawn_host_keeper_agent_hidden(bundle_root);
-    if let Err(task_error) = task_result {
-        spawn_result.map_err(|spawn_error| {
-            format!("{task_error} Fallback start also failed: {spawn_error}")
-        })?;
+    match task_result {
+        Ok(()) if wait_for_host_keeper_agent(bundle_root, Duration::from_secs(8)) => return Ok(()),
+        Ok(()) => {}
+        Err(task_error) => {
+            spawn_host_keeper_agent_hidden(bundle_root).map_err(|spawn_error| {
+                format!("{task_error} Fallback start also failed: {spawn_error}")
+            })?;
+            if wait_for_host_keeper_agent(bundle_root, Duration::from_secs(5)) {
+                return Ok(());
+            }
+            return Err(format!(
+                "{task_error} Fallback start returned, but the tunnel agent did not stay running."
+            ));
+        }
+    }
+
+    spawn_host_keeper_agent_hidden(bundle_root).map_err(|spawn_error| {
+        format!(
+            "Host keeper tunnel scheduled task was registered, but did not start a tunnel process. Fallback start also failed: {spawn_error}"
+        )
+    })?;
+    if !wait_for_host_keeper_agent(bundle_root, Duration::from_secs(5)) {
+        return Err(
+            "Host keeper tunnel scheduled task was registered, but did not start a tunnel process. Fallback start returned, but the tunnel agent did not stay running.".into(),
+        );
     }
 
     Ok(())
