@@ -1103,12 +1103,12 @@ fn recent_host_recovery_gate_reason(
 
 fn is_benign_pre_connect_lifecycle_reason(reason: &str) -> bool {
     let normalized = reason.trim().to_ascii_lowercase();
-    normalized == "session_stopped_before_connect" ||
-        normalized == "control_channel_receive_failed" ||
-        normalized == "control_channel_closed_before_start_forward" ||
-        normalized == "control_channel_receive_failed_before_start_forward" ||
-        normalized == "control_channel_ended_before_start_forward" ||
-        normalized == "control_channel_heartbeat_timeout_before_connect"
+    normalized == "session_stopped_before_connect"
+        || normalized == "control_channel_receive_failed"
+        || normalized == "control_channel_closed_before_start_forward"
+        || normalized == "control_channel_receive_failed_before_start_forward"
+        || normalized == "control_channel_ended_before_start_forward"
+        || normalized == "control_channel_heartbeat_timeout_before_connect"
 }
 
 fn normalize_stream_display_mode(mode: &str) -> String {
@@ -2828,6 +2828,7 @@ async fn refresh_bundle_capture_runtime_with_prepared_display(
 #[cfg(windows)]
 async fn restart_sunshine_capture_service_only(
     session_token: &str,
+    requested_mode: Option<(u32, u32, u32)>,
     address: &str,
     http_port: u16,
 ) -> Result<(), String> {
@@ -2873,6 +2874,43 @@ async fn restart_sunshine_capture_service_only(
     wait_for_host_tcp_closed(control_address, http_port, Duration::from_secs(10))
         .await
         .map_err(|err| format!("Sunshine capture service did not stop cleanly: {err}"))?;
+
+    if let Some(requested_mode) = requested_mode {
+        append_host_stream_trace(&format!(
+            "SUNSHINE_CAPTURE_SERVICE_ONLY_REFRESH token={} stage=prepare_before_start requested={}x{}@{}",
+            session_token, requested_mode.0, requested_mode.1, requested_mode.2
+        ));
+        match prepare_stream_display(session_token, Some(requested_mode)).await {
+            Ok(prepared_result) => {
+                if let Some(applied) = prepared_result.applied.as_ref() {
+                    append_host_stream_trace(&format!(
+                        "SUNSHINE_CAPTURE_SERVICE_ONLY_REFRESH token={} stage=prepare_before_start_ok applied={}x{}@{} capture_changed={} target_changed={} reason={}",
+                        session_token,
+                        applied.width,
+                        applied.height,
+                        applied.frequency,
+                        prepared_result.sunshine_capture_changed,
+                        prepared_result.sunshine_capture_target_changed,
+                        sanitize_trace_value(&prepared_result.reason)
+                    ));
+                } else {
+                    append_host_stream_trace(&format!(
+                        "SUNSHINE_CAPTURE_SERVICE_ONLY_REFRESH token={} stage=prepare_before_start_ok capture_changed={} target_changed={} reason={}",
+                        session_token,
+                        prepared_result.sunshine_capture_changed,
+                        prepared_result.sunshine_capture_target_changed,
+                        sanitize_trace_value(&prepared_result.reason)
+                    ));
+                }
+            }
+            Err(err) => {
+                let _ = control_windows_service("start", "CloudgimeRuntime-Host").await;
+                return Err(format!(
+                    "failed to prepare display before Sunshine service restart: {err}"
+                ));
+            }
+        }
+    }
 
     control_windows_service("start", "CloudgimeRuntime-Host").await?;
     wait_for_host_tcp_ready(control_address, http_port, Duration::from_secs(35))
@@ -3019,10 +3057,13 @@ async fn restart_capture_runtime_for_output_change(
 #[cfg(windows)]
 async fn restart_sunshine_capture_with_fallback(
     session_token: &str,
+    requested_mode: Option<(u32, u32, u32)>,
     address: &str,
     http_port: u16,
 ) -> Result<&'static str, String> {
-    match restart_sunshine_capture_service_only(session_token, address, http_port).await {
+    match restart_sunshine_capture_service_only(session_token, requested_mode, address, http_port)
+        .await
+    {
         Ok(()) => Ok("service_only"),
         Err(service_only_error) => {
             append_host_stream_trace(&format!(
@@ -3076,6 +3117,7 @@ async fn refresh_bundle_capture_runtime_with_prepared_display(
 #[cfg(not(windows))]
 async fn restart_sunshine_capture_service_only(
     _session_token: &str,
+    _requested_mode: Option<(u32, u32, u32)>,
     _address: &str,
     _http_port: u16,
 ) -> Result<(), String> {
@@ -3094,6 +3136,7 @@ async fn restart_capture_runtime_for_output_change(
 #[cfg(not(windows))]
 async fn restart_sunshine_capture_with_fallback(
     _session_token: &str,
+    _requested_mode: Option<(u32, u32, u32)>,
     _address: &str,
     _http_port: u16,
 ) -> Result<&'static str, String> {
@@ -3814,9 +3857,13 @@ fn get_display_prepare_helper_path() -> Result<PathBuf, String> {
         return Err("failed to resolve runtime directory for display prepare helper".to_string());
     };
 
-    Ok(runtime_dir
-        .join("server")
-        .join("display-prepare-helper.exe"))
+    let server_dir = runtime_dir.join("server");
+    let v2_helper = server_dir.join("display-prepare-helper-v2pro.exe");
+    if v2_helper.exists() {
+        return Ok(v2_helper);
+    }
+
+    Ok(server_dir.join("display-prepare-helper.exe"))
 }
 
 fn get_host_supervisor_path() -> Result<PathBuf, String> {
@@ -6563,6 +6610,7 @@ pub async fn start_host(
 
                                     let refresh_result = restart_sunshine_capture_with_fallback(
                                         &dynamic_display_session_token,
+                                        Some((requested_width, requested_height, requested_fps)),
                                         &address,
                                         http_port,
                                     )
@@ -6707,21 +6755,34 @@ pub async fn start_host(
                                         applied.width == requested_width
                                             && applied.height == requested_height
                                     });
+                                let prepared_capture_surface =
+                                    result.applied.as_ref().and_then(|applied| {
+                                        if applied.width > 0 && applied.height > 0 {
+                                            Some((
+                                                applied.width,
+                                                applied.height,
+                                                applied.frequency.max(1),
+                                            ))
+                                        } else {
+                                            None
+                                        }
+                                    });
+                                let prepared_vdd_capture_ready = prepared_capture_surface.is_some();
                                 let ddx_nvenc_session =
                                     runtime_profile_snapshot.as_ref().is_none_or(|profile| {
                                         profile.selected_encoder.eq_ignore_ascii_case("nvenc")
                                             && profile.selected_capture.eq_ignore_ascii_case("ddx")
                                     });
-                                let should_proactively_refresh_exact_vdd_capture = !result
+                                let should_proactively_refresh_prepared_vdd_capture = !result
                                     .sunshine_capture_target_changed
-                                    && exact_prepared_surface
+                                    && prepared_vdd_capture_ready
                                     && ddx_nvenc_session
-                                    && result.sunshine_capture_changed
+                                    && (result.changed || result.sunshine_capture_changed)
                                     && std::env::var("CLOUDGIME_FAST_CONNECT").unwrap_or_default()
                                         != "1";
                                 let mut proactive_capture_refresh_completed = false;
 
-                                if should_proactively_refresh_exact_vdd_capture {
+                                if should_proactively_refresh_prepared_vdd_capture {
                                     if CAPTURE_PRESTART_REFRESH_ACTIVE
                                         .compare_exchange(
                                             false,
@@ -6731,12 +6792,25 @@ pub async fn start_host(
                                         )
                                         .is_ok()
                                     {
+                                        let (prepared_width, prepared_height, prepared_fps) =
+                                            prepared_capture_surface.unwrap_or((
+                                                requested_width,
+                                                requested_height,
+                                                requested_fps,
+                                            ));
                                         append_host_stream_trace(&format!(
-                                            "GOLDEN_PATH_PRESTART_CAPTURE_REFRESH token={} stage=begin reason=exact_vdd_mode_changed prepared={}x{}@{} capture_changed={} display_changed={}",
+                                            "GOLDEN_PATH_PRESTART_CAPTURE_REFRESH token={} stage=begin reason=vdd_mode_changed requested={}x{}@{} prepared={}x{}@{} stream={}x{}@{} exact={} capture_changed={} display_changed={}",
                                             dynamic_display_session_token,
                                             requested_width,
                                             requested_height,
                                             requested_fps,
+                                            prepared_width,
+                                            prepared_height,
+                                            prepared_fps,
+                                            *width,
+                                            *height,
+                                            *fps,
+                                            exact_prepared_surface,
                                             result.sunshine_capture_changed,
                                             result.changed
                                         ));
@@ -6746,13 +6820,18 @@ pub async fn start_host(
                                         );
                                         let _ = server_ws_sender.send(
                                             StreamServerMessage::DebugLog {
-                                                message: "Capture Sunshine disegarkan ulang setelah Virtual Display exact siap, sebelum video dimulai.".to_string(),
+                                                message: "Capture Sunshine disegarkan ulang setelah Virtual Display berubah, sebelum video dimulai.".to_string(),
                                                 ty: Some(LogMessageType::Recover),
                                             },
                                         );
 
                                         match restart_sunshine_capture_with_fallback(
                                             &dynamic_display_session_token,
+                                            Some((
+                                                requested_width,
+                                                requested_height,
+                                                requested_fps,
+                                            )),
                                             &address,
                                             http_port,
                                         )
@@ -6762,15 +6841,16 @@ pub async fn start_host(
                                                 RECENT_CAPTURE_INIT_FAILURE_AT_MS
                                                     .store(0, Ordering::Release);
                                                 mark_capture_prestart_refresh_consumed(&format!(
-                                                    "proactive_exact_vdd_refresh:{refresh_strategy}"
+                                                    "proactive_prepared_vdd_refresh:{refresh_strategy}"
                                                 ));
                                                 append_host_stream_trace(&format!(
-                                                    "GOLDEN_PATH_PRESTART_CAPTURE_REFRESH token={} stage=completed reason=exact_vdd_mode_changed strategy={} prepared={}x{}@{}",
+                                                    "GOLDEN_PATH_PRESTART_CAPTURE_REFRESH token={} stage=completed reason=vdd_mode_changed strategy={} prepared={}x{}@{} exact={}",
                                                     dynamic_display_session_token,
                                                     sanitize_trace_value(refresh_strategy),
-                                                    requested_width,
-                                                    requested_height,
-                                                    requested_fps
+                                                    prepared_width,
+                                                    prepared_height,
+                                                    prepared_fps,
+                                                    exact_prepared_surface
                                                 ));
                                                 note_host_lifecycle_phase(
                                                     "starting",
@@ -6792,12 +6872,12 @@ pub async fn start_host(
                                             Err(err) => {
                                                 record_recent_capture_init_failure();
                                                 append_host_stream_trace(&format!(
-                                                    "GOLDEN_PATH_PRESTART_CAPTURE_REFRESH token={} stage=failed reason=exact_vdd_mode_changed error={}",
+                                                    "GOLDEN_PATH_PRESTART_CAPTURE_REFRESH token={} stage=failed reason=vdd_mode_changed error={}",
                                                     dynamic_display_session_token,
                                                     sanitize_trace_value(&err)
                                                 ));
                                                 warn!(
-                                                    "[Stream]: failed to proactively refresh Sunshine after exact VDD prepare: {err}"
+                                                    "[Stream]: failed to proactively refresh Sunshine after VDD mode changed: {err}"
                                                 );
                                                 let _ = server_ws_sender.send(
                                                     StreamServerMessage::DebugLog {
@@ -6840,7 +6920,7 @@ pub async fn start_host(
                                                         RECENT_CAPTURE_INIT_FAILURE_AT_MS
                                                             .store(0, Ordering::Release);
                                                         mark_capture_prestart_refresh_consumed(
-                                                            "proactive_exact_vdd_refresh:blocking_recovery",
+                                                            "proactive_prepared_vdd_refresh:blocking_recovery",
                                                         );
                                                         note_host_lifecycle_phase(
                                                             "starting",
@@ -6886,7 +6966,7 @@ pub async fn start_host(
                                             CAPTURE_INIT_PRESTART_REFRESH_WINDOW,
                                         )
                                 {
-                                    if exact_prepared_surface && ddx_nvenc_session {
+                                    if prepared_vdd_capture_ready && ddx_nvenc_session {
                                         if CAPTURE_PRESTART_REFRESH_ACTIVE
                                             .compare_exchange(
                                                 false,
@@ -6896,13 +6976,20 @@ pub async fn start_host(
                                             )
                                             .is_ok()
                                         {
+                                            let (prepared_width, prepared_height, prepared_fps) =
+                                                prepared_capture_surface.unwrap_or((
+                                                    requested_width,
+                                                    requested_height,
+                                                    requested_fps,
+                                                ));
                                             append_host_stream_trace(&format!(
-                                                "GOLDEN_PATH_PRESTART_CAPTURE_REFRESH token={} stage=begin reason={} prepared={}x{}@{}",
+                                                "GOLDEN_PATH_PRESTART_CAPTURE_REFRESH token={} stage=begin reason={} prepared={}x{}@{} exact={}",
                                                 dynamic_display_session_token,
                                                 sanitize_trace_value(&recovery_reason),
-                                                requested_width,
-                                                requested_height,
-                                                requested_fps
+                                                prepared_width,
+                                                prepared_height,
+                                                prepared_fps,
+                                                exact_prepared_surface
                                             ));
                                             note_host_lifecycle_phase(
                                                 "recovering",
@@ -6917,6 +7004,11 @@ pub async fn start_host(
 
                                             match restart_sunshine_capture_with_fallback(
                                                 &dynamic_display_session_token,
+                                                Some((
+                                                    requested_width,
+                                                    requested_height,
+                                                    requested_fps,
+                                                )),
                                                 &address,
                                                 http_port,
                                             )
@@ -6931,13 +7023,14 @@ pub async fn start_host(
                                                         ),
                                                     );
                                                     append_host_stream_trace(&format!(
-                                                        "GOLDEN_PATH_PRESTART_CAPTURE_REFRESH token={} stage=completed reason={} strategy={} prepared={}x{}@{}",
+                                                        "GOLDEN_PATH_PRESTART_CAPTURE_REFRESH token={} stage=completed reason={} strategy={} prepared={}x{}@{} exact={}",
                                                         dynamic_display_session_token,
                                                         sanitize_trace_value(&recovery_reason),
                                                         sanitize_trace_value(refresh_strategy),
-                                                        requested_width,
-                                                        requested_height,
-                                                        requested_fps
+                                                        prepared_width,
+                                                        prepared_height,
+                                                        prepared_fps,
+                                                        exact_prepared_surface
                                                     ));
                                                     note_host_lifecycle_phase(
                                                         "starting",
@@ -7064,9 +7157,10 @@ pub async fn start_host(
                                         }
                                     } else {
                                         append_host_stream_trace(&format!(
-                                            "GOLDEN_PATH_PRESTART_CAPTURE_REFRESH token={} stage=skip reason={} exact_prepared_surface={} ddx_nvenc_session={}",
+                                            "GOLDEN_PATH_PRESTART_CAPTURE_REFRESH token={} stage=skip reason={} prepared_vdd_capture_ready={} exact_prepared_surface={} ddx_nvenc_session={}",
                                             dynamic_display_session_token,
                                             sanitize_trace_value(&recovery_reason),
+                                            prepared_vdd_capture_ready,
                                             exact_prepared_surface,
                                             ddx_nvenc_session
                                         ));
@@ -7725,8 +7819,8 @@ pub async fn start_host(
             let stop_before_connect_reason = pre_connect_stop_reason
                 .clone()
                 .unwrap_or_else(|| "session_stopped_before_connect".to_string());
-            let benign_pre_connect_stop = !start_stream_was_received &&
-                is_benign_pre_connect_lifecycle_reason(&stop_before_connect_reason);
+            let benign_pre_connect_stop = !start_stream_was_received
+                && is_benign_pre_connect_lifecycle_reason(&stop_before_connect_reason);
             append_host_stream_trace(&format!(
                 "STOP_BEFORE_CONNECT token={} start_stream_received={} reason={}",
                 dynamic_display_session_token,
@@ -7743,8 +7837,7 @@ pub async fn start_host(
             }
             warn!(
                 "[Stream]: stopping before connection completed (start_stream_received={}, reason={})",
-                start_stream_was_received,
-                stop_before_connect_reason
+                start_stream_was_received, stop_before_connect_reason
             );
 
             if !benign_pre_connect_stop

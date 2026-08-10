@@ -3358,7 +3358,9 @@ internal static class Program
     {
         try
         {
-            var captureDisplay = ResolveSunshineCaptureDisplay(streamDisplay);
+            var captureDisplay = DisplayLooksLikeMttVdd(streamDisplay) || IsParsecDisplay(streamDisplay)
+                ? streamDisplay
+                : ResolveSunshineCaptureDisplay(streamDisplay);
             return TryApplySunshineStreamCaptureConfig(ResolveActiveSunshineConfigPath(bundleRoot), captureDisplay);
         }
         catch
@@ -3416,9 +3418,18 @@ internal static class Program
                 lines.RemoveAt(lines.Count - 1);
             }
 
-            var outputName = "primary-display";
-            RemoveConfigKey(lines, "output_name");
-            // block capture when the selected display changes between QEMU, MTT, and Parsec.
+            var outputName = DisplayLooksLikeMttVdd(streamDisplay) || IsParsecDisplay(streamDisplay)
+                ? ResolveSunshineCaptureOutputName(configPath, streamDisplay) ?? streamDisplay.DeviceName
+                : "primary-display";
+            if (string.Equals(outputName, "primary-display", StringComparison.OrdinalIgnoreCase))
+            {
+                RemoveConfigKey(lines, "output_name");
+            }
+            else
+            {
+                SetConfigValue(lines, "output_name", outputName);
+            }
+            // Avoid stale adapter pins when the selected display changes between QEMU, MTT, and Parsec.
             RemoveConfigKey(lines, "adapter_name");
 
             var captureTargetChanged = !string.Equals(

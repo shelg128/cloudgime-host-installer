@@ -193,18 +193,30 @@ fn current_bundle_root() -> Option<PathBuf> {
 
 fn resolve_display_prepare_helper_path() -> Option<PathBuf> {
     if let Some(runtime_dir) = current_runtime_dir() {
-        let runtime_helper = runtime_dir.join("server").join("display-prepare-helper.exe");
-        if runtime_helper.exists() {
-            return Some(runtime_helper);
+        let server_dir = runtime_dir.join("server");
+        for helper_name in [
+            "display-prepare-helper-v2pro.exe",
+            "display-prepare-helper.exe",
+        ] {
+            let runtime_helper = server_dir.join(helper_name);
+            if runtime_helper.exists() {
+                return Some(runtime_helper);
+            }
         }
     }
 
-    Some(
-        current_bundle_root()?
-            .join("moonlight")
-            .join("server")
-            .join("display-prepare-helper.exe"),
-    )
+    let server_dir = current_bundle_root()?.join("moonlight").join("server");
+    for helper_name in [
+        "display-prepare-helper-v2pro.exe",
+        "display-prepare-helper.exe",
+    ] {
+        let helper_path = server_dir.join(helper_name);
+        if helper_path.exists() {
+            return Some(helper_path);
+        }
+    }
+
+    Some(server_dir.join("display-prepare-helper.exe"))
 }
 
 const ANDROID_NATIVE_DISPLAY_PREWARM_TIMEOUT: Duration = Duration::from_secs(45);
