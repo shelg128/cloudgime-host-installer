@@ -50,3 +50,13 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+pub fn run_headless_from_args(args: &[String]) -> Option<i32> {
+    if !host_control::is_headless_claim_requested(args) {
+        return None;
+    }
+
+    Some(tauri::async_runtime::block_on(
+        host_control::run_headless_claim_from_args(args),
+    ))
+}

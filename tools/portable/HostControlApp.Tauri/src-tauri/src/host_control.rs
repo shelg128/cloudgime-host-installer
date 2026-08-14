@@ -1144,6 +1144,237 @@ pub async fn recover_host_activation(
     })
 }
 
+pub fn is_headless_claim_requested(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg.eq_ignore_ascii_case("--headless-claim-license")
+            || arg.eq_ignore_ascii_case("--headless-claim-host")
+    })
+}
+
+pub async fn run_headless_claim_from_args(args: &[String]) -> i32 {
+    let result_json = read_headless_arg_value(args, "--result-json").unwrap_or_default();
+    let result = async {
+        let setup_token = read_headless_arg_value(args, "--headless-claim-license")
+            .or_else(|| read_headless_arg_value(args, "--headless-claim-host"))
+            .ok_or_else(|| "--headless-claim-license requires a value.".to_string())?;
+        let expected_token_kind =
+            read_headless_arg_value(args, "--expected-token-kind").unwrap_or_default();
+        let claim_only = args.iter().any(|arg| arg.eq_ignore_ascii_case("--claim-only"));
+        claim_setup_token_headless(setup_token, expected_token_kind, claim_only).await
+    }
+    .await;
+
+    let output = match result {
+        Ok(outcome) => serde_json::json!({
+            "ok": true,
+            "message": outcome.message,
+            "pcId": outcome.state.activation.sentinel_pc_id,
+            "pcLabel": outcome.state.activation.pc_label,
+            "hostId": outcome.state.activation.host_id,
+            "applicationActivationId": outcome.state.activation.application_activation_id,
+            "tokenKind": outcome.state.activation.token_kind,
+            "instanceType": outcome.state.activation.instance_type,
+            "phase": outcome.state.activation.phase,
+            "hostHttpPort": outcome.state.activation.host_http_port,
+            "hostStreamUdpStart": outcome.state.activation.host_stream_udp_start,
+            "hostStreamUdpEnd": outcome.state.activation.host_stream_udp_end,
+            "hostStreamProxyRoute": outcome.state.activation.host_stream_proxy_route,
+            "hasRuntimeToken": outcome.state.activation.runtime_token_present,
+            "hasActivationRecord": outcome.state.activation.activation_record_id_present,
+            "bundleRoot": outcome.state.bundle_root,
+        }),
+        Err(error) => serde_json::json!({
+            "ok": false,
+            "error": error,
+        }),
+    };
+
+    if !result_json.trim().is_empty() {
+        let path = PathBuf::from(result_json.trim());
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(
+            &path,
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| "{}".into()),
+        );
+    }
+
+    if output.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        0
+    } else {
+        1
+    }
+}
+
+fn read_headless_arg_value(args: &[String], name: &str) -> Option<String> {
+    let mut index = 0usize;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg.eq_ignore_ascii_case(name) {
+            return args.get(index + 1).map(|value| value.trim().to_string());
+        }
+        if let Some((key, value)) = arg.split_once('=') {
+            if key.eq_ignore_ascii_case(name) {
+                return Some(value.trim().to_string());
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+async fn claim_setup_token_headless(
+    setup_token: String,
+    expected_token_kind: String,
+    claim_only: bool,
+) -> Result<ActionOutcome, String> {
+    reconcile_pending_uninstall_marker().await;
+    let bundle_root = resolve_bundle_root()?;
+    let mut activation = load_activation_state(&bundle_root)?;
+    let normalized_setup_token = normalize_setup_token(&setup_token);
+    if normalized_setup_token.len() < 12 {
+        return Err("Paste a valid Lisensi Aktivasi first.".into());
+    }
+    let expected_token_kind = normalize_expected_setup_token_kind(&expected_token_kind)?;
+    if !claim_only {
+        ensure_host_prepared_automatically(&bundle_root)?;
+    }
+    prepare_fresh_setup_token_identity(&mut activation);
+
+    let mut actual_setup_token = normalized_setup_token.clone();
+    if normalized_setup_token.starts_with("cgpair_") {
+        if let Some((parsed_token, parsed_base_url)) = decode_cgpair_token(&normalized_setup_token)
+        {
+            actual_setup_token = parsed_token;
+            if let Ok(normalized_url) = normalize_control_plane(&parsed_base_url) {
+                activation.control_plane_url = normalized_url;
+            }
+        } else {
+            return Err("Invalid pairing token format. Could not decode base64 payload.".into());
+        }
+    }
+
+    save_activation_state(&bundle_root, &activation)?;
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|_| "Could not create the control plane client.")?;
+    let base_url = normalize_control_plane(&activation.control_plane_url)?;
+    let machine_name = resolve_local_machine_name();
+    let response = client
+        .post(format!("{base_url}/api/v1/provisioning/setup-tokens/claim"))
+        .json(&serde_json::json!({
+            "activationLicense": actual_setup_token.clone(),
+            "setupToken": actual_setup_token,
+            "componentType": "host_app",
+            "machineName": empty_to_none(&machine_name),
+            "hostname": empty_to_none(&machine_name),
+            "machineIdentity": empty_to_none(&activation.machine_identity),
+            "installInstanceId": empty_to_none(&activation.install_instance_id),
+            "expectedActivationLicenseKind": empty_to_none(&expected_token_kind),
+            "expectedTokenKind": empty_to_none(&expected_token_kind),
+            "app": "cloudgime_host_control_headless",
+            "version": env!("CARGO_PKG_VERSION"),
+        }))
+        .send()
+        .await
+        .map_err(|_| "Could not reach the control plane.")?;
+
+    let status = response.status();
+    let raw = response.text().await.unwrap_or_default();
+    let payload: ClaimSetupTokenPayload = serde_json::from_str(&raw).unwrap_or_default();
+    if !status.is_success() || !payload.ok {
+        return Err(build_friendly_claim_error(status.as_u16(), &payload, &raw));
+    }
+    if payload
+        .token_kind
+        .trim()
+        .eq_ignore_ascii_case("control_node")
+    {
+        return Err(
+            "Lisensi Aktivasi ini adalah Control Node. Aktifkan dari Power Panel/Keeper, lalu gunakan Lisensi Instance Pair atau Always-On Host di Cloudgime Host.".into(),
+        );
+    }
+    if !expected_token_kind.trim().is_empty()
+        && !payload
+            .token_kind
+            .trim()
+            .eq_ignore_ascii_case(&expected_token_kind)
+    {
+        return Err(format!(
+            "Lisensi Aktivasi ini adalah {}, bukan {}. Paste lisensi di kolom yang sesuai.",
+            setup_token_lane_label(&payload.token_kind),
+            setup_token_lane_label(&expected_token_kind),
+        ));
+    }
+
+    let claimed_host_id = payload.host_id.trim();
+    if claimed_host_id.is_empty() {
+        return Err("Aktivasi lisensi berhasil, tapi binding host belum lengkap. Update Cloudgime Host dan coba lagi.".into());
+    }
+    activation.host_id = claimed_host_id.into();
+    if !payload.display_name.trim().is_empty() {
+        activation.display_name = payload.display_name.trim().into();
+    }
+    if !payload.sentinel_pc_id.trim().is_empty() {
+        activation.sentinel_pc_id = payload.sentinel_pc_id.trim().into();
+    }
+    if !payload.sentinel_device_id.trim().is_empty() {
+        activation.sentinel_device_id = payload.sentinel_device_id.trim().into();
+    }
+    if !payload.keeper_entry_id.trim().is_empty() {
+        activation.keeper_entry_id = payload.keeper_entry_id.trim().into();
+    }
+    apply_license_assignment_from_claim(&mut activation, &payload);
+    if !payload.control_plane_url.trim().is_empty() {
+        activation.control_plane_url = normalize_control_plane(&payload.control_plane_url)?;
+    } else {
+        activation.control_plane_url = base_url.clone();
+    }
+    activation.setup_token_kind = payload.token_kind.trim().to_string();
+    activation.instance_type = payload.instance_type.trim().to_string();
+    if !payload.activation_state.trim().is_empty() {
+        activation.activation_state = "activated".into();
+    }
+    save_activation_state(&bundle_root, &activation)?;
+    if claim_only {
+        return Ok(ActionOutcome {
+            message: "Host license claimed. Runtime service start skipped by headless claim-only mode.".into(),
+            state: build_headless_claim_state(&bundle_root, &activation),
+        });
+    }
+    configure_host_keeper_tunnel(&bundle_root, &activation, Some(payload.device_token.trim()))?;
+
+    let activation_token = normalize_activation_token(&payload.activation_token);
+    if activation_token.trim().is_empty() {
+        return Err(
+            "Aktivasi lisensi berhasil, tapi payload token aktivasi runtime belum lengkap.".into(),
+        );
+    }
+
+    let lane_label = setup_token_lane_label(&payload.token_kind);
+    let binding_label = first_non_empty(&[
+        payload.slot_label.clone(),
+        payload.sentinel_device_id.clone(),
+        payload.pc_number.clone(),
+        payload.pc_id.clone(),
+        payload.host_id.clone(),
+    ]);
+    let mut outcome =
+        redeem_activation_token_with_state(&bundle_root, activation, activation_token).await?;
+    let binding_copy = if binding_label.trim().is_empty() {
+        lane_label.clone()
+    } else if payload.auto_allocated_binding {
+        format!("{lane_label} {binding_label} (auto-assigned)")
+    } else {
+        format!("{lane_label} {binding_label}")
+    };
+    outcome.message = format!("{} siap. {}", binding_copy, outcome.message);
+    Ok(outcome)
+}
+
 #[tauri::command]
 pub async fn claim_setup_token(
     setup_token: String,
@@ -2213,6 +2444,62 @@ fn build_shell_state(unlocked: bool) -> Result<ShellState, String> {
                 .join("windows_native_diagnostic_reports.json"),
         ),
     })
+}
+
+fn build_headless_claim_state(
+    bundle_root: &Path,
+    activation: &HostActivationStateRecord,
+) -> ShellState {
+    ShellState {
+        auth: AuthView {
+            password_exists: false,
+            needs_password_setup: true,
+            unlocked: true,
+        },
+        bundle_root: bundle_root.display().to_string(),
+        installer_available: host_installer_path(bundle_root).exists(),
+        install: InstallView {
+            installed_mode: false,
+            install_root: String::new(),
+            data_root: bundle_root.display().to_string(),
+            uninstall_registered: false,
+            launch_intent: String::new(),
+        },
+        activation: ActivationView {
+            host_id: activation.host_id.clone(),
+            display_name: activation.display_name.clone(),
+            sentinel_pc_id: activation.sentinel_pc_id.clone(),
+            sentinel_device_id: activation.sentinel_device_id.clone(),
+            keeper_entry_id: activation.keeper_entry_id.clone(),
+            application_activation_id: activation.application_activation_id.clone(),
+            application_type: activation.application_type.clone(),
+            pc_label: activation.pc_label.clone(),
+            credential_ref: activation.credential_ref.clone(),
+            host_http_port: activation.host_http_port,
+            host_stream_udp_start: activation.host_stream_udp_start,
+            host_stream_udp_end: activation.host_stream_udp_end,
+            host_stream_proxy_route: activation.host_stream_proxy_route.clone(),
+            token_kind: activation.setup_token_kind.clone(),
+            instance_type: activation.instance_type.clone(),
+            phase: activation.activation_state.clone(),
+            control_plane_url: activation.control_plane_url.clone(),
+            activated_at_utc: activation.activated_at_utc.clone(),
+            redeemed_at_utc: activation.redeemed_at_utc.clone(),
+            last_heartbeat_at_utc: activation.last_heartbeat_at_utc.clone(),
+            ready_for_stream: activation.last_ready_for_stream,
+            runtime_token_present: !activation.runtime_token.is_empty(),
+            activation_record_id_present: !activation.activation_record_id.is_empty(),
+        },
+        network: NetworkView::default(),
+        audio: AudioView::default(),
+        display: DisplayView::default(),
+        runtime: RuntimeView::default(),
+        support: SupportView::default(),
+        paths: PathView::default(),
+        host_user_daemon_task_health: Value::Null,
+        windows_native_diagnostic_reports: Value::Null,
+        stream_readiness: StreamReadinessView::default(),
+    }
 }
 
 fn ensure_unlocked(session: &State<'_, AppSession>) -> Result<(), String> {
