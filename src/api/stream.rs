@@ -6610,7 +6610,7 @@ pub async fn start_host(
 
                                     let refresh_result = restart_sunshine_capture_with_fallback(
                                         &dynamic_display_session_token,
-                                        Some((requested_width, requested_height, requested_fps)),
+                                        None,
                                         &address,
                                         http_port,
                                     )
