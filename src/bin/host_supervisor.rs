@@ -1150,9 +1150,9 @@ fn capability_profile_has_virtual_display_driver(profile: &HostCapabilityProfile
         .as_deref()
         .is_some_and(|reason| reason.eq_ignore_ascii_case("virtual_display_driver_present"))
         || profile.gpu_controllers.iter().any(|gpu| {
-            gpu.name
-                .to_ascii_lowercase()
-                .contains("virtual display driver")
+            let name = gpu.name.to_ascii_lowercase();
+            name.contains("virtual display driver")
+                || name.contains("virtual display adapter")
         })
 }
 
@@ -2632,7 +2632,11 @@ fn bundle_has_required_processes(paths: &BundlePaths) -> Result<bool> {
     let processes = list_bundle_processes(paths, StopScope::All)?;
     let mut has_sunshine = false;
     let mut has_web_server = false;
-    let mut has_frpc = !paths.frp_dir.join("frpc.exe").exists();
+    let uses_managed_tunnel = !read_activation_state(paths)
+        .host_stream_proxy_route
+        .trim()
+        .is_empty();
+    let mut has_frpc = uses_managed_tunnel || !paths.frp_dir.join("frpc.exe").exists();
     for (_, path) in processes {
         let lowered = path.display().to_string().to_ascii_lowercase();
         if lowered.ends_with("\\sunshine.exe") || lowered.ends_with("\\sunshinesvc.exe") {

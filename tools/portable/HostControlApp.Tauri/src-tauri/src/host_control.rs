@@ -3309,8 +3309,17 @@ fn activation_allows_local_runtime(
         && !read_host_keeper_device_token(bundle_root).trim().is_empty()
 }
 
-fn write_host_keeper_status(bundle_root: &Path) -> Result<(), String> {
+fn write_host_keeper_status(
+    bundle_root: &Path,
+    activation: &HostActivationStateRecord,
+) -> Result<(), String> {
     let local_url = resolve_host_keeper_local_url(bundle_root);
+    let application_activation_id = activation.application_activation_id.trim();
+    let application_type = if activation.application_type.trim().is_empty() {
+        "CLOUDGIME_HOST"
+    } else {
+        activation.application_type.trim()
+    };
     let status = serde_json::json!({
         "routes": [
             {
@@ -3323,6 +3332,9 @@ fn write_host_keeper_status(bundle_root: &Path) -> Result<(), String> {
                 "name": "moonlight",
                 "localUrl": local_url,
                 "moonlightLocalUrl": local_url,
+                "routeKey": "HOST_STREAM_PROXY_ROUTE",
+                "applicationType": application_type,
+                "applicationActivationId": application_activation_id,
                 "connected": true,
             }
         ]
@@ -3657,7 +3669,7 @@ fn configure_host_keeper_tunnel(
     }
 
     write_host_keeper_env(bundle_root, activation, &device_token)?;
-    write_host_keeper_status(bundle_root)?;
+    write_host_keeper_status(bundle_root, activation)?;
     stop_keeper_tunnel_processes(bundle_root);
     unregister_host_keeper_tunnel_task(bundle_root);
 
@@ -3842,6 +3854,23 @@ mod tests {
         assert!(env_file.contains(
             "CLOUDGIME_HOST_STREAM_LOCAL_URL=http://127.0.0.1:18081/stream/"
         ));
+
+        fs::remove_dir_all(&test_root).unwrap();
+    }
+
+    #[test]
+    fn host_keeper_status_includes_host_activation_route_metadata() {
+        let test_root = env::temp_dir().join(format!("host-keeper-status-{}", Uuid::new_v4()));
+        let mut activation = default_activation_state();
+        activation.application_activation_id = "act_host_test".into();
+        activation.application_type = "CLOUDGIME_HOST".into();
+
+        write_host_keeper_status(&test_root, &activation).unwrap();
+
+        let raw = fs::read_to_string(host_keeper_status_path(&test_root)).unwrap();
+        assert!(raw.contains("\"routeKey\": \"HOST_STREAM_PROXY_ROUTE\""));
+        assert!(raw.contains("\"applicationType\": \"CLOUDGIME_HOST\""));
+        assert!(raw.contains("\"applicationActivationId\": \"act_host_test\""));
 
         fs::remove_dir_all(&test_root).unwrap();
     }
