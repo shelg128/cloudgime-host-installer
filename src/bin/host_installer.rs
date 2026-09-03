@@ -22,6 +22,10 @@ use common::config::{Config, PortRange, WebRtcNetworkType};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[path = "../provisioning.rs"]
+mod provisioning;
+use provisioning::ProvisionRequest;
+
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
@@ -49,6 +53,11 @@ struct Cli {
 enum InstallerCommand {
     PrepareHost,
     PrepareInstall,
+    Provision {
+        #[arg(long)] activation_license: Option<String>,
+        #[arg(long, default_value = "always_on_host")] profile: String,
+        #[arg(long)] api_base_url: String,
+    },
     PreflightHost {
         #[arg(long, default_value_t = false)]
         fix: bool,
@@ -705,6 +714,42 @@ fn run() -> Result<()> {
         }
         InstallerCommand::PrepareInstall => {
             prepare_install_environment(&paths)?;
+            Ok(())
+        }
+        InstallerCommand::Provision { activation_license, profile, api_base_url } => {
+            if profile != "always_on_host" && profile != "instance_pair" {
+                bail!("unsupported provisioning profile: {profile}");
+            }
+            let activation_license = match activation_license {
+                Some(value) if !value.trim().is_empty() => value,
+                _ => {
+                    eprint!("Activation license: ");
+                    std::io::stdout().flush()?;
+                    let mut value = String::new();
+                    std::io::stdin().read_line(&mut value)?;
+                    value.trim().to_string()
+                }
+            };
+            let machine_name = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "CLOUDGIME-PC".to_string());
+            let hostname = machine_name.clone();
+            let identity = provisioning::load_or_create_machine_identity(&paths.bundle_root)?;
+            let machine_identity = identity.machine_identity;
+            let install_instance_id = identity.install_instance_id;
+            let host_id = format!("host-{}", machine_name.to_ascii_lowercase());
+            let request = ProvisionRequest {
+                activation_license: &activation_license,
+                expected_activation_license_kind: &profile,
+                machine_name: &machine_name,
+                hostname: &hostname,
+                machine_identity: &machine_identity,
+                install_instance_id: &install_instance_id,
+                requested_device_id: &machine_name,
+                host_id: &host_id,
+                installer_version: env!("CARGO_PKG_VERSION"),
+            };
+            provisioning::provision_once(&paths.bundle_root, &api_base_url, &request)?;
+            apply_license_assignment_to_runtime_config(&paths)?;
+            println!("{{\"ok\":true,\"status\":\"PROVISIONED_WAITING_HEARTBEATS\"}}");
             Ok(())
         }
         InstallerCommand::PreflightHost { fix } => {
