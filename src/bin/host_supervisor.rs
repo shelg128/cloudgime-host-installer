@@ -29,6 +29,11 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[path = "../provisioning.rs"]
+mod provisioning;
+#[path = "../host_node_runtime.rs"]
+mod host_node_runtime;
+
 #[cfg(windows)]
 use windows_service::{
     define_windows_service,
@@ -154,6 +159,8 @@ enum SupervisorCommand {
         reason: String,
     },
     Status,
+    /// Rebuild non-secret cache from existing provisioning; no stream/session starts.
+    RevalidateNode,
     #[command(hide = true)]
     RunDaemon,
     #[command(hide = true)]
@@ -304,6 +311,7 @@ struct BundlePaths {
     bundle_root: PathBuf,
     moonlight_dir: PathBuf,
     frp_dir: PathBuf,
+    keeper_tunnel_status_path: PathBuf,
     config_path: PathBuf,
     activation_state_path: PathBuf,
     public_url_path: PathBuf,
@@ -399,6 +407,8 @@ struct ProcessSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "PascalCase")]
 struct HostActivationStateRecord {
+    #[serde(skip)]
+    universal_node: bool,
     schema_version: i32,
     host_id: String,
     machine_identity: String,
@@ -421,6 +431,7 @@ struct HostActivationStateRecord {
     host_stream_proxy_route: String,
     license_assignments: Value,
     license_policies: Value,
+    #[serde(skip_serializing)]
     runtime_token: String,
     activation_record_id: String,
     activated_at_utc: String,
@@ -440,6 +451,8 @@ struct HostActivationStatusPayload {
     activation_state: String,
     #[serde(deserialize_with = "deserialize_string_or_default")]
     display_name: String,
+    #[serde(deserialize_with = "deserialize_string_or_default")]
+    runtime_token: String,
     #[serde(deserialize_with = "deserialize_string_or_default")]
     host_slug: String,
     #[serde(deserialize_with = "deserialize_string_or_default")]
@@ -577,6 +590,17 @@ fn run() -> Result<()> {
                 reason,
             },
         ),
+        SupervisorCommand::RevalidateNode => {
+            let mut activation = read_activation_state(&paths);
+            if !activation.universal_node { bail!("NODE_NOT_PROVISIONED") }
+            #[cfg(windows)]
+            host_node_runtime::sync(&paths, &mut activation)?;
+            if !host_node_runtime::allows(&activation) { bail!("NODE_RUNTIME_NOT_AUTHORIZED") }
+            println!("{}", serde_json::json!({"ok":true,"pcId":activation.sentinel_pc_id,
+                "hostId":activation.host_id,"activationState":activation.activation_state,
+                "setupTokenUsed":false,"runtimeStarted":false,"readinessClaimed":false}));
+            Ok(())
+        }
         SupervisorCommand::Status => {
             let status = build_status_snapshot(&paths)?;
             println!("{}", serde_json::to_string_pretty(&status)?);
@@ -604,6 +628,10 @@ impl BundlePaths {
 
         Ok(Self {
             frp_dir: bundle_root.join("frp"),
+            keeper_tunnel_status_path: bundle_root
+                .join("keeper-tunnel")
+                .join("data")
+                .join("keeper-tunnel-status.json"),
             activation_state_path: moonlight_server_dir.join("host_activation_state.json"),
             public_url_path: bundle_root.join("PUBLIC_URL.txt"),
             selected_runtime_path: moonlight_server_dir.join("selected_sunshine_runtime.txt"),
@@ -746,7 +774,12 @@ fn run_service_main() -> Result<()> {
         }
     });
 
-    let startup_activation = read_activation_state(&paths);
+    let mut startup_activation = read_activation_state(&paths);
+    if startup_activation.universal_node {
+        if let Err(_) = host_node_runtime::sync(&paths, &mut startup_activation) {
+            append_supervisor_log(&paths, "NODE_STARTUP_REVALIDATION_PENDING")?;
+        }
+    }
     if activation_allows_runtime(&paths, &startup_activation) {
         if let Err(err) = ensure_user_session_daemon_running(&paths)
             .and_then(|_| request_user_daemon_operation(&paths, DaemonCommandKind::StartBundle))
@@ -801,10 +834,6 @@ fn run_service_main() -> Result<()> {
                     continue;
                 }
             };
-            if let Err(err) = service_watchdog_tick(&paths, &config, &mut last_watchdog_recovery_at)
-            {
-                append_supervisor_log(&paths, &format!("service watchdog error: {err:#}"))?;
-            }
             if let Err(err) = service_activation_tick(
                 &paths,
                 &config,
@@ -812,6 +841,10 @@ fn run_service_main() -> Result<()> {
                 &mut last_activation_heartbeat_at,
             ) {
                 append_supervisor_log(&paths, &format!("service activation sync error: {err:#}"))?;
+            }
+            if let Err(err) = service_watchdog_tick(&paths, &config, &mut last_watchdog_recovery_at)
+            {
+                append_supervisor_log(&paths, &format!("service watchdog error: {err:#}"))?;
             }
             last_watchdog_tick = Instant::now();
         }
@@ -935,11 +968,47 @@ fn service_activation_tick(
     last_heartbeat_at: &mut Option<Instant>,
 ) -> Result<()> {
     let mut activation = read_activation_state(paths);
-    if activation.host_id.trim().is_empty()
-        || activation.runtime_token.trim().is_empty()
-        || activation.control_plane_url.trim().is_empty()
-    {
+    if activation.universal_node {
+        if last_status_sync_at.is_none_or(|last| last.elapsed() >= Duration::from_secs(ACTIVATION_STATUS_SYNC_INTERVAL_SECS)) {
+            *last_status_sync_at = Some(Instant::now());
+            if host_node_runtime::sync(paths, &mut activation).is_err() {
+                append_supervisor_log(paths, "NODE_REVALIDATION_PENDING_NO_SETUP_TOKEN_REQUIRED")?;
+            }
+        }
+        if !activation_allows_runtime(paths, &activation) {
+            stop_runtime_when_activation_locked(paths, &activation)?;
+            return Ok(());
+        }
+        if last_heartbeat_at.is_none_or(|last| last.elapsed() >= Duration::from_secs(ACTIVATION_HEARTBEAT_INTERVAL_SECS)) {
+            *last_heartbeat_at = Some(Instant::now());
+            send_activation_heartbeat(paths, config, &mut activation)?;
+        }
         return Ok(());
+    }
+    if activation.host_id.trim().is_empty() || activation.control_plane_url.trim().is_empty() {
+        return Ok(());
+    }
+
+    if activation.runtime_token.trim().is_empty() {
+        if missing_credential_recovery_allowed(&activation)
+            && last_status_sync_at.is_none_or(|last| {
+                last.elapsed() >= Duration::from_secs(ACTIVATION_STATUS_SYNC_INTERVAL_SECS)
+            })
+        {
+            *last_status_sync_at = Some(Instant::now());
+            let client = Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .context("failed to build credential recovery client")?;
+            if !recover_runtime_token(paths, &client, &mut activation)? {
+                return Ok(());
+            }
+            // Recovery is not readiness: revalidate activation before heartbeat/start.
+            sync_activation_status(paths, &mut activation)?;
+        }
+        if activation.runtime_token.trim().is_empty() {
+            return Ok(());
+        }
     }
 
     if last_status_sync_at.is_none_or(|last| {
@@ -991,11 +1060,189 @@ fn normalize_failed_phase_if_runtime_healthy(
     Ok(())
 }
 
+#[cfg(test)]
+mod recovery_gate_tests {
+    use super::*;
+    #[test]
+    fn recovery_response_requires_exact_existing_binding() {
+        let mut state = HostActivationStateRecord::default();
+        state.host_id = "host-test".into();
+        state.sentinel_pc_id = "1".into();
+        state.activation_record_id = "record-test".into();
+        state.sentinel_device_id = "device-test".into();
+        let payload = HostActivationStatusPayload {
+            ok: true,
+            host_id: state.host_id.clone(),
+            sentinel_pc_id: "1".into(),
+            activation_record_id: state.activation_record_id.clone(),
+            sentinel_device_id: state.sentinel_device_id.clone(),
+            activation_state: "activated".into(),
+            runtime_token: "dummy-secret".into(),
+            ..Default::default()
+        };
+        assert!(recovery_response_matches_binding(&state, &payload));
+        state.activation_record_id.clear();
+        assert!(
+            !recovery_response_matches_binding(&state, &payload),
+            "empty local record must not accept arbitrary record"
+        );
+        let mut legacy_payload = payload.clone();
+        legacy_payload.activation_record_id = state.host_id.clone();
+        assert!(recovery_response_matches_binding(&state, &legacy_payload));
+        legacy_payload.activation_record_id.clear();
+        assert!(!recovery_response_matches_binding(&state, &legacy_payload));
+        state.activation_record_id = "record-test".into();
+        for field in ["host", "pc", "record", "device", "state", "token"] {
+            let mut invalid = payload.clone();
+            match field {
+                "host" => invalid.host_id = "other".into(),
+                "pc" => invalid.sentinel_pc_id.clear(),
+                "record" => invalid.activation_record_id = "other".into(),
+                "device" => invalid.sentinel_device_id.clear(),
+                "state" => invalid.activation_state = "revoked".into(),
+                _ => invalid.runtime_token.clear(),
+            }
+            assert!(
+                !recovery_response_matches_binding(&state, &invalid),
+                "{field}"
+            );
+        }
+    }
+    #[test]
+    fn recovery_requires_existing_active_identity_and_https() {
+        let mut state = HostActivationStateRecord::default();
+        assert!(!missing_credential_recovery_allowed(&state));
+        state.activation_state = "activated".into();
+        state.host_id = "host-test".into();
+        state.machine_identity = "machine-test".into();
+        state.install_instance_id = "installation-test".into();
+        state.control_plane_url = "https://backend.test".into();
+        assert!(missing_credential_recovery_allowed(&state));
+        state.activation_state = "revoked".into();
+        assert!(!missing_credential_recovery_allowed(&state));
+        state.activation_state = "activated".into();
+        state.runtime_token = "existing".into();
+        assert!(!missing_credential_recovery_allowed(&state));
+        state.runtime_token.clear();
+        state.control_plane_url = "http://backend.test".into();
+        assert!(!missing_credential_recovery_allowed(&state));
+    }
+}
+
+fn missing_credential_recovery_allowed(state: &HostActivationStateRecord) -> bool {
+    state.activation_state.eq_ignore_ascii_case("activated")
+        && state.runtime_token.trim().is_empty()
+        && !state.host_id.trim().is_empty()
+        && !state.machine_identity.trim().is_empty()
+        && !state.install_instance_id.trim().is_empty()
+        && state.control_plane_url.trim().starts_with("https://")
+}
+
+fn recovery_response_matches_binding(
+    activation: &HostActivationStateRecord,
+    payload: &HostActivationStatusPayload,
+) -> bool {
+    payload.ok
+        && payload.activation_state.eq_ignore_ascii_case("activated")
+        && !payload.runtime_token.trim().is_empty()
+        && !activation.host_id.trim().is_empty()
+        && payload.host_id.trim() == activation.host_id.trim()
+        && !activation.sentinel_pc_id.trim().is_empty()
+        && payload.sentinel_pc_id.trim() == activation.sentinel_pc_id.trim()
+        && (if activation.activation_record_id.trim().is_empty() {
+            payload.activation_record_id.trim() == activation.host_id.trim()
+        } else {
+            payload.activation_record_id.trim() == activation.activation_record_id.trim()
+        })
+        && (activation.sentinel_device_id.trim().is_empty()
+            || payload.sentinel_device_id.trim() == activation.sentinel_device_id.trim())
+}
+
+#[cfg(windows)]
+fn recover_runtime_token(
+    paths: &BundlePaths,
+    client: &Client,
+    activation: &mut HostActivationStateRecord,
+) -> Result<bool> {
+    let control_plane_url = normalize_control_plane_url(&activation.control_plane_url);
+    if control_plane_url.is_empty() || activation.host_id.trim().is_empty() {
+        return Ok(false);
+    }
+    let response = match client
+        .post(format!(
+            "{control_plane_url}/api/v1/host-activation/recover"
+        ))
+        .version(reqwest::Version::HTTP_2)
+        .json(&serde_json::json!({
+            "hostId": activation.host_id.trim(),
+            "machineIdentity": empty_to_none(&activation.machine_identity),
+            "installInstanceId": empty_to_none(&activation.install_instance_id),
+            "displayName": empty_to_none(&activation.display_name),
+        }))
+        .send()
+    {
+        Ok(response) => response,
+        Err(err) => {
+            append_supervisor_log(
+                paths,
+                &format!("runtime credential recovery skipped: {err}"),
+            )?;
+            return Ok(false);
+        }
+    };
+    let status_code = response.status();
+    let raw = response.text().unwrap_or_default();
+    let payload = serde_json::from_str::<HostActivationStatusPayload>(&raw).unwrap_or_default();
+    if !(200..300).contains(&status_code.as_u16())
+        || !payload.ok
+        || payload.runtime_token.trim().is_empty()
+    {
+        append_supervisor_log(
+            paths,
+            &format!(
+                "runtime credential recovery rejected (http {})",
+                status_code.as_u16()
+            ),
+        )?;
+        return Ok(false);
+    }
+    if !recovery_response_matches_binding(activation, &payload) {
+        append_supervisor_log(
+            paths,
+            "runtime credential recovery rejected: binding mismatch or incomplete response; explicit reprovisioning required",
+        )?;
+        return Ok(false);
+    }
+    let recovered_token = payload.runtime_token.trim().to_string();
+    let secret = serde_json::json!({
+        "componentType": "host_app",
+        "credentialRef": activation.credential_ref,
+        "runtimeToken": recovered_token,
+    });
+    provisioning::write_component_credential(&paths.bundle_root, "host_app", &secret)?;
+    activation.runtime_token = recovered_token;
+    activation.activation_state = "activated".to_string();
+    if !payload.activation_record_id.trim().is_empty() {
+        activation.activation_record_id = payload.activation_record_id.trim().to_string();
+    }
+    activation.last_ready_for_stream = false;
+    activation.updated_at_utc = now_rfc3339();
+    save_activation_state(paths, activation)?;
+    append_supervisor_log(
+        paths,
+        "runtime credential recovered; Host activation remains active",
+    )?;
+    Ok(true)
+}
+
 #[cfg(windows)]
 fn sync_activation_status(
     paths: &BundlePaths,
     activation: &mut HostActivationStateRecord,
 ) -> Result<()> {
+    if activation.universal_node {
+        return host_node_runtime::sync(paths, activation);
+    }
     let control_plane_url = normalize_control_plane_url(&activation.control_plane_url);
     if control_plane_url.is_empty() {
         return Ok(());
@@ -1039,8 +1286,8 @@ fn sync_activation_status(
             append_supervisor_log(
                 paths,
                 &format!(
-                    "activation status payload parse failed: {err}; raw={}",
-                    raw.chars().take(600).collect::<String>()
+                    "activation status payload parse failed: {err}; http={}",
+                    status_code.as_u16()
                 ),
             )?;
             HostActivationStatusPayload::default()
@@ -1086,6 +1333,17 @@ fn sync_activation_status(
                 &format!("activation status updated: {previous_state} -> {next_state}"),
             )?;
         }
+        return Ok(());
+    }
+
+    if status_code.as_u16() == 401 {
+        if recover_runtime_token(paths, &client, activation)? {
+            return Ok(());
+        }
+        append_supervisor_log(
+            paths,
+            "runtime credential invalid; recovery failed, preserving Host activation state",
+        )?;
         return Ok(());
     }
 
@@ -1151,8 +1409,7 @@ fn capability_profile_has_virtual_display_driver(profile: &HostCapabilityProfile
         .is_some_and(|reason| reason.eq_ignore_ascii_case("virtual_display_driver_present"))
         || profile.gpu_controllers.iter().any(|gpu| {
             let name = gpu.name.to_ascii_lowercase();
-            name.contains("virtual display driver")
-                || name.contains("virtual display adapter")
+            name.contains("virtual display driver") || name.contains("virtual display adapter")
         })
 }
 
@@ -1219,6 +1476,8 @@ fn build_stream_not_ready_note(
     lifecycle_phase: &LifecyclePhase,
     required_processes_ready: bool,
     local_http_ready: bool,
+    sentinel_binding_ready: bool,
+    keeper_binding_ready: bool,
     public_url: &str,
 ) -> String {
     if let Some(note) = display_route_note
@@ -1229,6 +1488,12 @@ fn build_stream_not_ready_note(
     }
     if !local_http_ready {
         return "Local host HTTP endpoint is not ready.".to_string();
+    }
+    if !sentinel_binding_ready {
+        return "sentinel_binding_missing".to_string();
+    }
+    if !keeper_binding_ready {
+        return "keeper_binding_missing".to_string();
     }
     if !required_processes_ready {
         return "Required host processes are not ready.".to_string();
@@ -1256,6 +1521,8 @@ fn send_host_runtime_heartbeat(
     public_url: &str,
     local_http_ready: bool,
     required_processes_ready: bool,
+    sentinel_binding_ready: bool,
+    keeper_binding_ready: bool,
 ) -> Result<bool> {
     let runtime_token = activation.runtime_token.trim().to_string();
     if runtime_token.is_empty() {
@@ -1282,6 +1549,8 @@ fn send_host_runtime_heartbeat(
         "serviceState": Some("running".to_string()),
         "localHttpReady": local_http_ready,
         "requiredProcessesReady": required_processes_ready,
+        "sentinelBindingReady": sentinel_binding_ready,
+        "keeperBindingReady": keeper_binding_ready,
         "readyForStream": ready_for_stream,
         "note": Some(note.to_string()),
     });
@@ -1462,10 +1731,14 @@ fn send_activation_heartbeat(
     let public_url = read_public_url(paths);
     let (display_route_ready, display_route_note) =
         evaluate_stream_display_route(capability_profile.as_ref());
+    let (sentinel_binding_ready, keeper_binding_ready) =
+        evaluate_license_component_bindings(paths, activation);
     let ready_for_stream = display_route_ready
         && matches!(state.lifecycle_phase, LifecyclePhase::Ready)
         && required_processes_ready
         && local_http_ready
+        && sentinel_binding_ready
+        && keeper_binding_ready
         && !public_url.is_empty();
     let note = if ready_for_stream {
         "ready_for_stream".to_string()
@@ -1475,6 +1748,8 @@ fn send_activation_heartbeat(
             &state.lifecycle_phase,
             required_processes_ready,
             local_http_ready,
+            sentinel_binding_ready,
+            keeper_binding_ready,
             &public_url,
         )
     };
@@ -1496,6 +1771,8 @@ fn send_activation_heartbeat(
         &public_url,
         local_http_ready,
         required_processes_ready,
+        sentinel_binding_ready,
+        keeper_binding_ready,
     )? {
         return Ok(());
     }
@@ -1517,6 +1794,8 @@ fn send_activation_heartbeat(
             "serviceState": Some("running".to_string()),
             "localHttpReady": local_http_ready,
             "requiredProcessesReady": required_processes_ready,
+            "sentinelBindingReady": sentinel_binding_ready,
+            "keeperBindingReady": keeper_binding_ready,
             "readyForStream": ready_for_stream,
             "note": Some(note),
             "sentinelPcId": empty_to_none(&activation.sentinel_pc_id),
@@ -1555,6 +1834,17 @@ fn send_activation_heartbeat(
         }
         activation.updated_at_utc = now_rfc3339();
         save_activation_state(paths, activation)?;
+        return Ok(());
+    }
+
+    if status_code.as_u16() == 401 {
+        if recover_runtime_token(paths, &client, activation)? {
+            return Ok(());
+        }
+        append_supervisor_log(
+            paths,
+            "runtime credential invalid; recovery failed, preserving Host activation state",
+        )?;
         return Ok(());
     }
 
@@ -1597,8 +1887,10 @@ fn stop_runtime_when_activation_locked(
     append_supervisor_log(
         paths,
         &format!(
-            "activation gate stopping bundle because activation_state={}",
-            activation_state_label(activation)
+            "activation gate stopping bundle: activation_state={} host_identity_present={} runtime_credential_present={} recovery=verify_scoped_provisioning",
+            activation_state_label(activation),
+            !activation.host_id.trim().is_empty(),
+            !activation.runtime_token.trim().is_empty()
         ),
     )?;
     if daemon_running {
@@ -2346,7 +2638,20 @@ fn wait_for_command_completion(
     }
 }
 
+fn verify_node_before_start(paths: &BundlePaths) -> Result<()> {
+    let mut activation = read_activation_state(paths);
+    if activation.universal_node {
+        #[cfg(windows)]
+        host_node_runtime::sync(paths, &mut activation)?;
+        if !host_node_runtime::allows(&activation) {
+            bail!("NODE_RUNTIME_NOT_AUTHORIZED_NO_SETUP_TOKEN_REQUIRED");
+        }
+    }
+    Ok(())
+}
+
 fn start_bundle_inner(paths: &BundlePaths) -> Result<()> {
+    verify_node_before_start(paths)?;
     append_supervisor_log(paths, "start_bundle_inner begin")?;
     run_preflight(paths)?;
     append_supervisor_log(paths, "start_bundle_inner preflight complete")?;
@@ -2462,6 +2767,7 @@ fn stop_bundle_inner(paths: &BundlePaths) -> Result<()> {
 }
 
 fn restart_runtime_inner(paths: &BundlePaths) -> Result<()> {
+    verify_node_before_start(paths)?;
     append_supervisor_log(paths, "restart_runtime_inner begin")?;
     run_preflight(paths)?;
     append_supervisor_log(paths, "restart_runtime_inner preflight complete")?;
@@ -2488,6 +2794,7 @@ fn restart_runtime_inner(paths: &BundlePaths) -> Result<()> {
 }
 
 fn recover_runtime_inner(paths: &BundlePaths, policy: RecoveryPolicy) -> Result<()> {
+    verify_node_before_start(paths)?;
     append_supervisor_log(
         paths,
         &format!("recover_runtime_inner begin policy={}", policy.as_str()),
@@ -2828,6 +3135,25 @@ fn read_state(paths: &BundlePaths) -> Option<SupervisorState> {
 }
 
 fn read_activation_state(paths: &BundlePaths) -> HostActivationStateRecord {
+    static NODE_SELECTED: AtomicBool = AtomicBool::new(false);
+    let node_selected = provisioning::universal_manifest_exists(&paths.bundle_root)
+        || NODE_SELECTED.load(Ordering::SeqCst);
+    if node_selected {
+        NODE_SELECTED.store(true, Ordering::SeqCst);
+        let raw = match fs::read_to_string(&paths.activation_state_path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => "{}".into(),
+            Err(_) => return host_node_runtime::failed_state(),
+        };
+        let Ok(mut state) = serde_json::from_str::<HostActivationStateRecord>(strip_utf8_bom(&raw)) else {
+            return host_node_runtime::failed_state();
+        };
+        state.universal_node = true;
+        if host_node_runtime::hydrate(paths, &mut state).is_err() {
+            return host_node_runtime::failed_state();
+        }
+        return state;
+    }
     let mut state = fs::read_to_string(&paths.activation_state_path)
         .ok()
         .and_then(|raw| {
@@ -2837,7 +3163,26 @@ fn read_activation_state(paths: &BundlePaths) -> HostActivationStateRecord {
 
     let env_changed = hydrate_activation_binding_from_keeper_env(paths, &mut state);
     let local_assignment_changed = hydrate_activation_binding_from_local_assignments(&mut state);
-    if env_changed || local_assignment_changed {
+    let mut secret_migrated = false;
+    if !state.runtime_token.trim().is_empty() {
+        let secret = serde_json::json!({
+            "componentType": "host_app",
+            "credentialRef": state.credential_ref,
+            "runtimeToken": state.runtime_token,
+        });
+        if provisioning::write_component_credential(&paths.bundle_root, "host_app", &secret).is_ok()
+        {
+            state.runtime_token.clear();
+            secret_migrated = true;
+        }
+    }
+    if state.runtime_token.trim().is_empty() {
+        if let Ok(secret) = provisioning::read_component_credential(&paths.bundle_root, "host_app")
+        {
+            state.runtime_token = secret.trim().to_string();
+        }
+    }
+    if env_changed || local_assignment_changed || secret_migrated {
         let _ = save_activation_state(paths, &state);
     }
 
@@ -2856,7 +3201,13 @@ where
 }
 
 fn save_activation_state(paths: &BundlePaths, state: &HostActivationStateRecord) -> Result<()> {
-    let serialized = serde_json::to_string_pretty(state)?;
+    let mut sanitized = state.clone();
+    sanitized.runtime_token.clear();
+    if state.universal_node {
+        sanitized.credential_ref.clear();
+        return provisioning::write_host_runtime_cache(&paths.activation_state_path, &serde_json::to_value(&sanitized)?);
+    }
+    let serialized = serde_json::to_string_pretty(&sanitized)?;
     fs::write(&paths.activation_state_path, format!("{serialized}\n")).with_context(|| {
         format!(
             "failed to write host activation state {}",
@@ -3073,7 +3424,100 @@ fn keeper_tunnel_binding_ready(paths: &BundlePaths, state: &HostActivationStateR
             .is_empty()
 }
 
+// Route configuration is NOT a live tunnel-health assertion. Reject stale
+// activation ownership even when a legacy file contains connected:true.
+fn host_route_matches_activation(value: &serde_json::Value, activation_id: &str) -> bool {
+    if activation_id.trim().is_empty() {
+        return false;
+    }
+    let Some(routes) = value.get("routes").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    let targets: Vec<_> = routes
+        .iter()
+        .filter(|r| r.get("name").and_then(serde_json::Value::as_str) == Some("moonlight"))
+        .collect();
+    targets.len() == 1
+        && targets[0]
+            .get("applicationType")
+            .and_then(serde_json::Value::as_str)
+            == Some("CLOUDGIME_HOST")
+        && targets[0]
+            .get("routeKey")
+            .and_then(serde_json::Value::as_str)
+            == Some("HOST_STREAM_PROXY_ROUTE")
+        && targets[0]
+            .get("applicationActivationId")
+            .and_then(serde_json::Value::as_str)
+            == Some(activation_id.trim())
+}
+
+#[cfg(test)]
+mod tunnel_route_binding_tests {
+    use super::*;
+    #[test]
+    fn rejects_other_activation_missing_and_duplicate_routes() {
+        let route = serde_json::json!({"name":"moonlight","applicationType":"CLOUDGIME_HOST","routeKey":"HOST_STREAM_PROXY_ROUTE","applicationActivationId":"act-current","connected":true});
+        assert!(host_route_matches_activation(
+            &serde_json::json!({"routes":[route.clone()]}),
+            "act-current"
+        ));
+        assert!(!host_route_matches_activation(
+            &serde_json::json!({"routes":[route.clone()]}),
+            "act-other"
+        ));
+        assert!(!host_route_matches_activation(
+            &serde_json::json!({"routes":[route.clone(),route]}),
+            "act-current"
+        ));
+        assert!(!host_route_matches_activation(
+            &serde_json::json!({"routes":[]}),
+            "act-current"
+        ));
+        assert!(!host_route_matches_activation(
+            &serde_json::json!({"routes":[{"name":"moonlight","connected":true}]}),
+            "act-current"
+        ));
+    }
+}
+
+fn evaluate_license_component_bindings(
+    paths: &BundlePaths,
+    state: &HostActivationStateRecord,
+) -> (bool, bool) {
+    let expected_pc = state.sentinel_pc_id.trim();
+    let expected_device = state.sentinel_device_id.trim();
+    let expected_keeper = state.keeper_entry_id.trim();
+    let keeper_pc = read_keeper_tunnel_env_value(paths, "CLOUDRENTAL_PC_ID_DEFAULT");
+    let keeper_device = read_keeper_tunnel_env_value(paths, "CLOUDRENTAL_DEVICE_ID_DEFAULT");
+    let keeper_entry = {
+        let current = read_keeper_tunnel_env_value(paths, "CLOUDRENTAL_KEEPER_ENTRY_DEFAULT");
+        if current.trim().is_empty() {
+            read_keeper_tunnel_env_value(paths, "CLOUDRENTAL_KEEPER_ENTRY_ID")
+        } else {
+            current
+        }
+    };
+    let sentinel_binding_ready = !expected_pc.is_empty()
+        && !expected_device.is_empty()
+        && keeper_pc.trim() == expected_pc
+        && keeper_device.trim().eq_ignore_ascii_case(expected_device);
+    let keeper_binding_ready = sentinel_binding_ready
+        && !expected_keeper.is_empty()
+        && keeper_entry.trim().eq_ignore_ascii_case(expected_keeper)
+        && fs::read_to_string(&paths.keeper_tunnel_status_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(strip_utf8_bom(&raw)).ok())
+            .is_some_and(|routes| {
+                host_route_matches_activation(&routes, &state.application_activation_id)
+            });
+    (sentinel_binding_ready, keeper_binding_ready)
+}
+
 fn activation_allows_runtime(paths: &BundlePaths, state: &HostActivationStateRecord) -> bool {
+    if state.universal_node {
+        return host_node_runtime::allows(state);
+    }
     (state.activation_state.eq_ignore_ascii_case("activated")
         && !state.host_id.trim().is_empty()
         && !state.runtime_token.trim().is_empty())
@@ -3109,8 +3553,10 @@ fn derive_next_activation_state(status_code: u16, activation_state: &str) -> Str
 
     match status_code {
         403 => "suspended".to_string(),
-        401 | 404 | 409 => "revoked".to_string(),
-        _ => "revoked".to_string(),
+        // A stale credential, unavailable endpoint, or binding conflict is a
+        // runtime problem. It must not revoke the durable Host license.
+        401 | 404 | 409 => "activated".to_string(),
+        _ => "activated".to_string(),
     }
 }
 
@@ -4379,6 +4825,15 @@ mod tests {
                 free_mib: 300,
             },
         ]));
+    }
+
+    #[test]
+    fn preserves_host_activation_for_recoverable_http_failures() {
+        assert_eq!(derive_next_activation_state(401, ""), "activated");
+        assert_eq!(derive_next_activation_state(404, ""), "activated");
+        assert_eq!(derive_next_activation_state(409, ""), "activated");
+        assert_eq!(derive_next_activation_state(403, ""), "suspended");
+        assert_eq!(derive_next_activation_state(200, "revoked"), "revoked");
     }
 
     #[test]

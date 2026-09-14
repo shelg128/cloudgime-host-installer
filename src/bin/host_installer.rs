@@ -2,7 +2,7 @@ use std::{
     fs,
     io::{Read, Write},
     net::{SocketAddr, TcpStream},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, ExitStatus, Output, Stdio},
     thread::sleep,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -22,6 +22,8 @@ use common::config::{Config, PortRange, WebRtcNetworkType};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[path = "installer_identity_retry.rs"]
+mod installer_identity_retry;
 #[path = "../provisioning.rs"]
 mod provisioning;
 use provisioning::ProvisionRequest;
@@ -54,9 +56,24 @@ enum InstallerCommand {
     PrepareHost,
     PrepareInstall,
     Provision {
-        #[arg(long)] activation_license: Option<String>,
-        #[arg(long, default_value = "always_on_host")] profile: String,
-        #[arg(long)] api_base_url: String,
+        #[arg(long, conflicts_with = "activation_license_file")]
+        activation_license: Option<String>,
+        /// SYSTEM/Administrator-only file; do not put activation secrets on the command line.
+        #[arg(long, conflicts_with = "activation_license")]
+        activation_license_file: Option<PathBuf>,
+        #[arg(long, default_value = "always_on_host")]
+        profile: String,
+        #[arg(long)]
+        api_base_url: String,
+        /// Explicit recovery only: reuse canonical identity from local activation state.
+        #[arg(long, default_value_t = false)]
+        recover_existing_identity: bool,
+    },
+    /// Rotate host runtime + renewal credentials for an existing Universal Node
+    /// without a pairing token.
+    Repair {
+        #[arg(long)]
+        api_base_url: String,
     },
     PreflightHost {
         #[arg(long, default_value_t = false)]
@@ -676,6 +693,34 @@ fn read_bundle_promotion_policy(
     parsed
 }
 
+fn ensure_provision_privilege() -> Result<()> {
+    #[cfg(windows)]
+    {
+        // fltmc requires an elevated token and works for both Administrator and SYSTEM.
+        // SID/group parsing is locale-sensitive, so do not infer elevation from `whoami` text.
+        let output = Command::new("fltmc")
+            .output()
+            .context("verify provision privilege")?;
+        if !output.status.success() {
+            bail!("provision requires elevated Administrator or SYSTEM context");
+        }
+    }
+    Ok(())
+}
+
+fn read_activation_license_file(path: &Path) -> Result<String> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("read activation license file {}", path.display()))?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > 16 * 1024 {
+        bail!("activation license file invalid");
+    }
+    let value = fs::read_to_string(path)?.trim().to_string();
+    if value.is_empty() || value.contains(['\r', '\n', '\0']) {
+        bail!("activation license file invalid");
+    }
+    Ok(value)
+}
+
 fn main() {
     if let Err(err) = run() {
         eprintln!("{err:#}");
@@ -716,26 +761,73 @@ fn run() -> Result<()> {
             prepare_install_environment(&paths)?;
             Ok(())
         }
-        InstallerCommand::Provision { activation_license, profile, api_base_url } => {
+        InstallerCommand::Provision {
+            activation_license,
+            activation_license_file,
+            profile,
+            api_base_url,
+            recover_existing_identity,
+        } => {
+            ensure_provision_privilege()?;
             if profile != "always_on_host" && profile != "instance_pair" {
                 bail!("unsupported provisioning profile: {profile}");
             }
-            let activation_license = match activation_license {
-                Some(value) if !value.trim().is_empty() => value,
-                _ => {
+            let activation_license = match (activation_license, activation_license_file) {
+                (Some(value), None) if !value.trim().is_empty() => value,
+                (None, Some(path)) => read_activation_license_file(&path)?,
+                (None, None) => {
                     eprint!("Activation license: ");
                     std::io::stdout().flush()?;
                     let mut value = String::new();
                     std::io::stdin().read_line(&mut value)?;
                     value.trim().to_string()
                 }
+                _ => bail!("exactly one activation license input is required"),
             };
-            let machine_name = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "CLOUDGIME-PC".to_string());
+            let machine_name =
+                std::env::var("COMPUTERNAME").unwrap_or_else(|_| "CLOUDGIME-PC".to_string());
             let hostname = machine_name.clone();
-            let identity = provisioning::load_or_create_machine_identity(&paths.bundle_root)?;
-            let machine_identity = identity.machine_identity;
-            let install_instance_id = identity.install_instance_id;
-            let host_id = format!("host-{}", machine_name.to_ascii_lowercase());
+            let state_path = paths
+                .bundle_root
+                .join("moonlight")
+                .join("server")
+                .join("host_activation_state.json");
+            let state: Option<serde_json::Value> = if state_path.exists() {
+                Some(serde_json::from_slice(
+                    &fs::read(&state_path)
+                        .with_context(|| format!("read {}", state_path.display()))?,
+                )?)
+            } else {
+                None
+            };
+            // Recovery must not read/create a replacement DPAPI identity first:
+            // a SYSTEM-owned credential may be intentionally unreadable to this context.
+            let (machine_identity, install_instance_id) = if recover_existing_identity {
+                let state = state
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("no existing activation state to recover"))?;
+                installer_identity_retry::explicit_recovery_machine_state(state)?
+            } else {
+                let local_identity =
+                    provisioning::load_or_create_machine_identity(&paths.bundle_root)?;
+                (
+                    local_identity.machine_identity,
+                    local_identity.install_instance_id,
+                )
+            };
+            let default_host_id = format!("host-{}", machine_name.to_ascii_lowercase());
+            let default_device_id = machine_name.clone();
+            let (host_id, requested_device_id) = if let Some(state) = state.as_ref() {
+                installer_identity_retry::resolve_retry_identity(
+                    state,
+                    &machine_identity,
+                    &install_instance_id,
+                    default_host_id,
+                    default_device_id,
+                )?
+            } else {
+                (default_host_id, default_device_id)
+            };
             let request = ProvisionRequest {
                 activation_license: &activation_license,
                 expected_activation_license_kind: &profile,
@@ -743,13 +835,29 @@ fn run() -> Result<()> {
                 hostname: &hostname,
                 machine_identity: &machine_identity,
                 install_instance_id: &install_instance_id,
-                requested_device_id: &machine_name,
+                requested_device_id: &requested_device_id,
                 host_id: &host_id,
                 installer_version: env!("CARGO_PKG_VERSION"),
             };
             provisioning::provision_once(&paths.bundle_root, &api_base_url, &request)?;
+            if recover_existing_identity {
+                provisioning::restore_machine_identity(
+                    &paths.bundle_root,
+                    &provisioning::MachineIdentityState {
+                        machine_identity: machine_identity.clone(),
+                        install_instance_id: install_instance_id.clone(),
+                    },
+                )?;
+            }
             apply_license_assignment_to_runtime_config(&paths)?;
             println!("{{\"ok\":true,\"status\":\"PROVISIONED_WAITING_HEARTBEATS\"}}");
+            Ok(())
+        }
+        InstallerCommand::Repair { api_base_url } => {
+            let bundle_root = resolve_bundle_root(None)?;
+            let paths = BundlePaths::new(bundle_root)?;
+            provisioning::repair_once(&paths.bundle_root, &api_base_url)?;
+            println!("{{\"ok\":true,\"status\":\"REPAIRED_WAITING_HEARTBEATS\"}}");
             Ok(())
         }
         InstallerCommand::PreflightHost { fix } => {
@@ -7331,20 +7439,30 @@ mod tests {
 
     #[test]
     fn next_promotion_target_uses_progressive_ring_policy() {
-        assert_eq!(next_promotion_target_for_environment("dev"), Some("canary"));
+        let rings: Vec<String> = ["development", "canary", "staging", "production"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        for (current, expected) in [
+            ("dev", "canary"),
+            ("development", "canary"),
+            ("canary", "staging"),
+            ("staging", "production"),
+        ] {
+            assert_eq!(
+                next_promotion_target_for_environment(&rings, current),
+                Some(expected.to_string())
+            );
+        }
         assert_eq!(
-            next_promotion_target_for_environment("development"),
-            Some("canary")
+            next_promotion_target_for_environment(&rings, "production"),
+            None
         );
         assert_eq!(
-            next_promotion_target_for_environment("canary"),
-            Some("staging")
+            next_promotion_target_for_environment(&rings, "unknown"),
+            None
         );
-        assert_eq!(
-            next_promotion_target_for_environment("staging"),
-            Some("production")
-        );
-        assert_eq!(next_promotion_target_for_environment("production"), None);
+        assert_eq!(next_promotion_target_for_environment(&[], "dev"), None);
     }
 
     #[test]
