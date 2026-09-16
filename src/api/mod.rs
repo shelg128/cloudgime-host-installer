@@ -433,6 +433,7 @@ async fn get_quick_launch_target(
         HostId(summary.host_id),
         selected_app.id,
         "windows",
+        None,
     )
     .await?;
 

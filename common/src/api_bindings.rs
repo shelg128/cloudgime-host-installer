@@ -367,6 +367,7 @@ pub struct AndroidNativeSharedSessionInvite {
 pub struct PostAndroidNativeLaunchTokenResponse {
     pub launch_token: String,
     pub session_id: String,
+    pub handoff_binding_id: Option<String>,
     pub host_id: u32,
     pub app_id: u32,
     pub issued_at_unix_ms: u64,

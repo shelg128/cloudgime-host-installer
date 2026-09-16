@@ -34,6 +34,9 @@ pub mod password;
 pub mod storage;
 pub mod user;
 
+#[cfg(test)]
+mod native_ticket_security_tests;
+
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("the app got destroyed")]
@@ -209,6 +212,14 @@ pub struct AndroidNativeResolvedSession {
     pub user_id: UserId,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AndroidNativeRentalBindingRecord {
+    pub handoff_binding_id: String,
+    pub claim_id: String,
+    pub prepare_operation_id: Option<String>,
+    pub rental_session_id: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AndroidNativeLaunchTokenRecord {
     pub token_id: String,
@@ -220,6 +231,7 @@ pub struct AndroidNativeLaunchTokenRecord {
     pub issued_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
     pub consumed_at_unix_ms: Option<u64>,
+    pub rental_binding: Option<AndroidNativeRentalBindingRecord>,
     pub session_policy: common::api_bindings::AndroidNativeSessionPolicy,
     pub feature_profile: common::api_bindings::AndroidNativeFeatureProfile,
     pub host_binding: AndroidNativeHostBindingRecord,
@@ -237,6 +249,7 @@ pub struct AndroidNativeStreamTicketRecord {
     pub issued_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
     pub consumed_at_unix_ms: Option<u64>,
+    pub rental_binding: Option<AndroidNativeRentalBindingRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -273,6 +286,7 @@ pub struct AndroidNativeSessionLifecycleStateRecord {
     pub token_id: String,
     pub session_id: String,
     pub user_id: UserId,
+    pub rental_binding: Option<AndroidNativeRentalBindingRecord>,
     pub trust_bootstrap_status: String,
     pub session_status: String,
     pub hidden_state_status: String,
@@ -304,6 +318,28 @@ pub(crate) struct SharedPairStoreHost {
     address: String,
     http_port: u16,
     pair_info: storage::StorageHostPairInfo,
+}
+
+// Only explicitly known live states authorize new channels. This is an access
+// gate, not an OS receipt that existing video/processes have stopped.
+fn native_lifecycle_active(state: &AndroidNativeSessionLifecycleStateRecord) -> bool {
+    state.completed_at_unix_ms.is_none()
+        && matches!(state.session_status.as_str(), "issued" | "started")
+        && state.hidden_state_status != "revoking"
+}
+fn native_binding_active(
+    states: &HashMap<String, AndroidNativeSessionLifecycleStateRecord>,
+    session_id: &str,
+    token_id: &str,
+    user_id: UserId,
+) -> bool {
+    !session_id.trim().is_empty()
+        && states.get(session_id).is_some_and(|state| {
+            state.session_id == session_id
+                && state.token_id == token_id
+                && state.user_id == user_id
+                && native_lifecycle_active(state)
+        })
 }
 
 impl App {
@@ -568,6 +604,7 @@ impl App {
         app_id: AppId,
         host_binding: AndroidNativeHostBindingRecord,
         trust_bootstrap: AndroidNativeTrustBootstrapRecord,
+        rental_binding: Option<AndroidNativeRentalBindingRecord>,
     ) -> AndroidNativeLaunchTokenRecord {
         const TOKEN_TTL_MS: u64 = 300_000;
 
@@ -576,7 +613,7 @@ impl App {
         let session_id = format!("android-native-{}", Uuid::new_v4().to_simple());
         let record = AndroidNativeLaunchTokenRecord {
             token_id: token_id.clone(),
-            launch_token: token_id.clone(),
+            launch_token: format!("mlnatlaunch_{}", Uuid::new_v4().to_simple()),
             session_id,
             user_id,
             host_id,
@@ -584,6 +621,7 @@ impl App {
             issued_at_unix_ms: now,
             expires_at_unix_ms: now + TOKEN_TTL_MS,
             consumed_at_unix_ms: None,
+            rental_binding: rental_binding.clone(),
             session_policy: common::api_bindings::AndroidNativeSessionPolicy {
                 allow_add_host_ui: false,
                 token_managed: true,
@@ -600,7 +638,8 @@ impl App {
                 && value.consumed_at_unix_ms.is_none()
                 && !(value.user_id == user_id && value.host_id == host_id && value.app_id == app_id)
         });
-        tokens.insert(token_id, record.clone());
+        tokens.insert(record.launch_token.clone(), record.clone());
+        drop(tokens);
 
         let mut tickets = self.inner.android_native_stream_tickets.write().await;
         tickets.retain(|_, value| {
@@ -608,6 +647,7 @@ impl App {
                 && !(value.user_id == user_id && value.host_id == host_id && value.app_id == app_id)
         });
 
+        drop(tickets);
         let mut lifecycle = self.inner.android_native_session_lifecycle.write().await;
         lifecycle.retain(|_, value| {
             value.completed_at_unix_ms.is_none() || value.last_updated_unix_ms + TOKEN_TTL_MS > now
@@ -618,6 +658,7 @@ impl App {
                 token_id: record.token_id.clone(),
                 session_id: record.session_id.clone(),
                 user_id,
+                rental_binding,
                 trust_bootstrap_status: if record.trust_bootstrap.paired {
                     "paired_material_reused".to_string()
                 } else {
@@ -653,17 +694,12 @@ impl App {
 
     async fn android_native_session_allows_stream_access(&self, session_id: &str) -> bool {
         if session_id.trim().is_empty() {
-            return true;
+            return false;
         }
-
         let lifecycle = self.inner.android_native_session_lifecycle.read().await;
-        lifecycle.get(session_id).is_none_or(|state| {
-            state.completed_at_unix_ms.is_none()
-                && !matches!(
-                    state.session_status.as_str(),
-                    "ended" | "expired" | "failed" | "abandoned"
-                )
-        })
+        lifecycle
+            .get(session_id)
+            .is_some_and(native_lifecycle_active)
     }
 
     pub async fn consume_android_native_launch_token(
@@ -671,6 +707,7 @@ impl App {
         launch_token: &str,
     ) -> Result<AndroidNativeLaunchTokenRecord, AppError> {
         let now = unix_time_ms_now();
+        let lifecycle = self.inner.android_native_session_lifecycle.read().await;
         let mut tokens = self.inner.android_native_launch_tokens.write().await;
         let state = match tokens.get(launch_token) {
             Some(record) if record.expires_at_unix_ms <= now => 1_u8,
@@ -697,6 +734,14 @@ impl App {
                 let record = tokens
                     .get_mut(launch_token)
                     .ok_or(AppError::AndroidNativeLaunchTokenNotFound)?;
+                if !native_binding_active(
+                    &lifecycle,
+                    &record.session_id,
+                    &record.token_id,
+                    record.user_id,
+                ) {
+                    return Err(AppError::AndroidNativeSessionInactive);
+                }
                 record.consumed_at_unix_ms = Some(now);
                 let clone = record.clone();
                 tokens.retain(|_, value| value.expires_at_unix_ms > now);
@@ -718,14 +763,14 @@ impl App {
         let record = self
             .consume_android_native_launch_token(launch_token)
             .await?;
-        let stream_ticket = self.issue_android_native_stream_ticket(&record).await;
+        let stream_ticket = self.issue_android_native_stream_ticket(&record).await?;
         Ok((record, stream_ticket))
     }
 
     pub async fn issue_android_native_stream_ticket(
         &self,
         launch_record: &AndroidNativeLaunchTokenRecord,
-    ) -> AndroidNativeStreamTicketRecord {
+    ) -> Result<AndroidNativeStreamTicketRecord, AppError> {
         const STREAM_TICKET_TTL_MS: u64 = 8 * 60 * 60 * 1000;
 
         let now = unix_time_ms_now();
@@ -740,8 +785,18 @@ impl App {
             issued_at_unix_ms: now,
             expires_at_unix_ms: now + STREAM_TICKET_TTL_MS,
             consumed_at_unix_ms: None,
+            rental_binding: launch_record.rental_binding.clone(),
         };
 
+        let lifecycle = self.inner.android_native_session_lifecycle.read().await;
+        if !native_binding_active(
+            &lifecycle,
+            &record.session_id,
+            &record.token_id,
+            record.user_id,
+        ) {
+            return Err(AppError::AndroidNativeSessionInactive);
+        }
         let mut tickets = self.inner.android_native_stream_tickets.write().await;
         // A native direct session can have multiple authenticated channels
         // alive at once: main stream, microphone sidecar, and ticket refresh.
@@ -749,7 +804,7 @@ impl App {
         // cannot invalidate another channel in flight.
         tickets.retain(|_, value| value.expires_at_unix_ms > now);
         tickets.insert(stream_ticket, record.clone());
-        record
+        Ok(record)
     }
 
     pub async fn peek_android_native_stream_ticket(
@@ -757,6 +812,7 @@ impl App {
         stream_ticket: &str,
     ) -> Result<AndroidNativeStreamTicketRecord, AppError> {
         let now = unix_time_ms_now();
+        let lifecycle = self.inner.android_native_session_lifecycle.read().await;
         let mut tickets = self.inner.android_native_stream_tickets.write().await;
         tickets.retain(|_, value| value.expires_at_unix_ms > now);
 
@@ -772,6 +828,14 @@ impl App {
             return Err(AppError::AndroidNativeStreamTicketConsumed);
         }
 
+        if !native_binding_active(
+            &lifecycle,
+            &record.session_id,
+            &record.token_id,
+            record.user_id,
+        ) {
+            return Err(AppError::AndroidNativeSessionInactive);
+        }
         Ok(record)
     }
 
@@ -782,6 +846,7 @@ impl App {
         app_id: AppId,
     ) -> Result<AndroidNativeStreamTicketRecord, AppError> {
         let now = unix_time_ms_now();
+        let lifecycle = self.inner.android_native_session_lifecycle.read().await;
         let mut tickets = self.inner.android_native_stream_tickets.write().await;
         tickets.retain(|_, value| value.expires_at_unix_ms > now);
 
@@ -799,6 +864,14 @@ impl App {
             return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
         }
 
+        if !native_binding_active(
+            &lifecycle,
+            &record.session_id,
+            &record.token_id,
+            record.user_id,
+        ) {
+            return Err(AppError::AndroidNativeSessionInactive);
+        }
         record.consumed_at_unix_ms = Some(now);
         Ok(record.clone())
     }
@@ -809,6 +882,7 @@ impl App {
         host_id: HostId,
     ) -> Result<AndroidNativeStreamTicketRecord, AppError> {
         let now = unix_time_ms_now();
+        let lifecycle = self.inner.android_native_session_lifecycle.read().await;
         let mut tickets = self.inner.android_native_stream_tickets.write().await;
         tickets.retain(|_, value| value.expires_at_unix_ms > now);
 
@@ -824,6 +898,14 @@ impl App {
             return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
         }
 
+        if !native_binding_active(
+            &lifecycle,
+            &record.session_id,
+            &record.token_id,
+            record.user_id,
+        ) {
+            return Err(AppError::AndroidNativeSessionInactive);
+        }
         Ok(record)
     }
 
@@ -834,6 +916,7 @@ impl App {
         app_id: AppId,
     ) -> Result<AndroidNativeStreamTicketRecord, AppError> {
         let now = unix_time_ms_now();
+        let lifecycle = self.inner.android_native_session_lifecycle.read().await;
         let mut tickets = self.inner.android_native_stream_tickets.write().await;
         tickets.retain(|_, value| value.expires_at_unix_ms > now);
 
@@ -849,6 +932,14 @@ impl App {
             return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
         }
 
+        if !native_binding_active(
+            &lifecycle,
+            &record.session_id,
+            &record.token_id,
+            record.user_id,
+        ) {
+            return Err(AppError::AndroidNativeSessionInactive);
+        }
         Ok(record)
     }
 
@@ -859,104 +950,77 @@ impl App {
         session_id: Option<&str>,
     ) -> Result<AndroidNativeStreamTicketRecord, AppError> {
         let now = unix_time_ms_now();
-        let (source, reused_existing_ticket) = {
-            let mut tickets = self.inner.android_native_stream_tickets.write().await;
-            tickets.retain(|_, value| value.expires_at_unix_ms > now);
-
-            let direct_source = tickets.get(stream_ticket).cloned();
-            if direct_source.is_none()
-                && let Some(active_ticket) = tickets
-                    .values()
-                    .find(|value| {
-                        value.consumed_at_unix_ms.is_none()
-                            && token_id.is_none_or(|requested| value.token_id == requested)
-                            && session_id.is_none_or(|requested| value.session_id == requested)
-                    })
-                    .cloned()
-            {
-                (active_ticket, true)
-            } else {
-                let source = direct_source.ok_or(AppError::AndroidNativeStreamTicketNotFound)?;
-
-                if source.expires_at_unix_ms <= now {
-                    return Err(AppError::AndroidNativeStreamTicketExpired);
-                }
-                if token_id.is_some_and(|value| value != source.token_id) {
-                    return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
-                }
-                if session_id.is_some_and(|value| value != source.session_id) {
-                    return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
-                }
-
-                (source, false)
-            }
-        };
-
-        if !self
-            .android_native_session_allows_stream_access(&source.session_id)
-            .await
+        // A session/token identifier is NOT a credential. Never recover by
+        // scanning other tickets if the supplied bearer cannot be found.
+        // Hold the lifecycle read lock through insertion so revocation cannot
+        // interleave and leave a newly issued ticket after invalidation.
+        let lifecycle = self.inner.android_native_session_lifecycle.read().await;
+        let mut tickets = self.inner.android_native_stream_tickets.write().await;
+        tickets.retain(|_, value| value.expires_at_unix_ms > now);
+        let source = tickets
+            .get(stream_ticket)
+            .cloned()
+            .ok_or(AppError::AndroidNativeStreamTicketNotFound)?;
+        if source.expires_at_unix_ms <= now {
+            return Err(AppError::AndroidNativeStreamTicketExpired);
+        }
+        if token_id.is_some_and(|value| value != source.token_id)
+            || session_id.is_some_and(|value| value != source.session_id)
         {
-            self.invalidate_android_native_session_artifacts(&source.session_id)
-                .await;
+            return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
+        }
+        if !native_binding_active(
+            &lifecycle,
+            &source.session_id,
+            &source.token_id,
+            source.user_id,
+        ) {
             return Err(AppError::AndroidNativeSessionInactive);
         }
-
-        if reused_existing_ticket {
-            return Ok(source);
-        }
-
         const STREAM_TICKET_TTL_MS: u64 = 8 * 60 * 60 * 1000;
-
         let refreshed_ticket = format!("mlnatstream_{}", Uuid::new_v4().to_simple());
         let refreshed_record = AndroidNativeStreamTicketRecord {
             stream_ticket: refreshed_ticket.clone(),
-            token_id: source.token_id.clone(),
-            session_id: source.session_id.clone(),
+            token_id: source.token_id,
+            session_id: source.session_id,
             user_id: source.user_id,
             host_id: source.host_id,
             app_id: source.app_id,
             issued_at_unix_ms: now,
             expires_at_unix_ms: now + STREAM_TICKET_TTL_MS,
             consumed_at_unix_ms: None,
+            rental_binding: source.rental_binding.clone(),
         };
-
-        let mut tickets = self.inner.android_native_stream_tickets.write().await;
-        tickets.retain(|_, value| value.expires_at_unix_ms > now);
         tickets.insert(refreshed_ticket, refreshed_record.clone());
-
         Ok(refreshed_record)
     }
 
     pub async fn bootstrap_android_native_web_session_from_native_session(
         &self,
+        stream_ticket: &str,
         token_id: Option<&str>,
         session_id: &str,
     ) -> Result<AndroidNativeStreamTicketRecord, AppError> {
         let now = unix_time_ms_now();
+        let lifecycle = self.inner.android_native_session_lifecycle.read().await;
         let tickets = self.inner.android_native_stream_tickets.read().await;
-
+        // IDs constrain the bearer; they never replace proof of possession.
         let record = tickets
-            .values()
-            .find(|value| {
-                value.expires_at_unix_ms > now
-                    && value.session_id == session_id
-                    && token_id.is_none_or(|expected| value.token_id == expected)
-            })
-            .cloned()
+            .get(stream_ticket)
+            .filter(|record| record.expires_at_unix_ms > now)
             .ok_or(AppError::AndroidNativeStreamTicketNotFound)?;
-
-        drop(tickets);
-
-        if !self
-            .android_native_session_allows_stream_access(&record.session_id)
-            .await
-        {
-            self.invalidate_android_native_session_artifacts(&record.session_id)
-                .await;
+        if record.session_id != session_id || token_id.is_some_and(|id| id != record.token_id) {
+            return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
+        }
+        if !native_binding_active(
+            &lifecycle,
+            &record.session_id,
+            &record.token_id,
+            record.user_id,
+        ) {
             return Err(AppError::AndroidNativeSessionInactive);
         }
-
-        Ok(record)
+        Ok(record.clone())
     }
 
     pub async fn record_android_native_session_event(
@@ -1012,94 +1076,70 @@ impl App {
         Ok((event, event_count))
     }
 
+    // Resolve only by exact bearer. Accept launch token for initial bootstrap or
+    // stream ticket for later control; never search by public session/token IDs.
+    async fn resolve_android_native_credential(
+        &self,
+        credential: Option<&str>,
+        token_id: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Result<AndroidNativeResolvedSession, AppError> {
+        let credential = credential
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(AppError::Unauthorized)?;
+        let now = unix_time_ms_now();
+        let launch = {
+            let tokens = self.inner.android_native_launch_tokens.read().await;
+            tokens
+                .get(credential)
+                .filter(|value| value.expires_at_unix_ms > now)
+                .cloned()
+        };
+        let matched = if let Some(record) = launch {
+            AndroidNativeResolvedSession {
+                token_id: record.token_id,
+                session_id: record.session_id,
+                user_id: record.user_id,
+            }
+        } else {
+            let tickets = self.inner.android_native_stream_tickets.read().await;
+            let record = tickets
+                .get(credential)
+                .filter(|value| value.expires_at_unix_ms > now)
+                .ok_or(AppError::Unauthorized)?;
+            AndroidNativeResolvedSession {
+                token_id: record.token_id.clone(),
+                session_id: record.session_id.clone(),
+                user_id: record.user_id,
+            }
+        };
+        if token_id.is_some_and(|value| value != matched.token_id)
+            || session_id.is_some_and(|value| value != matched.session_id)
+        {
+            return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
+        }
+        Ok(matched)
+    }
+
     pub async fn resolve_android_native_session(
         &self,
         launch_token: Option<&str>,
         token_id: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<AndroidNativeResolvedSession, AppError> {
-        if launch_token.is_none() && session_id.is_none() {
-            return Err(AppError::BadRequest);
+        let matched = self
+            .resolve_android_native_credential(launch_token, token_id, session_id)
+            .await?;
+        let lifecycle = self.inner.android_native_session_lifecycle.read().await;
+        if !native_binding_active(
+            &lifecycle,
+            &matched.session_id,
+            &matched.token_id,
+            matched.user_id,
+        ) {
+            return Err(AppError::AndroidNativeSessionInactive);
         }
-
-        let now = unix_time_ms_now();
-        #[derive(Clone)]
-        struct EventMatchedSession {
-            token_id: String,
-            session_id: String,
-            user_id: UserId,
-        }
-
-        let mut tokens = self.inner.android_native_launch_tokens.write().await;
-        tokens.retain(|_, value| value.expires_at_unix_ms > now);
-
-        let matched_from_launch = if let Some(launch_token) = launch_token {
-            tokens.get(launch_token).cloned()
-        } else {
-            tokens
-                .values()
-                .find(|value| {
-                    session_id.is_some_and(|session_id| value.session_id == session_id)
-                        && token_id.is_none_or(|token_id| value.token_id == token_id)
-                })
-                .cloned()
-        };
-        drop(tokens);
-        let matched_from_launch = matched_from_launch.map(|record| EventMatchedSession {
-            token_id: record.token_id,
-            session_id: record.session_id,
-            user_id: record.user_id,
-        });
-
-        let matched_from_ticket = if matched_from_launch.is_none()
-            && let Some(session_id) = session_id
-        {
-            let mut tickets = self.inner.android_native_stream_tickets.write().await;
-            tickets.retain(|_, value| value.expires_at_unix_ms > now);
-            tickets
-                .values()
-                .find(|value| {
-                    value.session_id == session_id
-                        && token_id.is_none_or(|token_id| value.token_id == token_id)
-                })
-                .cloned()
-                .map(|record| EventMatchedSession {
-                    token_id: record.token_id,
-                    session_id: record.session_id,
-                    user_id: record.user_id,
-                })
-        } else {
-            None
-        };
-
-        let matched_from_lifecycle = if matched_from_launch.is_none()
-            && matched_from_ticket.is_none()
-            && let Some(session_id) = session_id
-        {
-            let lifecycle = self.inner.android_native_session_lifecycle.read().await;
-            lifecycle
-                .get(session_id)
-                .filter(|value| token_id.is_none_or(|token_id| value.token_id == token_id))
-                .cloned()
-                .map(|record| EventMatchedSession {
-                    token_id: record.token_id,
-                    session_id: record.session_id,
-                    user_id: record.user_id,
-                })
-        } else {
-            None
-        };
-
-        let matched = matched_from_launch
-            .or(matched_from_ticket)
-            .or(matched_from_lifecycle)
-            .ok_or(AppError::AndroidNativeLaunchTokenNotFound)?;
-
-        Ok(AndroidNativeResolvedSession {
-            token_id: matched.token_id,
-            session_id: matched.session_id,
-            user_id: matched.user_id,
-        })
+        Ok(matched)
     }
 
     pub async fn update_android_native_session_lifecycle(
@@ -1117,119 +1157,56 @@ impl App {
         ),
         AppError,
     > {
-        if launch_token.is_none() && session_id.is_none() {
+        let matched = self
+            .resolve_android_native_credential(launch_token, token_id, session_id)
+            .await?;
+        let now = unix_time_ms_now();
+
+        // Client telemetry may advance a known live lifecycle, never recreate
+        // missing authorization state or resurrect a revoking/terminal session.
+        // Only the initial token issuer creates lifecycle entries.
+        let mut lifecycle = self.inner.android_native_session_lifecycle.write().await;
+        let state = lifecycle
+            .get_mut(&matched.session_id)
+            .ok_or(AppError::AndroidNativeSessionInactive)?;
+        let terminal_action = matches!(
+            action.as_str(),
+            "session_revoked"
+                | "session_expired_cleanup"
+                | "session_failed_cleanup"
+                | "session_abandoned_cleanup"
+        );
+        if state.session_id != matched.session_id
+            || state.token_id != matched.token_id
+            || state.user_id != matched.user_id
+            || state.completed_at_unix_ms.is_some()
+            || !matches!(state.session_status.as_str(), "issued" | "started")
+            || (state.hidden_state_status == "revoking" && !terminal_action)
+        {
+            return Err(AppError::AndroidNativeSessionInactive);
+        }
+        if !matches!(
+            action.as_str(),
+            "trust_bootstrap_staged"
+                | "trust_bootstrap_ready"
+                | "session_started"
+                | "session_revoke_requested"
+                | "session_revoked"
+                | "session_expired_cleanup"
+                | "session_failed_cleanup"
+                | "session_abandoned_cleanup"
+        ) {
             return Err(AppError::BadRequest);
         }
 
-        let now = unix_time_ms_now();
-        #[derive(Clone)]
-        struct LifecycleMatchedSession {
-            token_id: String,
-            session_id: String,
-            user_id: UserId,
-            issued_at_unix_ms: u64,
-            trust_bootstrap_paired: bool,
-        }
-
-        let mut tokens = self.inner.android_native_launch_tokens.write().await;
-        tokens.retain(|_, value| value.expires_at_unix_ms > now);
-
-        let matched_from_launch = if let Some(launch_token) = launch_token {
-            tokens.get(launch_token).cloned()
-        } else {
-            tokens
-                .values()
-                .find(|value| {
-                    session_id.is_some_and(|session_id| value.session_id == session_id)
-                        && token_id.is_none_or(|token_id| value.token_id == token_id)
-                })
-                .cloned()
-        };
-        drop(tokens);
-
-        let matched_from_launch = matched_from_launch.map(|record| LifecycleMatchedSession {
-            token_id: record.token_id,
-            session_id: record.session_id,
-            user_id: record.user_id,
-            issued_at_unix_ms: record.issued_at_unix_ms,
-            trust_bootstrap_paired: record.trust_bootstrap.paired,
-        });
-
-        let matched_from_ticket = if matched_from_launch.is_none()
-            && let Some(session_id) = session_id
-        {
-            let mut tickets = self.inner.android_native_stream_tickets.write().await;
-            tickets.retain(|_, value| value.expires_at_unix_ms > now);
-            tickets
-                .values()
-                .find(|value| {
-                    value.session_id == session_id
-                        && token_id.is_none_or(|token_id| value.token_id == token_id)
-                })
-                .cloned()
-                .map(|record| LifecycleMatchedSession {
-                    token_id: record.token_id,
-                    session_id: record.session_id,
-                    user_id: record.user_id,
-                    issued_at_unix_ms: record.issued_at_unix_ms,
-                    trust_bootstrap_paired: true,
-                })
-        } else {
-            None
-        };
-
-        let matched_from_lifecycle = if matched_from_launch.is_none()
-            && matched_from_ticket.is_none()
-            && let Some(session_id) = session_id
-        {
-            let lifecycle = self.inner.android_native_session_lifecycle.read().await;
-            lifecycle
-                .get(session_id)
-                .filter(|value| token_id.is_none_or(|token_id| value.token_id == token_id))
-                .cloned()
-                .map(|record| LifecycleMatchedSession {
-                    token_id: record.token_id,
-                    session_id: record.session_id,
-                    user_id: record.user_id,
-                    issued_at_unix_ms: record.last_updated_unix_ms,
-                    trust_bootstrap_paired: record.trust_bootstrap_status != "bootstrap_required",
-                })
-        } else {
-            None
-        };
-
-        let matched = matched_from_launch
-            .or(matched_from_ticket)
-            .or(matched_from_lifecycle)
-            .ok_or(AppError::AndroidNativeLaunchTokenNotFound)?;
-
-        let mut lifecycle = self.inner.android_native_session_lifecycle.write().await;
-        let state = lifecycle
-            .entry(matched.session_id.clone())
-            .or_insert_with(|| AndroidNativeSessionLifecycleStateRecord {
-                token_id: matched.token_id.clone(),
-                session_id: matched.session_id.clone(),
-                user_id: matched.user_id,
-                trust_bootstrap_status: if matched.trust_bootstrap_paired {
-                    "paired_material_reused".to_string()
-                } else {
-                    "bootstrap_required".to_string()
-                },
-                session_status: "issued".to_string(),
-                hidden_state_status: "not_staged".to_string(),
-                last_action: "token_issued".to_string(),
-                last_reason: None,
-                last_updated_unix_ms: matched.issued_at_unix_ms,
-                completed_at_unix_ms: None,
-            });
-
         match action.as_str() {
             "trust_bootstrap_staged" => {
-                state.trust_bootstrap_status = if matched.trust_bootstrap_paired {
-                    "staged_reused_pair".to_string()
-                } else {
-                    "staged_pending_pair".to_string()
-                };
+                state.trust_bootstrap_status =
+                    if state.trust_bootstrap_status != "bootstrap_required" {
+                        "staged_reused_pair".to_string()
+                    } else {
+                        "staged_pending_pair".to_string()
+                    };
                 state.hidden_state_status = "staged".to_string();
             }
             "trust_bootstrap_ready" => {

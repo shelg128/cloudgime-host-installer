@@ -38,6 +38,9 @@ use tokio::{
 use url::Url;
 
 use crate::api::auth::build_cookie;
+#[cfg(test)]
+#[path = "native_control_security_tests.rs"]
+mod native_control_security_tests;
 use crate::api::stream::{
     append_host_stream_trace, cleanup_android_native_stream_session,
     remember_prewarmed_display_session, run_display_helper_command,
@@ -51,6 +54,109 @@ use crate::app::{
     shared_session_attach_available_now, shared_session_status_message,
     user::AuthenticatedUser,
 };
+
+// Header takes precedence; invalid explicit Authorization never falls back to
+// body identifiers. Body credential retained for existing initial launch clients.
+fn native_control_credential(req: &HttpRequest, body: Option<&str>) -> Result<String, AppError> {
+    if let Some(header) = req.headers().get("authorization") {
+        let value = header.to_str().map_err(|_| AppError::Unauthorized)?;
+        let bearer = value
+            .strip_prefix("Bearer ")
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(AppError::Unauthorized)?;
+        return Ok(bearer.trim().to_string());
+    }
+    body.filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .ok_or(AppError::Unauthorized)
+}
+
+// A loopback address is a transport detail, not backend authentication. Validate
+// the Host runtime bearer before any default-user lookup, pairing or token issue.
+fn authorize_host_tunnel(
+    req: &HttpRequest,
+    load_runtime_credential: impl FnOnce() -> Result<String, AppError>,
+) -> Result<(), AppError> {
+    use sha2::{Digest, Sha256};
+    if !request_origin_is_loopback(req) {
+        return Err(AppError::Unauthorized);
+    }
+    let mut headers = req.headers().get_all("authorization");
+    let value = headers.next().ok_or(AppError::Unauthorized)?;
+    if headers.next().is_some() {
+        return Err(AppError::Unauthorized);
+    }
+    let header = value.to_str().map_err(|_| AppError::Unauthorized)?;
+    let presented = header
+        .strip_prefix("Bearer ")
+        .ok_or(AppError::Unauthorized)?;
+    if presented.is_empty() || presented.len() > 2048 || presented.chars().any(char::is_whitespace)
+    {
+        return Err(AppError::Unauthorized);
+    }
+    let expected = load_runtime_credential()?;
+    if expected.is_empty() || expected.len() > 2048 || expected.chars().any(char::is_whitespace) {
+        return Err(AppError::Unauthorized);
+    }
+    let actual_hash = Sha256::digest(presented.as_bytes());
+    let expected_hash = Sha256::digest(expected.as_bytes());
+    if !openssl::memcmp::eq(actual_hash.as_ref(), expected_hash.as_ref()) {
+        return Err(AppError::Unauthorized);
+    }
+    Ok(())
+}
+
+fn installed_host_runtime_credential() -> Result<String, AppError> {
+    // provisioning::read_component_credential resolves the SAME protected store
+    // used by installer/supervisor. Do not fall back to activation/token hints or
+    // an empty default credential if an unprovisioned server starts.
+    let program_data = std::env::var_os("ProgramData").ok_or(AppError::Unauthorized)?;
+    let root = PathBuf::from(program_data);
+    if !root.is_absolute() {
+        return Err(AppError::Unauthorized);
+    }
+    crate::provisioning::read_component_credential(&root.join("CloudGime").join("Host"), "host_app")
+        .map_err(|_| AppError::Unauthorized)
+}
+
+fn validate_tunnel_rental_binding(
+    stream_profile: Option<&str>,
+    app_id: Option<u32>,
+    binding: Option<AndroidNativeRentalBindingRequest>,
+) -> Result<Option<crate::app::AndroidNativeRentalBindingRecord>, AppError> {
+    let Some(binding) = binding else {
+        return Ok(None);
+    };
+    // Only backend-issued prelogin tunnel launches can carry a rental binding.
+    if stream_profile != Some("sentinel_prelogin")
+        || app_id.is_some_and(|id| id != crate::stream_controller::SENTINEL_PRELOGIN_APP_ID)
+        || binding.handoff_binding_id.len() != 36
+        || uuid::Uuid::parse_str(&binding.handoff_binding_id).is_err()
+        || binding.claim_id.trim().is_empty()
+        || binding.claim_id.len() > 256
+        || binding.claim_id != binding.claim_id.trim()
+        || binding.claim_id.chars().any(char::is_control)
+        || binding.prepare_operation_id.as_ref().is_some_and(|v| {
+            v.len() < 16
+                || v.len() > 128
+                || !v
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
+        || binding.rental_session_id.as_ref().is_some_and(|v| {
+            v.trim().is_empty() || v.len() > 256 || v != v.trim() || v.chars().any(char::is_control)
+        })
+        || binding.prepare_operation_id.is_some() != binding.rental_session_id.is_some()
+    {
+        return Err(AppError::BadRequest);
+    }
+    Ok(Some(crate::app::AndroidNativeRentalBindingRecord {
+        handoff_binding_id: binding.handoff_binding_id.trim().to_string(),
+        claim_id: binding.claim_id,
+        prepare_operation_id: binding.prepare_operation_id,
+        rental_session_id: binding.rental_session_id,
+    }))
+}
 
 fn parse_host_ip(address: &str) -> Option<IpAddr> {
     address.trim().parse().ok()
@@ -563,20 +669,35 @@ struct PostAndroidNativeBootstrapWebSessionRequest {
 
 #[derive(Debug, Deserialize)]
 struct PostAndroidNativeBootstrapWebSessionFromNativeSessionRequest {
+    #[serde(default)]
+    stream_ticket: Option<String>,
     token_id: Option<String>,
     session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AndroidNativeRentalBindingRequest {
+    handoff_binding_id: String,
+    claim_id: String,
+    prepare_operation_id: Option<String>,
+    rental_session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PostAndroidNativeTunnelLaunchTokenRequest {
     host_id: Option<u32>,
     app_id: Option<u32>,
+    #[serde(default, rename = "streamProfile")]
+    stream_profile: Option<String>,
     #[serde(default)]
     native_shell: Option<String>,
     #[serde(default)]
     client_os: Option<String>,
     #[serde(default)]
     client_platform: Option<String>,
+    #[serde(default, rename = "rentalBinding")]
+    rental_binding: Option<AndroidNativeRentalBindingRequest>,
 }
 
 #[derive(Debug, Serialize)]
@@ -717,11 +838,11 @@ fn pick_effective_launch_app_id(
     apps: Vec<crate::app::host::App>,
     requested_app_id: AppId,
 ) -> Result<AppId, AppError> {
+    // Requested app is authoritative. A pre-login Sentinel request must never
+    // silently fall back to Desktop, otherwise billing/access can be bypassed.
     let selected_app = apps
         .iter()
-        .find(|app| app.title.eq_ignore_ascii_case("Desktop"))
-        .or_else(|| apps.iter().find(|app| app.id == requested_app_id))
-        .or_else(|| apps.first())
+        .find(|app| app.id == requested_app_id)
         .ok_or(AppError::BadRequest)?;
 
     Ok(selected_app.id)
@@ -1196,6 +1317,7 @@ pub(crate) async fn issue_android_native_launch_response(
     host_id: HostId,
     requested_app_id: AppId,
     native_shell: &str,
+    rental_binding: Option<crate::app::AndroidNativeRentalBindingRecord>,
 ) -> Result<PostAndroidNativeLaunchTokenResponse, AppError> {
     let app_id = pick_effective_launch_app_id(host.list_apps(user).await?, requested_app_id)?;
     let detailed = host.detailed_host(user).await?;
@@ -1259,6 +1381,7 @@ pub(crate) async fn issue_android_native_launch_response(
             app_id,
             host_binding,
             trust_bootstrap,
+            rental_binding,
         )
         .await;
 
@@ -1281,6 +1404,10 @@ pub(crate) async fn issue_android_native_launch_response(
     let mut response = PostAndroidNativeLaunchTokenResponse {
         launch_token: record.launch_token.clone(),
         session_id: record.session_id.clone(),
+        handoff_binding_id: record
+            .rental_binding
+            .as_ref()
+            .map(|binding| binding.handoff_binding_id.clone()),
         host_id: record.host_id.0,
         app_id: record.app_id.0,
         issued_at_unix_ms: record.issued_at_unix_ms,
@@ -1366,6 +1493,7 @@ pub async fn post_android_native_launch_token(
         host_id,
         requested_app_id,
         native_shell,
+        None,
     )
     .await?;
 
@@ -1378,12 +1506,24 @@ pub async fn post_android_native_launch_token_from_tunnel(
     req: HttpRequest,
     Json(request): Json<PostAndroidNativeTunnelLaunchTokenRequest>,
 ) -> Result<Json<PostAndroidNativeLaunchTokenResponse>, AppError> {
-    let requested_app_id = AppId(request.app_id.unwrap_or_default());
+    let requested_app_id = AppId(
+        crate::stream_controller::resolve_tunnel_launch_app(
+            request.stream_profile.as_deref(),
+            request.app_id,
+        )
+        .map_err(|_| AppError::BadRequest)?,
+    );
     let native_shell = normalize_native_shell(
         request.native_shell.as_deref(),
         request.client_os.as_deref(),
         request.client_platform.as_deref(),
     );
+    authorize_host_tunnel(&req, installed_host_runtime_credential)?;
+    let rental_binding = validate_tunnel_rental_binding(
+        request.stream_profile.as_deref(),
+        request.app_id,
+        request.rental_binding,
+    )?;
     let mut user = app.user_by_auth(UserAuth::None).await?;
     let (host_id, mut host) = resolve_tunnel_launch_host(&mut user, request.host_id).await?;
     let response = issue_android_native_launch_response(
@@ -1394,6 +1534,7 @@ pub async fn post_android_native_launch_token_from_tunnel(
         host_id,
         requested_app_id,
         native_shell,
+        rental_binding,
     )
     .await?;
 
@@ -1488,10 +1629,13 @@ pub async fn post_android_native_bootstrap_web_session(
 #[post("/android-native/bootstrap-web-session-from-native-session")]
 pub async fn post_android_native_bootstrap_web_session_from_native_session(
     app: Data<App>,
+    req: HttpRequest,
     Json(request): Json<PostAndroidNativeBootstrapWebSessionFromNativeSessionRequest>,
 ) -> Result<HttpResponse, AppError> {
+    let credential = native_control_credential(&req, request.stream_ticket.as_deref())?;
     let stream_record = app
         .bootstrap_android_native_web_session_from_native_session(
+            &credential,
             request.token_id.as_deref(),
             &request.session_id,
         )
@@ -1631,11 +1775,13 @@ pub async fn post_android_native_refresh_stream_ticket(
 #[post("/android-native/display-control")]
 pub async fn post_android_native_display_control(
     app: Data<App>,
+    req: HttpRequest,
     Json(request): Json<PostAndroidNativeDisplayControlRequest>,
 ) -> Result<Json<PostAndroidNativeDisplayControlResponse>, AppError> {
+    let credential = native_control_credential(&req, request.launch_token.as_deref())?;
     let resolved = app
         .resolve_android_native_session(
-            request.launch_token.as_deref(),
+            Some(credential.as_str()),
             request.token_id.as_deref(),
             request.session_id.as_deref(),
         )
@@ -1771,7 +1917,7 @@ pub async fn post_android_native_display_control(
     if let Ok(helper_result) = &mut result {
         let _ = app
             .record_android_native_session_event(
-                request.launch_token.as_deref(),
+                Some(credential.as_str()),
                 Some(resolved.token_id.as_str()),
                 Some(resolved.session_id.as_str()),
                 "windows_native_display_control".to_string(),
@@ -1834,11 +1980,13 @@ pub async fn post_android_native_display_control(
 #[post("/android-native/session-event")]
 pub async fn post_android_native_session_event(
     app: Data<App>,
+    req: HttpRequest,
     Json(request): Json<PostAndroidNativeSessionEventRequest>,
 ) -> Result<Json<PostAndroidNativeSessionEventResponse>, AppError> {
+    let credential = native_control_credential(&req, request.launch_token.as_deref())?;
     let (event, event_count) = app
         .record_android_native_session_event(
-            request.launch_token.as_deref(),
+            Some(credential.as_str()),
             request.token_id.as_deref(),
             request.session_id.as_deref(),
             request.event_name,
@@ -1871,8 +2019,10 @@ pub async fn post_android_native_session_event(
 #[post("/android-native/session-lifecycle")]
 pub async fn post_android_native_session_lifecycle(
     app: Data<App>,
+    req: HttpRequest,
     Json(request): Json<PostAndroidNativeSessionLifecycleRequest>,
 ) -> Result<Json<PostAndroidNativeSessionLifecycleResponse>, AppError> {
+    let credential = native_control_credential(&req, request.launch_token.as_deref())?;
     let cleanup_action = matches!(
         request.action.as_str(),
         "session_revoked"
@@ -1886,7 +2036,7 @@ pub async fn post_android_native_session_lifecycle(
         .unwrap_or_else(|| request.action.clone());
     let (event, lifecycle_state) = app
         .update_android_native_session_lifecycle(
-            request.launch_token.as_deref(),
+            Some(credential.as_str()),
             request.token_id.as_deref(),
             request.session_id.as_deref(),
             request.action,
@@ -1898,7 +2048,11 @@ pub async fn post_android_native_session_lifecycle(
     if cleanup_action {
         let cleanup_session_id = event.session_id.clone();
         tokio::spawn(async move {
-            cleanup_android_native_stream_session(&cleanup_session_id, &cleanup_reason).await;
+            if let Err(error) =
+                cleanup_android_native_stream_session(&cleanup_session_id, &cleanup_reason).await
+            {
+                log::warn!("native session child cleanup not verified: {error}");
+            }
         });
     }
 

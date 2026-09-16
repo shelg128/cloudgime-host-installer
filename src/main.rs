@@ -44,6 +44,10 @@ mod web;
 
 mod cli;
 mod human_json;
+mod native_stream_scope;
+#[path = "provisioning.rs"]
+mod provisioning;
+mod stream_controller;
 
 #[actix_web::main]
 async fn main() {
