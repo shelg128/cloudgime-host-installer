@@ -251,14 +251,26 @@ impl AuthenticatedUser {
     }
 
     pub async fn host_unique_id(&mut self) -> Result<String, AppError> {
-        if self.is_default_user().await? {
+        let raw = if self.is_default_user().await? {
             let app = self.app.access()?;
-            return Ok(app.config.moonlight.pair_device_name.clone());
-        }
+            app.config.moonlight.pair_device_name.clone()
+        } else {
+            self.storage_user().await?.client_unique_id.clone()
+        };
 
-        let user = self.storage_user().await?;
-
-        Ok(user.client_unique_id.clone())
+        // Moonlight puts this identifier in query parameters on every host request.
+        // Keep the stored identity unchanged, but provide a URI-safe value to clients.
+        let safe: String = raw
+            .chars()
+            .filter(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+            })
+            .collect();
+        Ok(if safe.is_empty() {
+            "cloudgime-user".to_string()
+        } else {
+            safe.chars().take(64).collect()
+        })
     }
 
     pub async fn hosts(&mut self) -> Result<Vec<Host>, AppError> {

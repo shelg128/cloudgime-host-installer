@@ -39,11 +39,37 @@ mod hyperlike {
             }
             self.is_first = false;
 
-            self.string.push_str(param.key);
+            let encoded_key: String = form_urlencoded::byte_serialize(param.key.as_bytes()).collect();
+            let encoded_value: String =
+                form_urlencoded::byte_serialize(param.value.as_bytes()).collect();
+            self.string.push_str(&encoded_key);
             self.string.push('=');
-            self.string.push_str(param.value);
+            self.string.push_str(&encoded_value);
 
             Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{QueryBuilder, QueryParam, StringQueryBuilder};
+
+        #[test]
+        fn query_builder_percent_encodes_pairing_values() {
+            let mut encoded = String::new();
+            let mut builder = StringQueryBuilder {
+                is_first: true,
+                string: &mut encoded,
+            };
+
+            builder
+                .append(QueryParam {
+                    key: "device name",
+                    value: "Cloudgime Host & Web",
+                })
+                .unwrap();
+
+            assert_eq!(encoded, "device%20name=Cloudgime%20Host%20%26%20Web");
         }
     }
 

@@ -104,7 +104,7 @@ license = { workspace = true }
 default-run = "web-server"
 
 [dependencies]
-moonlight-common = { workspace = true }
+moonlight-common = { workspace = true, features = ["openssl"] }
 common = { workspace = true }
 
 # TODO: remove when cross-rs compiles, fix openssl versions

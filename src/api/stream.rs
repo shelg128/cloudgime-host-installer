@@ -76,6 +76,7 @@ use windows_sys::Win32::{
 static ACTIVE_STREAM_CHILD: LazyLock<Mutex<Option<Arc<Mutex<Child>>>>> =
     LazyLock::new(|| Mutex::new(None));
 static ACTIVE_STREAM_GENERATION: AtomicU64 = AtomicU64::new(0);
+static ACTIVE_NATIVE_CONNECTION_ID: AtomicU64 = AtomicU64::new(0);
 static ACTIVE_MIC_SIDECAR_CHILD: LazyLock<Mutex<Option<Arc<Mutex<Child>>>>> =
     LazyLock::new(|| Mutex::new(None));
 static ACTIVE_WINDOW_WATCH_CHILD: LazyLock<Mutex<Option<Arc<Mutex<Child>>>>> =
@@ -844,6 +845,21 @@ fn sanitize_trace_preview(value: &str, max_len: usize) -> String {
     }
 }
 
+fn sanitize_moonlight_client_unique_id(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+        .collect();
+
+    if sanitized.is_empty() {
+        "cloudgime-user".to_string()
+    } else {
+        sanitized.chars().take(64).collect()
+    }
+}
+
 fn now_unix_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1588,7 +1604,7 @@ fn apply_legacy_nvenc_stream_limits(
     packet_size: &mut u32,
     preserve_surface: bool,
 ) -> bool {
-    let mut changed = false;
+    let mut changed = clamp_web_nvenc_surface_to_1080p(width, height);
 
     if !preserve_surface && clamp_legacy_nvenc_surface(width, height, *fps) {
         changed = true;
@@ -1613,6 +1629,39 @@ fn apply_legacy_nvenc_stream_limits(
     }
 
     changed
+}
+
+// Browser WebRTC clients can report a portrait surface that Moonlight classifies
+// as 4K. Keep NVENC requests in a tested 1080p envelope before stream startup.
+fn clamp_web_nvenc_surface_to_1080p(width: &mut u32, height: &mut u32) -> bool {
+    let original_width = *width;
+    let original_height = *height;
+    if original_width == 0 || original_height == 0 {
+        return false;
+    }
+
+    const MAX_LONG_EDGE: u32 = 1920;
+    const MAX_SHORT_EDGE: u32 = 1080;
+    let long_edge = original_width.max(original_height);
+    let short_edge = original_width.min(original_height);
+    if long_edge <= MAX_LONG_EDGE && short_edge <= MAX_SHORT_EDGE {
+        return false;
+    }
+
+    let scale = f32::min(
+        MAX_LONG_EDGE as f32 / long_edge as f32,
+        MAX_SHORT_EDGE as f32 / short_edge as f32,
+    );
+    let quantize = |value: f32| -> u32 { ((value.max(16.0) / 16.0).floor() as u32 * 16).max(16) };
+    let next_width = quantize(original_width as f32 * scale);
+    let next_height = quantize(original_height as f32 * scale);
+    if next_width == original_width && next_height == original_height {
+        return false;
+    }
+
+    *width = next_width;
+    *height = next_height;
+    true
 }
 
 fn clamp_legacy_nvenc_surface(width: &mut u32, height: &mut u32, _requested_fps: u32) -> bool {
@@ -2483,62 +2532,20 @@ async fn cleanup_bundle_stream_processes(session_token: &str) {
     cleanup_staged_runtime_files(session_token);
 }
 
-#[cfg(windows)]
-pub(crate) async fn cleanup_android_native_stream_session(session_token: &str, reason: &str) {
-    if session_token.trim().is_empty() {
-        return;
-    }
-
-    append_host_stream_trace(&format!(
-        "ANDROID_NATIVE_SESSION_CLEANUP_REQUEST token={} reason={}",
-        session_token,
-        sanitize_trace_value(reason)
-    ));
-    note_host_lifecycle_phase("recovering", "android_native_session_cleanup");
-    cleanup_bundle_stream_processes(session_token).await;
-
-    if should_skip_prepared_stream_restore_after_session_cleanup() {
-        append_host_stream_trace(&format!(
-            "ANDROID_NATIVE_SESSION_CLEANUP_DISPLAY_RESTORE_SKIPPED token={} reason=mtt_vdd_cleanup_invariant",
-            session_token
-        ));
-    } else {
-        match restore_prepared_stream_display(session_token).await {
-            Ok(result) => {
-                append_host_stream_trace(&format!(
-                    "ANDROID_NATIVE_SESSION_CLEANUP_DISPLAY_RESTORE token={} restored={} skipped={} reason={}",
-                    session_token,
-                    result.restored,
-                    result.skipped,
-                    sanitize_trace_value(&result.reason)
-                ));
-            }
-            Err(err) => {
-                warn!("[Stream]: android native cleanup display restore failed: {err}");
-                append_host_stream_trace(&format!(
-                    "ANDROID_NATIVE_SESSION_CLEANUP_DISPLAY_RESTORE_FAILED token={} error={}",
-                    session_token,
-                    sanitize_trace_value(&err)
-                ));
-            }
-        }
-    }
-
-    note_host_lifecycle_phase("ready", "android_native_session_cleanup_completed");
-    append_host_stream_trace(&format!(
-        "ANDROID_NATIVE_SESSION_CLEANUP_COMPLETED token={} reason={}",
-        session_token,
-        sanitize_trace_value(reason)
-    ));
-}
-
-#[cfg(not(windows))]
-pub(crate) async fn cleanup_android_native_stream_session(session_token: &str, reason: &str) {
-    append_host_stream_trace(&format!(
-        "ANDROID_NATIVE_SESSION_CLEANUP_REQUEST token={} reason={} platform=non_windows",
-        session_token,
-        sanitize_trace_value(reason)
-    ));
+pub(crate) async fn cleanup_android_native_stream_session(
+    session_id: &str,
+    _reason: &str,
+) -> Result<usize, String> {
+    // A native lifecycle event is NOT permission to cancel another session,
+    // restart Sunshine, scan/kick all bundle processes or restore a global
+    // desktop layout. Only previously registered child handles are targeted.
+    // This result is direct-child exit evidence, NOT a rental cleanup receipt.
+    let stopped = crate::native_stream_scope::NATIVE_STREAM_SCOPES
+        .stop(session_id)
+        .await?;
+    clear_shared_player2_joiner(session_id, None).await;
+    clear_shared_player2_bridge(session_id).await;
+    Ok(stopped)
 }
 
 #[cfg(windows)]
@@ -4698,6 +4705,70 @@ async fn apply_dynamic_display_match(
     .await
 }
 
+async fn reassert_stream_display_after_capture_refresh(
+    session_token: &str,
+    width: u32,
+    height: u32,
+    fps: u32,
+    reason: &str,
+) -> Result<DynamicDisplayResult, String> {
+    append_host_stream_trace(&format!(
+        "DISPLAY_REASSERT_AFTER_CAPTURE_REFRESH token={} stage=begin reason={} requested={}x{}@{}",
+        session_token,
+        sanitize_trace_value(reason),
+        width,
+        height,
+        fps
+    ));
+
+    match apply_dynamic_display_match(session_token, width, height, fps).await {
+        Ok(result) => {
+            if let Some(applied) = result.applied.as_ref() {
+                append_host_stream_trace(&format!(
+                    "DISPLAY_REASSERT_AFTER_CAPTURE_REFRESH token={} stage=ok reason={} applied={}x{}@{} changed={} skipped={} capture_changed={} target_changed={} display={} detail={}",
+                    session_token,
+                    sanitize_trace_value(reason),
+                    applied.width,
+                    applied.height,
+                    applied.frequency,
+                    result.changed,
+                    result.skipped,
+                    result.sunshine_capture_changed,
+                    result.sunshine_capture_target_changed,
+                    sanitize_trace_value(
+                        result
+                            .sunshine_capture_display
+                            .as_deref()
+                            .unwrap_or("unknown")
+                    ),
+                    sanitize_trace_value(&result.reason)
+                ));
+            } else {
+                append_host_stream_trace(&format!(
+                    "DISPLAY_REASSERT_AFTER_CAPTURE_REFRESH token={} stage=ok reason={} changed={} skipped={} capture_changed={} target_changed={} detail={}",
+                    session_token,
+                    sanitize_trace_value(reason),
+                    result.changed,
+                    result.skipped,
+                    result.sunshine_capture_changed,
+                    result.sunshine_capture_target_changed,
+                    sanitize_trace_value(&result.reason)
+                ));
+            }
+            Ok(result)
+        }
+        Err(err) => {
+            append_host_stream_trace(&format!(
+                "DISPLAY_REASSERT_AFTER_CAPTURE_REFRESH token={} stage=failed reason={} error={}",
+                session_token,
+                sanitize_trace_value(reason),
+                sanitize_trace_value(&err)
+            ));
+            Err(err)
+        }
+    }
+}
+
 async fn apply_project_display_mode(
     session_token: &str,
     mode: &str,
@@ -5045,7 +5116,7 @@ pub async fn start_host(
     let ws_request_path = request.uri().to_string();
     let ws_stream_ticket_present = extract_android_native_stream_ticket(&request).is_some();
 
-    let client_unique_id = user.host_unique_id().await?;
+    let client_unique_id = sanitize_moonlight_client_unique_id(&user.host_unique_id().await?);
 
     let web_app = web_app.clone();
     actix_rt::spawn(async move {
@@ -5201,6 +5272,26 @@ pub async fn start_host(
             host_id.0, app_id.0, dynamic_display_session_token, client_build, dynamic_display_match
         ));
 
+        // Register native ownership before preflight or any child spawn. Revoke
+        // before registration creates a tombstone and denies this launch.
+        let registration_id = ACTIVE_NATIVE_CONNECTION_ID
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
+        let native_scope = if let Some(owner) = android_native_owner_session_id.as_deref() {
+            match crate::native_stream_scope::NATIVE_STREAM_SCOPES
+                .begin(owner, registration_id)
+                .await
+            {
+                Ok(scope) => Some(scope),
+                Err(error) => {
+                    warn!("[Native scope]: launch refused: {error}");
+                    let _ = session.close(None).await;
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let stream_generation = begin_active_stream_generation(&dynamic_display_session_token);
         preempt_active_stream_runtime(&dynamic_display_session_token).await;
         if let Some(profile) = runtime_profile_snapshot.as_ref() {
@@ -5762,6 +5853,17 @@ pub async fn start_host(
             ));
         }
 
+        let mut native_launch_permit = match native_scope.as_ref() {
+            Some(scope) => match scope.launch_permit().await {
+                Ok(permit) => Some(permit),
+                Err(error) => {
+                    warn!("[Native scope]: launch cancelled: {error}");
+                    let _ = session.close(None).await;
+                    return;
+                }
+            },
+            None => None,
+        };
         let (mut child, stdin, stdout) = match staged_streamer_command.spawn() {
             Ok(mut child) => {
                 if let Some(stdin) = child.stdin.take()
@@ -5865,21 +5967,53 @@ pub async fn start_host(
         let id = CHILD_COUNTER.fetch_add(1, Ordering::Relaxed);
         let span = span!(Level::INFO, "ipc", child_id = id);
 
+        let child = Arc::new(Mutex::new(child));
+        if let Some(permit) = native_launch_permit.as_mut() {
+            permit.attach(child.clone());
+        }
+        drop(native_launch_permit);
+        if native_scope
+            .as_ref()
+            .is_some_and(|scope| scope.is_cancelled())
+        {
+            if let Some(scope) = native_scope.as_ref() {
+                let _ = scope.stop_owned_children().await;
+            }
+            let _ = session.close(None).await;
+            return;
+        }
         let (mut ipc_sender, mut ipc_receiver) =
             create_child_ipc::<ServerIpcMessage, StreamerIpcMessage>(span, stdin, stdout, None)
                 .await;
-        let child = Arc::new(Mutex::new(child));
-        replace_active_child(&ACTIVE_STREAM_CHILD, child.clone(), "Stream").await;
+        if native_scope.is_none() {
+            replace_active_child(&ACTIVE_STREAM_CHILD, child.clone(), "Stream").await;
+        }
         let mut current_window_watch_child: Option<Arc<Mutex<Child>>> = None;
+        let mut watch_permit = match native_scope.as_ref() {
+            Some(scope) => match scope.launch_permit().await {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    let _ = ipc_sender.send(ServerIpcMessage::Stop).await;
+                    let _ = session.close(None).await;
+                    return;
+                }
+            },
+            None => None,
+        };
         match spawn_window_primary_watch(&dynamic_display_session_token).await {
             Ok(window_watch_child) => {
+                if let Some(permit) = watch_permit.as_mut() {
+                    permit.attach(window_watch_child.clone());
+                }
                 current_window_watch_child = Some(window_watch_child.clone());
-                replace_active_child(
-                    &ACTIVE_WINDOW_WATCH_CHILD,
-                    window_watch_child,
-                    "Window Watch",
-                )
-                .await;
+                if native_scope.is_none() {
+                    replace_active_child(
+                        &ACTIVE_WINDOW_WATCH_CHILD,
+                        window_watch_child,
+                        "Window Watch",
+                    )
+                    .await;
+                }
                 append_host_stream_trace(&format!(
                     "WINDOW_WATCH_STARTED token={}",
                     dynamic_display_session_token
@@ -5894,6 +6028,7 @@ pub async fn start_host(
                 ));
             }
         }
+        drop(watch_permit);
         append_host_stream_trace(&format!(
             "STREAMER_SPAWNED token={} host_id={} app_id={}",
             dynamic_display_session_token, host_id.0, effective_app_id.0
@@ -5919,6 +6054,7 @@ pub async fn start_host(
             let prepared_display_active = prepared_display_active.clone();
             let dynamic_display_session_token = dynamic_display_session_token.clone();
             let android_native_owner_session_id = android_native_owner_session_id.clone();
+            let native_scope = native_scope.clone();
             let stream_generation = stream_generation;
             async move {
                 let mut warned_closed = false;
@@ -5926,6 +6062,8 @@ pub async fn start_host(
                 let mut server_ws_receiver_closed = false;
                 loop {
                     tokio::select! {
+                        biased;
+                        _ = crate::native_stream_scope::scope_cancelled(&native_scope) => { break; }
                         maybe_message = ipc_receiver.recv(), if !ipc_receiver_closed => {
                             match maybe_message {
                                 Some(StreamerIpcMessage::WebSocket(message)) => {
@@ -6011,6 +6149,20 @@ pub async fn start_host(
                 }
                 info!("[Ipc]: ipc receiver is closed");
 
+                if let Some(scope) = native_scope.as_ref() {
+                    let _ = timeout(
+                        Duration::from_secs(1),
+                        ipc_sender.send(ServerIpcMessage::Stop),
+                    )
+                    .await;
+                    let _ = timeout(Duration::from_secs(1), write_session.close(None)).await;
+                    if let Err(error) = scope.stop_owned_children().await {
+                        warn!("[Native scope]: child exit unverified: {error}");
+                    }
+                    // Never run the global legacy display/window-watch cleanup
+                    // for a native session; generation binding is handled separately.
+                    return;
+                }
                 if let Some(owner_session_id) = android_native_owner_session_id.as_deref() {
                     clear_shared_player2_joiner(owner_session_id, None).await;
                     clear_shared_player2_bridge(owner_session_id).await;
@@ -6094,10 +6246,21 @@ pub async fn start_host(
 
         // Redirect ws message into ipc
         loop {
+            if native_scope
+                .as_ref()
+                .is_some_and(|scope| scope.is_cancelled())
+            {
+                break;
+            }
             let message = if let Some(message) = pending_control_message.take() {
                 message
             } else {
-                let next_message = match timeout(STREAM_CONTROL_IDLE_TIMEOUT, stream.recv()).await {
+                let next = tokio::select! {
+                    biased;
+                    _ = crate::native_stream_scope::scope_cancelled(&native_scope) => { break; }
+                    value = timeout(STREAM_CONTROL_IDLE_TIMEOUT, stream.recv()) => value,
+                };
+                let next_message = match next {
                     Ok(message) => message,
                     Err(_) => {
                         let connection_established =
@@ -6115,15 +6278,20 @@ pub async fn start_host(
                             timeout_reason
                         ));
                         if connection_established {
-                            note_host_lifecycle_phase("recovering", timeout_reason);
-                        } else {
-                            pre_connect_stop_reason = Some(timeout_reason.to_string());
+                            // Mobile browsers may throttle JavaScript timers even while the
+                            // WebRTC media path is healthy. Keep the established media session
+                            // alive; the next incoming control message resumes normal handling.
+                            append_host_stream_trace(&format!(
+                                "CONTROL_CHANNEL_IDLE_TOLERATED token={} reason={}",
+                                dynamic_display_session_token, timeout_reason
+                            ));
+                            warn!(
+                                "[Stream]: control channel idle after connect; keeping WebRTC media alive"
+                            );
+                            continue;
                         }
-                        warn!(
-                            "[Stream]: control channel heartbeat timed out (start_stream_received={}, connection_established={})",
-                            start_stream_received.load(Ordering::Acquire),
-                            connection_established
-                        );
+                        pre_connect_stop_reason = Some(timeout_reason.to_string());
+                        warn!("[Stream]: control channel heartbeat timed out before connection");
                         break;
                     }
                 };
@@ -6624,6 +6792,34 @@ pub async fn start_host(
                                                 sanitize_trace_value(capture_display),
                                                 sanitize_trace_value(refresh_strategy)
                                             ));
+                                            if requested_height > requested_width {
+                                                match reassert_stream_display_after_capture_refresh(
+                                                    &dynamic_display_session_token,
+                                                    requested_width,
+                                                    requested_height,
+                                                    requested_fps,
+                                                    "capture_display_changed",
+                                                )
+                                                .await
+                                                {
+                                                    Ok(reassert_result) => {
+                                                        if reassert_result.changed {
+                                                            prepared_display_active
+                                                                .store(true, Ordering::Release);
+                                                        }
+                                                        start_stream_settle_delay_ms = Some(
+                                                            start_stream_settle_delay_ms
+                                                                .unwrap_or(0)
+                                                                .max(600),
+                                                        );
+                                                    }
+                                                    Err(err) => {
+                                                        warn!(
+                                                            "[Stream]: failed to reassert display after Sunshine refresh: {err}"
+                                                        );
+                                                    }
+                                                }
+                                            }
                                             note_host_lifecycle_phase(
                                                 "starting",
                                                 "capture_display_changed_ready",
@@ -6827,11 +7023,7 @@ pub async fn start_host(
 
                                         match restart_sunshine_capture_with_fallback(
                                             &dynamic_display_session_token,
-                                            Some((
-                                                requested_width,
-                                                requested_height,
-                                                requested_fps,
-                                            )),
+                                            None,
                                             &address,
                                             http_port,
                                         )
@@ -6852,6 +7044,34 @@ pub async fn start_host(
                                                     prepared_fps,
                                                     exact_prepared_surface
                                                 ));
+                                                if requested_height > requested_width {
+                                                    match reassert_stream_display_after_capture_refresh(
+                                                        &dynamic_display_session_token,
+                                                        requested_width,
+                                                        requested_height,
+                                                        requested_fps,
+                                                        "prestart_vdd_mode_changed",
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(reassert_result) => {
+                                                            if reassert_result.changed {
+                                                                prepared_display_active
+                                                                    .store(true, Ordering::Release);
+                                                            }
+                                                            start_stream_settle_delay_ms = Some(
+                                                                start_stream_settle_delay_ms
+                                                                    .unwrap_or(0)
+                                                                    .max(600),
+                                                            );
+                                                        }
+                                                        Err(err) => {
+                                                            warn!(
+                                                                "[Stream]: failed to reassert display after prestart VDD refresh: {err}"
+                                                            );
+                                                        }
+                                                    }
+                                                }
                                                 note_host_lifecycle_phase(
                                                     "starting",
                                                     "capture_prestart_runtime_ready",
@@ -7004,11 +7224,7 @@ pub async fn start_host(
 
                                             match restart_sunshine_capture_with_fallback(
                                                 &dynamic_display_session_token,
-                                                Some((
-                                                    requested_width,
-                                                    requested_height,
-                                                    requested_fps,
-                                                )),
+                                                None,
                                                 &address,
                                                 http_port,
                                             )
@@ -7032,6 +7248,34 @@ pub async fn start_host(
                                                         prepared_fps,
                                                         exact_prepared_surface
                                                     ));
+                                                    if requested_height > requested_width {
+                                                        match reassert_stream_display_after_capture_refresh(
+                                                            &dynamic_display_session_token,
+                                                            requested_width,
+                                                            requested_height,
+                                                            requested_fps,
+                                                            "pending_prestart_capture_refresh",
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(reassert_result) => {
+                                                                if reassert_result.changed {
+                                                                    prepared_display_active
+                                                                        .store(true, Ordering::Release);
+                                                                }
+                                                                start_stream_settle_delay_ms = Some(
+                                                                    start_stream_settle_delay_ms
+                                                                        .unwrap_or(0)
+                                                                        .max(600),
+                                                                );
+                                                            }
+                                                            Err(err) => {
+                                                                warn!(
+                                                                    "[Stream]: failed to reassert display after pending capture refresh: {err}"
+                                                                );
+                                                            }
+                                                        }
+                                                    }
                                                     note_host_lifecycle_phase(
                                                         "starting",
                                                         "capture_prestart_runtime_ready",
@@ -7696,9 +7940,30 @@ pub async fn start_host(
                         }
                     }
 
+                    if let StreamClientMessage::StartStream { width, height, .. } = &mut message {
+                        if clamp_web_nvenc_surface_to_1080p(width, height) {
+                            append_host_stream_trace(&format!(
+                                "WEBRTC_FINAL_SURFACE_CLAMP token={} stream={}x{} reason=nvenc_1080p_envelope",
+                                dynamic_display_session_token, *width, *height
+                            ));
+                        }
+                    }
+
+                    if native_scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.is_cancelled())
+                    {
+                        break;
+                    }
                     ipc_sender.send(ServerIpcMessage::WebSocket(message)).await;
                 }
                 Message::Binary(binary) => {
+                    if native_scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.is_cancelled())
+                    {
+                        break;
+                    }
                     ipc_sender
                         .send(ServerIpcMessage::WebSocketTransport(binary))
                         .await;
@@ -7748,6 +8013,22 @@ pub async fn start_host(
             }
         }
 
+        if let Some(scope) = native_scope.as_ref() {
+            let _ = timeout(
+                Duration::from_secs(1),
+                ipc_sender.send(ServerIpcMessage::Stop),
+            )
+            .await;
+            if let Err(error) = scope.stop_owned_children().await {
+                warn!("[Native scope]: child exit unverified: {error}");
+            }
+            let _ = timeout(Duration::from_secs(1), session.close(None)).await;
+            if let Some(owner) = android_native_owner_session_id.as_deref() {
+                clear_shared_player2_joiner(owner, None).await;
+                clear_shared_player2_bridge(owner).await;
+            }
+            return; // no READY claim, global display restore or bundle scan
+        }
         if !ws_close_logged {
             append_host_stream_trace(&format!(
                 "WS_STREAM_ENDED token={} start_stream_received={} connection_established={}",
@@ -7887,19 +8168,25 @@ pub async fn start_host(
                 .await;
             }
 
-            let child = child.clone();
-            let cleanup_session_token = dynamic_display_session_token.clone();
-            let cleanup_stream_generation = stream_generation;
-            spawn(async move {
-                sleep(Duration::from_secs(3)).await;
-                force_kill_child(&child, "Stream").await;
-                stop_active_window_watch_if_current(
-                    &cleanup_session_token,
-                    "pre_connect_delayed_window_watch_cleanup",
-                    cleanup_stream_generation,
-                )
-                .await;
-            });
+            if native_scope.is_none() {
+                let child = child.clone();
+                let cleanup_session_token = dynamic_display_session_token.clone();
+                let cleanup_stream_generation = stream_generation;
+                spawn(async move {
+                    sleep(Duration::from_secs(3)).await;
+                    force_kill_child(&child, "Stream").await;
+                    stop_active_window_watch_if_current(
+                        &cleanup_session_token,
+                        "pre_connect_delayed_window_watch_cleanup",
+                        cleanup_stream_generation,
+                    )
+                    .await;
+                });
+            } else if let Some(scope) = native_scope.as_ref()
+                && let Err(error) = scope.stop_owned_children().await
+            {
+                warn!("[Native scope]: pre-connect child exit unverified: {error}");
+            }
         }
     });
 
