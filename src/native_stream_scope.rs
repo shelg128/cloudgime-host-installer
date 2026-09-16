@@ -292,15 +292,16 @@ mod tests {
     #[test]
     fn native_stream_source_never_publishes_or_delayed_kills_global_children() {
         let source = include_str!("api/stream.rs");
-        assert!(source.contains(
-            "if native_scope.is_none() {\n            replace_active_child(&ACTIVE_STREAM_CHILD"
+        let normalized = source.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(normalized.contains(
+            "if native_scope.is_none() { replace_active_child(&ACTIVE_STREAM_CHILD"
         ));
-        assert!(source.contains("if native_scope.is_none() {\n                    replace_active_child(\n                        &ACTIVE_WINDOW_WATCH_CHILD"));
-        assert!(
-            source.contains(
-                "if native_scope.is_none() {\n                let child = child.clone();"
-            )
-        );
+        assert!(normalized.contains(
+            "if native_scope.is_none() { replace_active_child( &ACTIVE_WINDOW_WATCH_CHILD"
+        ));
+        assert!(normalized.contains(
+            "if native_scope.is_none() { let child = child.clone();"
+        ));
         let cleanup = source
             .split("pub(crate) async fn cleanup_android_native_stream_session")
             .nth(1)
