@@ -45,6 +45,7 @@ mod web;
 mod cli;
 mod human_json;
 mod native_stream_scope;
+mod rental_desktop_target;
 #[path = "provisioning.rs"]
 mod provisioning;
 mod stream_controller;
