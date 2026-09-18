@@ -307,17 +307,6 @@ fn truthy_flag_value(value: &str) -> bool {
     )
 }
 
-fn extract_android_native_stream_ticket(request: &HttpRequest) -> Option<String> {
-    let header = request.headers().get("Authorization")?;
-    let bearer = header.to_str().ok()?;
-    let token = bearer.strip_prefix("Bearer")?.trim();
-    if token.starts_with("mlnatstream_") {
-        Some(token.to_string())
-    } else {
-        None
-    }
-}
-
 fn extract_android_native_stream_ticket_query(request: &HttpRequest) -> Option<String> {
     request
         .query_string()
@@ -2530,6 +2519,30 @@ async fn cleanup_bundle_stream_processes(session_token: &str) {
     }
 
     cleanup_staged_runtime_files(session_token);
+}
+
+// Fresh authorization is checked even if the client is idle or WebRTC media
+// bypasses WebSocket transport. No lease is extended by this watchdog. This
+// revokes only owned channels; it does not claim Sunshine/cleanup receipts.
+pub(super) fn monitor_ticket_scope(app: Data<App>, record: crate::app::AndroidNativeStreamTicketRecord,
+    scope: Arc<crate::native_stream_scope::NativeStreamScope>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                _ = scope.cancelled() => return,
+                _ = sleep(Duration::from_secs(1)) => {}
+            }
+            let valid = timeout(Duration::from_secs(2), app.authorize_android_native_stream_ticket_for_stream(
+                &record.stream_ticket, record.host_id, record.app_id)).await;
+            if !matches!(valid, Ok(Ok(_))) {
+                if let Err(error) = scope.stop_owned_children().await {
+                    warn!("[Scoped stream]: child cutoff unverified: {error}");
+                }
+                return;
+            }
+        }
+    })
 }
 
 pub(crate) async fn cleanup_android_native_stream_session(
@@ -5112,9 +5125,10 @@ pub async fn start_host(
     request: HttpRequest,
     payload: Payload,
 ) -> Result<HttpResponse, Error> {
+    let scoped_ticket = crate::api::auth::scoped_stream_ticket(&request)?;
     let (response, mut session, mut stream) = actix_ws::handle(&request, payload)?;
-    let ws_request_path = request.uri().to_string();
-    let ws_stream_ticket_present = extract_android_native_stream_ticket(&request).is_some();
+    let ws_request_path = request.path().to_string(); // do not log bearer query material
+    let ws_stream_ticket_present = scoped_ticket.is_some();
 
     let client_unique_id = sanitize_moonlight_client_unique_id(&user.host_unique_id().await?);
 
@@ -5208,8 +5222,7 @@ pub async fn start_host(
 
         let host_id = HostId(host_id);
         let app_id = AppId(app_id);
-        let android_native_stream_ticket_record = if let Some(stream_ticket) =
-            extract_android_native_stream_ticket(&request)
+        let android_native_stream_ticket_record = if let Some(stream_ticket) = scoped_ticket.as_ref()
         {
             match web_app
                 .authorize_android_native_stream_ticket_for_stream(&stream_ticket, host_id, app_id)
@@ -5292,6 +5305,10 @@ pub async fn start_host(
         } else {
             None
         };
+        let _native_connection_guard = native_scope.as_ref().map(|scope| scope.connection_guard());
+        if let (Some(scope), Some(record)) = (native_scope.as_ref(), android_native_stream_ticket_record.as_ref()) {
+            monitor_ticket_scope(web_app.clone(), record.clone(), scope.clone());
+        }
         let stream_generation = begin_active_stream_generation(&dynamic_display_session_token);
         preempt_active_stream_runtime(&dynamic_display_session_token).await;
         if let Some(profile) = runtime_profile_snapshot.as_ref() {
@@ -8476,6 +8493,8 @@ pub async fn start_host_mic(
     request: HttpRequest,
     payload: Payload,
 ) -> Result<HttpResponse, Error> {
+    let scoped_ticket = crate::api::auth::scoped_stream_ticket(&request)?
+        .or_else(|| extract_android_native_stream_ticket_query(&request));
     let (response, mut session, mut stream) = actix_ws::handle(&request, payload)?;
     append_host_stream_trace("MIC_SIDECAR_WS_ACCEPTED");
 
@@ -8520,13 +8539,13 @@ pub async fn start_host_mic(
         };
         append_host_stream_trace(&format!("MIC_SIDECAR_INIT host_id={host_id}"));
 
-        let auth_error = if let Some(stream_ticket) = extract_android_native_stream_ticket(&request)
-            .or_else(|| extract_android_native_stream_ticket_query(&request))
+        let mut mic_ticket_record = None;
+        let auth_error = if let Some(stream_ticket) = scoped_ticket.as_ref()
         {
             web_app
                 .authorize_android_native_stream_ticket_for_host(&stream_ticket, HostId(host_id))
                 .await
-                .map(|_| ())
+                .map(|record| { mic_ticket_record = Some(record); })
         } else {
             match web_app.user_by_auth(auth).await {
                 Ok(mut user) => user.host(HostId(host_id)).await.map(|_| ()),
@@ -8552,6 +8571,17 @@ pub async fn start_host_mic(
             let _ = session.close(None).await;
             return;
         }
+        let native_scope = if let Some(record) = mic_ticket_record.as_ref() {
+            let registration = ACTIVE_NATIVE_CONNECTION_ID.fetch_add(1, Ordering::AcqRel).saturating_add(1);
+            match crate::native_stream_scope::NATIVE_STREAM_SCOPES.begin(&record.session_id, registration).await {
+                Ok(scope) => { monitor_ticket_scope(web_app.clone(), record.clone(), scope.clone()); Some(scope) },
+                Err(_) => { let _ = session.close(None).await; return; }
+            }
+        } else { None };
+        let _native_connection_guard = native_scope.as_ref().map(|scope| scope.connection_guard());
+        let mut launch_permit = if let Some(scope) = native_scope.as_ref() {
+            match scope.launch_permit().await { Ok(permit) => Some(permit), Err(_) => { let _=session.close(None).await; return; } }
+        } else { None };
         append_host_stream_trace(&format!("MIC_SIDECAR_AUTH_OK host_id={host_id}"));
 
         let _ = send_json_ws_message(
@@ -8654,16 +8684,27 @@ pub async fn start_host_mic(
         >(span, stdin, stdout, child.stderr.take())
         .await;
         let child = Arc::new(Mutex::new(child));
-        replace_active_child(&ACTIVE_MIC_SIDECAR_CHILD, child.clone(), "Mic Sidecar").await;
+        if let Some(permit) = launch_permit.as_mut() { permit.attach(child.clone()); }
+        drop(launch_permit);
+        if native_scope.is_none() {
+            replace_active_child(&ACTIVE_MIC_SIDECAR_CHILD, child.clone(), "Mic Sidecar").await;
+        }
 
         let mut write_session = session.clone();
         spawn({
             let mut ipc_sender = ipc_sender.clone();
             let child = child.clone();
             let staged_mic_sidecar_path = staged_mic_sidecar_path.clone();
+            let native_scope = native_scope.clone();
             async move {
                 let mut warned_closed = false;
-                while let Some(message) = ipc_receiver.recv().await {
+                loop {
+                    let message = tokio::select! {
+                        biased;
+                        _ = crate::native_stream_scope::scope_cancelled(&native_scope) => break,
+                        message = ipc_receiver.recv() => message,
+                    };
+                    let Some(message) = message else { break; };
                     match message {
                         MicSidecarIpcMessage::WebSocket(message) => {
                             append_host_stream_trace(&format!(
@@ -8705,7 +8746,13 @@ pub async fn start_host_mic(
             })
             .await;
 
-        while let Some(Ok(message)) = stream.recv().await {
+        loop {
+            let message = tokio::select! {
+                biased;
+                _ = crate::native_stream_scope::scope_cancelled(&native_scope) => break,
+                message = stream.recv() => message,
+            };
+            let Some(Ok(message)) = message else { break; };
             match message {
                 Message::Text(text) => {
                     let Ok(message) = serde_json::from_str::<MicSidecarClientMessage>(&text) else {
@@ -8735,6 +8782,12 @@ pub async fn start_host_mic(
             }
         }
 
+        if let Some(scope) = native_scope.as_ref() {
+            let _ = timeout(Duration::from_secs(1), ipc_sender.send(MicSidecarServerIpcMessage::Stop)).await;
+            let _ = timeout(Duration::from_secs(1), session.close(None)).await;
+            if let Err(error) = scope.stop_owned_children().await { warn!("[Scoped mic]: cutoff unverified: {error}"); }
+            return;
+        }
         ipc_sender.send(MicSidecarServerIpcMessage::Stop).await;
 
         let child = child.clone();

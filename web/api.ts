@@ -33,18 +33,18 @@ export async function getApi(): Promise<Api> {
 
     let api = { host_url, bearer: null, user: null }
 
-    if (await apiAuthenticate(api)) {
-        return api
+    // An explicit launch must not be skipped because an old Host cookie works.
+    const hasLaunch = readCurrentQueryParam("launchToken") != null
+    if (hasLaunch) {
+        const state = await apiBootstrapNativeLaunchSession(api)
+        if (state == "success" && await apiAuthenticate(api)) return api
+        const message = "Tiket sesi tidak berlaku. Kembali ke website untuk membuka sesi yang sah."
+        showErrorPopup(message, true)
+        throw new Error(message) // Never fall back to Host/operator login.
     }
-
-    const nativeLaunchBootstrapState = await apiBootstrapNativeLaunchSession(api)
-    if (nativeLaunchBootstrapState == "success" && await apiAuthenticate(api)) {
-        return api
-    }
+    if (await apiAuthenticate(api)) return api
     if (isWindowsNativeShellPage()) {
-        const message = nativeLaunchBootstrapState == "failed"
-            ? "Native Windows session token sudah tidak valid. Kembali ke website lalu tekan Open App lagi."
-            : "Native Windows session belum siap. Kembali ke website lalu buka ulang sesi ini."
+        const message = "Sesi Windows tidak berlaku. Kembali ke website lalu buka ulang sesi ini."
         showErrorPopup(message, true)
         throw new Error(message)
     }

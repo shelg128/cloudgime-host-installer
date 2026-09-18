@@ -37,7 +37,6 @@ use tokio::{
 };
 use url::Url;
 
-use crate::api::auth::build_cookie;
 #[cfg(test)]
 #[path = "native_control_security_tests.rs"]
 mod native_control_security_tests;
@@ -1599,22 +1598,35 @@ pub async fn post_android_native_bootstrap_web_session(
     app: Data<App>,
     Json(request): Json<PostAndroidNativeBootstrapWebSessionRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let launch_record = app
-        .consume_android_native_launch_token(&request.launch_token)
+    let (launch_record, stream_record) = app
+        .consume_android_native_launch_token_with_stream_ticket(&request.launch_token)
         .await?;
-    let trusted_user = app
-        .authenticated_user_by_id_trusted(launch_record.user_id)
-        .await?;
+    let remaining = stream_record.expires_at_unix_ms.saturating_sub(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| AppError::Unauthorized)?
+            .as_millis() as u64,
+    );
+    if remaining == 0 {
+        return Err(AppError::AndroidNativeStreamTicketExpired);
+    }
     let session_expiration = cmp::min(
         app.config().web_server.session_cookie_expiration,
-        Duration::from_secs(12 * 60 * 60),
+        Duration::from_millis(remaining),
     );
-    let session = trusted_user.new_session(session_expiration).await?;
-    let mut session_bytes = [0; 64];
-    let session_str = session.encode(&mut session_bytes);
 
     Ok(HttpResponse::Ok()
-        .cookie(build_cookie(&app, session_expiration, session_str))
+        .cookie(crate::api::auth::build_rental_stream_cookie(
+            &app,
+            session_expiration,
+            &stream_record.stream_ticket,
+        ))
+        .cookie({
+            let mut old = crate::api::auth::build_cookie(&app, Duration::ZERO, "");
+            old.make_removal();
+            old
+        })
+        .insert_header(("Cache-Control", "no-store"))
         .json(PostAndroidNativeBootstrapWebSessionResponse {
             token_id: launch_record.token_id,
             session_id: launch_record.session_id,
@@ -1640,19 +1652,32 @@ pub async fn post_android_native_bootstrap_web_session_from_native_session(
             &request.session_id,
         )
         .await?;
-    let trusted_user = app
-        .authenticated_user_by_id_trusted(stream_record.user_id)
-        .await?;
+    let remaining = stream_record.expires_at_unix_ms.saturating_sub(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| AppError::Unauthorized)?
+            .as_millis() as u64,
+    );
+    if remaining == 0 {
+        return Err(AppError::AndroidNativeStreamTicketExpired);
+    }
     let session_expiration = cmp::min(
         app.config().web_server.session_cookie_expiration,
-        Duration::from_secs(12 * 60 * 60),
+        Duration::from_millis(remaining),
     );
-    let session = trusted_user.new_session(session_expiration).await?;
-    let mut session_bytes = [0; 64];
-    let session_str = session.encode(&mut session_bytes);
 
     Ok(HttpResponse::Ok()
-        .cookie(build_cookie(&app, session_expiration, session_str))
+        .cookie(crate::api::auth::build_rental_stream_cookie(
+            &app,
+            session_expiration,
+            &stream_record.stream_ticket,
+        ))
+        .cookie({
+            let mut old = crate::api::auth::build_cookie(&app, Duration::ZERO, "");
+            old.make_removal();
+            old
+        })
+        .insert_header(("Cache-Control", "no-store"))
         .json(PostAndroidNativeBootstrapWebSessionResponse {
             token_id: stream_record.token_id,
             session_id: stream_record.session_id,
@@ -2025,7 +2050,8 @@ pub async fn post_android_native_session_lifecycle(
     let credential = native_control_credential(&req, request.launch_token.as_deref())?;
     let cleanup_action = matches!(
         request.action.as_str(),
-        "session_revoked"
+        "session_revoke_requested"
+            | "session_revoked"
             | "session_expired_cleanup"
             | "session_failed_cleanup"
             | "session_abandoned_cleanup"

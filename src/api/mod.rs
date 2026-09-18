@@ -56,6 +56,10 @@ pub mod stream;
 
 pub mod response_streaming;
 
+#[cfg(test)]
+#[path = "scoped_cookie_http_tests.rs"]
+mod scoped_cookie_http_tests;
+
 #[derive(Serialize)]
 struct QuickLaunchTargetResponse {
     host_id: u32,
@@ -487,6 +491,7 @@ async fn get_app_image(
 
 pub fn api_service() -> impl HttpServiceFactory {
     web::scope("/api")
+        .wrap(from_fn(auth::rental_cookie_middleware))
         .service(services![
             post_android_native_launch_token_from_tunnel,
             post_android_native_consume_launch,
