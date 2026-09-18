@@ -1003,11 +1003,12 @@ impl App {
     ) -> Result<AndroidNativeStreamTicketRecord, AppError> {
         let now = unix_time_ms_now();
         let lifecycle = self.inner.android_native_session_lifecycle.read().await;
-        let tickets = self.inner.android_native_stream_tickets.read().await;
+        let mut tickets = self.inner.android_native_stream_tickets.write().await;
         // IDs constrain the bearer; they never replace proof of possession.
         let record = tickets
             .get(stream_ticket)
             .filter(|record| record.expires_at_unix_ms > now)
+            .cloned()
             .ok_or(AppError::AndroidNativeStreamTicketNotFound)?;
         if record.session_id != session_id || token_id.is_some_and(|id| id != record.token_id) {
             return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
@@ -1020,7 +1021,18 @@ impl App {
         ) {
             return Err(AppError::AndroidNativeSessionInactive);
         }
-        Ok(record.clone())
+        // A fresh cookie capability may coexist with a consumed native bearer,
+        // but must not extend the parent's deadline or become a Host login.
+        tickets.retain(|_, value| value.expires_at_unix_ms > now);
+        if tickets.len() >= 4096 { return Err(AppError::Unauthorized); }
+        let cookie_record = AndroidNativeStreamTicketRecord {
+            stream_ticket: format!("mlnatstream_{}", Uuid::new_v4().to_simple()),
+            issued_at_unix_ms: now,
+            consumed_at_unix_ms: None,
+            ..record
+        };
+        tickets.insert(cookie_record.stream_ticket.clone(), cookie_record.clone());
+        Ok(cookie_record)
     }
 
     pub async fn record_android_native_session_event(
