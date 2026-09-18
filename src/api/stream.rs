@@ -5733,36 +5733,31 @@ pub async fn start_host(
             }
         };
 
-        let desktop_app_index = apps
+        let app_candidates = apps
             .iter()
-            .position(|app| app.title.eq_ignore_ascii_case("desktop"));
-        let requested_app_index = apps.iter().position(|app| app.id == app_id);
-        let fallback_app_index = (apps.len() == 1).then_some(0);
+            .map(|app| (app.id.0, app.title.as_str()))
+            .collect::<Vec<_>>();
+        let selected_app_index = crate::stream_controller::select_stream_app_index(
+            app_id.0,
+            android_native_stream_ticket_record.is_some(),
+            &app_candidates,
+        );
 
-        let app = match desktop_app_index
-            .or(requested_app_index)
-            .or(fallback_app_index)
-        {
+        let app = match selected_app_index {
             Some(index) => {
                 let selected_app = apps.swap_remove(index);
                 if selected_app.id != app_id {
-                    let fallback_reason = if desktop_app_index == Some(index) {
-                        "forced_desktop_baseline"
-                    } else {
-                        "stale_app_id_single_app_fallback"
-                    };
                     append_host_stream_trace(&format!(
-                        "APP_LOOKUP_FALLBACK token={} host_id={} requested_app_id={} selected_app_id={} selected_title={} reason={}",
+                        "APP_LOOKUP_FALLBACK token={} host_id={} requested_app_id={} selected_app_id={} selected_title={} reason=legacy_desktop_preference",
                         dynamic_display_session_token,
                         host_id.0,
                         app_id.0,
                         selected_app.id.0,
-                        sanitize_trace_value(&selected_app.title),
-                        fallback_reason
+                        sanitize_trace_value(&selected_app.title)
                     ));
                     info!(
-                        "app id {:?} not found for host {:?}, falling back to {:?} ({})",
-                        app_id, host_id, selected_app.id, selected_app.title
+                        "legacy app id {:?} selected desktop {:?} ({})",
+                        app_id, selected_app.id, selected_app.title
                     );
                 }
                 selected_app
