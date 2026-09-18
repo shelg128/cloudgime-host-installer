@@ -318,3 +318,56 @@ fn worker_is_opt_in_and_cannot_claim_cleanup_complete() {
     assert!(!s.contains("taskkill"));
     assert!(!s.contains("PowerShell"));
 }
+
+#[test]
+fn poll_and_hmac_validation_use_host_activation_not_component_activation() {
+    let binding = UniversalHostBinding {
+        host_id: "host-activation".into(),
+        pc_id: "pc".into(),
+        device_id: "PC-fixture".into(),
+        keeper_entry_id: "keeper-fixture".into(),
+        machine_identity: "machine-fixture".into(),
+        install_instance_id: "installation-fixture".into(),
+        token_kind: "always_on_host".into(),
+        application_activation_id: "component-activation-different".into(),
+    };
+    assert_ne!(binding.host_id, binding.application_activation_id);
+    assert_eq!(
+        poll_identity(&binding),
+        json!({"pcId":"pc","applicationActivationId":"host-activation"})
+    );
+    let body = serde_json::to_vec(&json!({"ok":true,"commands":[command()]})).unwrap();
+    assert_eq!(
+        parse_commands(
+            &body,
+            &binding.pc_id,
+            cleanup_activation_id(&binding),
+            SECRET
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+    assert!(
+        parse_commands(
+            &body,
+            &binding.pc_id,
+            &binding.application_activation_id,
+            SECRET
+        )
+        .is_err()
+    );
+    let mut wrong = command();
+    wrong.application_activation_id = binding.application_activation_id.clone();
+    wrong.challenge = wrong.expected_challenge(SECRET).unwrap();
+    let wrong_body = serde_json::to_vec(&json!({"ok":true,"commands":[wrong]})).unwrap();
+    assert!(
+        parse_commands(
+            &wrong_body,
+            &binding.pc_id,
+            cleanup_activation_id(&binding),
+            SECRET
+        )
+        .is_err()
+    );
+}

@@ -179,6 +179,15 @@ fn parse_commands(
         .map(VerifiedRevokeCommand)
         .collect())
 }
+// HostActivation.applicationActivationId is binding.hostId on Universal Node.
+// components[].applicationActivationId is a separate provisioning component ID.
+// Keep outbound identity and response validation on the same database authority.
+fn cleanup_activation_id(binding: &UniversalHostBinding) -> &str {
+    &binding.host_id
+}
+fn poll_identity(binding: &UniversalHostBinding) -> serde_json::Value {
+    serde_json::json!({"pcId":binding.pc_id,"applicationActivationId":cleanup_activation_id(binding)})
+}
 struct Context {
     binding: UniversalHostBinding,
     credential: String,
@@ -209,9 +218,13 @@ async fn poll(
         "{}/api/v1/host/rental-cleanup-commands",
         provisioning::NODE_CONTROL_PLANE
     );
-    let mut response = client.post(&endpoint).bearer_auth(&pinned.credential)
-        .json(&serde_json::json!({"pcId":pinned.binding.pc_id,"applicationActivationId":pinned.binding.application_activation_id}))
-        .send().await.map_err(|_| "HOST_REVOKE_NETWORK_UNAVAILABLE")?;
+    let mut response = client
+        .post(&endpoint)
+        .bearer_auth(&pinned.credential)
+        .json(&poll_identity(&pinned.binding))
+        .send()
+        .await
+        .map_err(|_| "HOST_REVOKE_NETWORK_UNAVAILABLE")?;
     if response.status() != reqwest::StatusCode::OK || response.url().as_str() != endpoint {
         return Err("HOST_REVOKE_POLL_REJECTED");
     }
@@ -239,7 +252,7 @@ async fn poll(
     let parsed = parse_commands(
         &body,
         &pinned.binding.pc_id,
-        &pinned.binding.application_activation_id,
+        cleanup_activation_id(&pinned.binding),
         &pinned.credential,
     );
     body.fill(0);
