@@ -89,11 +89,13 @@ pub(crate) fn rental_request_allowed(method: &str, route: &str) -> bool {
             "/android-native/bootstrap-web-session" | "/android-native/bootstrap-web-session-from-native-session"))
 }
 
-fn independent_bootstrap(method: &str, route: &str) -> bool {
+fn independently_authenticated_route(method: &str, route: &str) -> bool {
     method == "POST"
         && matches!(
             route,
-            "/android-native/bootstrap-web-session"
+            "/android-native/launch-token-from-tunnel"
+                | "/android-native/consume-launch"
+                | "/android-native/bootstrap-web-session"
                 | "/android-native/bootstrap-web-session-from-native-session"
         )
 }
@@ -114,26 +116,32 @@ pub async fn rental_cookie_middleware(
         .path()
         .strip_prefix(&prefix)
         .ok_or(AppError::Forbidden)?;
-    // Bootstrap handlers independently validate the explicit one-use launch
-    // token/current bearer. Stale browser cookies never authorize bootstrap.
-    if !independent_bootstrap(req.method().as_str(), route) {
-        if let Some(ticket) = scoped_stream_ticket(req.request())? {
-            let allowed = rental_request_allowed(req.method().as_str(), route)
-                || (req.method() == actix_web::http::Method::POST
-                    && matches!(
-                        route,
-                        "/android-native/refresh-stream-ticket"
-                            | "/android-native/session-event"
-                            | "/android-native/session-lifecycle"
-                    ));
-            if !allowed {
-                return Err(AppError::Forbidden.into());
-            }
-            // Terminal lifecycle action may reconcile an already revoking
-            // session; the lifecycle handler validates that transition itself.
-            if route != "/android-native/session-lifecycle" {
-                app.peek_android_native_stream_ticket(&ticket).await?;
-            }
+    let independent = independently_authenticated_route(req.method().as_str(), route);
+    // These handlers validate a one-use launch token/current bearer themselves.
+    // Stale browser cookies are ignored and cannot authorize the bootstrap.
+    if independent {
+        return next.call(req).await;
+    }
+    let ticket = scoped_stream_ticket(req.request())?;
+    if app.config().web_server.rental_stream_ticket_required && ticket.is_none() {
+        return Err(AppError::Unauthorized.into());
+    }
+    if let Some(ticket) = ticket {
+        let allowed = rental_request_allowed(req.method().as_str(), route)
+            || (req.method() == actix_web::http::Method::POST
+                && matches!(
+                    route,
+                    "/android-native/refresh-stream-ticket"
+                        | "/android-native/session-event"
+                        | "/android-native/session-lifecycle"
+                ));
+        if !allowed {
+            return Err(AppError::Forbidden.into());
+        }
+        // Terminal lifecycle action may reconcile an already revoking session;
+        // the lifecycle handler validates that transition itself.
+        if route != "/android-native/session-lifecycle" {
+            app.peek_android_native_stream_ticket(&ticket).await?;
         }
     }
     next.call(req).await

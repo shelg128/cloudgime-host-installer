@@ -254,6 +254,11 @@ pub struct WebServerConfig {
     pub first_login_create_admin: bool,
     pub first_login_assign_global_hosts: bool,
     pub default_user_id: Option<u32>,
+    /// Dedicated rental mode: ordinary/default Host identities cannot reach the
+    /// API. Only independently-authenticated bootstrap routes and scoped rental
+    /// tickets are accepted. Default false preserves legacy operator installs.
+    #[serde(default)]
+    pub rental_stream_ticket_required: bool,
     pub forwarded_header: Option<ForwardedHeaders>,
 }
 
@@ -274,6 +279,7 @@ impl Default for WebServerConfig {
             first_login_create_admin: true,
             first_login_assign_global_hosts: true,
             default_user_id: None,
+            rental_stream_ticket_required: false,
             forwarded_header: None,
         }
     }

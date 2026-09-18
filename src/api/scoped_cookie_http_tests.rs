@@ -160,9 +160,14 @@ async fn bootstrap_cookie_is_scoped_and_revoked_in_http_even_for_host_admin_owne
                 .to_request(),
         )
         .await;
+        let expected = if path == "/android-native/launch-token-from-tunnel" {
+            StatusCode::UNAUTHORIZED // independently verifies Host runtime bearer
+        } else {
+            StatusCode::FORBIDDEN
+        };
         match denied {
-            Ok(r) => assert_eq!(r.status(), StatusCode::FORBIDDEN),
-            Err(e) => assert_eq!(e.as_response_error().status_code(), StatusCode::FORBIDDEN),
+            Ok(r) => assert_eq!(r.status(), expected),
+            Err(e) => assert_eq!(e.as_response_error().status_code(), expected),
         }
     }
     assert!(
@@ -390,4 +395,78 @@ async fn cookie_runtime_wiring_uses_scoped_authority_before_launch_and_cancels_b
     assert!(mic.matches("scope_cancelled(&native_scope)").count() >= 2);
     assert!(mic.contains("permit.attach(child.clone())"));
     assert!(mic.contains("if native_scope.is_none()"));
+}
+
+#[actix_web::test]
+async fn required_mode_blocks_default_user_host_cookie_and_management_apis() {
+    let root = std::env::temp_dir().join(format!("cg-ticket-required-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let mut config = common::config::Config::default();
+    config.data_storage = common::config::StorageConfig::Json {
+        path: root.join("data.json").to_string_lossy().into(),
+        session_expiration_check_interval: Duration::from_secs(300),
+    };
+    // A configured default user must not bypass rental mode even if it does not
+    // resolve: the middleware rejects before AuthenticatedUser is consulted.
+    config.web_server.default_user_id = Some(1);
+    config.web_server.rental_stream_ticket_required = true;
+    config.web_server.url_path_prefix = "/pilot".into();
+    let guarded = Data::new(App::new(config).await.unwrap());
+    let service = test::init_service(
+        HttpApp::new()
+            .app_data(guarded.clone())
+            .service(web::scope("/pilot").service(crate::api::api_service())),
+    )
+    .await;
+    for path in [
+        "/authenticate",
+        "/host/stream",
+        "/host/mic",
+        "/user",
+        "/hosts",
+        "/apps",
+        "/admin/host-capability",
+    ] {
+        let result = test::try_call_service(
+            &service,
+            test::TestRequest::get()
+                .uri(&format!("/pilot/api{path}"))
+                .to_request(),
+        )
+        .await;
+        match result {
+            Ok(r) => assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "{path}"),
+            Err(e) => assert_eq!(
+                e.as_response_error().status_code(),
+                StatusCode::UNAUTHORIZED,
+                "{path}"
+            ),
+        }
+    }
+    // Independently authenticated launch bootstrap is still reachable; its own
+    // one-use credential decides the result, not default_user_id.
+    let bootstrap = test::call_service(
+        &service,
+        test::TestRequest::post()
+            .uri("/pilot/api/android-native/bootstrap-web-session")
+            .set_json(serde_json::json!({"launch_token":"invalid-fixture-token"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        bootstrap.status(),
+        StatusCode::NOT_FOUND,
+        "handler independently rejects invalid launch token"
+    );
+    drop(bootstrap);
+    drop(service);
+    drop(guarded);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[actix_web::test]
+async fn required_mode_defaults_off_for_legacy_configs() {
+    let config: common::config::Config = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert!(!config.web_server.rental_stream_ticket_required);
+    assert!(!common::config::WebServerConfig::default().rental_stream_ticket_required);
 }
