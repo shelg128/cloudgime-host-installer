@@ -605,9 +605,20 @@ impl App {
         let fingerprint = format!("backend-revoke:{}", hex::encode(command.digest()?));
         {
             let mut lifecycle = self.inner.android_native_session_lifecycle.write().await;
-            let state = lifecycle.get_mut(&command.native_session_id)
-                .ok_or("HOST_REVOKE_SESSION_NOT_FOUND")?;
-            let binding = state.rental_binding.as_mut().ok_or("HOST_REVOKE_RENTAL_BINDING_MISSING")?;
+            let Some(state) = lifecycle.get_mut(&command.native_session_id) else {
+                drop(lifecycle);
+                // Restart loses in-memory launch/ticket state. A backend-authenticated
+                // command can still install a deny tombstone for this exact native ID.
+                // Zero owned children is access-revoke evidence only, never cleanup.
+                return crate::native_stream_scope::NATIVE_STREAM_SCOPES
+                    .tombstone_if_unregistered(&command.native_session_id)
+                    .await
+                    .map_err(|_| "HOST_REVOKE_TOMBSTONE_FAILED");
+            };
+            let binding = state
+                .rental_binding
+                .as_mut()
+                .ok_or("HOST_REVOKE_RENTAL_BINDING_MISSING")?;
             // Backend prelogin launch precedes prepare/billing, so those two
             // optional IDs may initially be absent. Handoff + claim + native ID
             // must always match; populated IDs are never overwritten.
@@ -615,12 +626,20 @@ impl App {
                 || binding.handoff_binding_id != command.handoff_binding_id
                 || binding.claim_id != command.claim_id
                 || binding.prepare_operation_id.is_some() != binding.rental_session_id.is_some()
-                || binding.rental_session_id.as_ref().is_some_and(|v| v != &command.session_id)
-                || binding.prepare_operation_id.as_ref().is_some_and(|v| v != &command.prepare_operation_id) {
+                || binding
+                    .rental_session_id
+                    .as_ref()
+                    .is_some_and(|v| v != &command.session_id)
+                || binding
+                    .prepare_operation_id
+                    .as_ref()
+                    .is_some_and(|v| v != &command.prepare_operation_id)
+            {
                 return Err("HOST_REVOKE_RENTAL_BINDING_MISMATCH");
             }
             if state.last_action == "backend_revoke_received"
-                && state.last_reason.as_deref() != Some(fingerprint.as_str()) {
+                && state.last_reason.as_deref() != Some(fingerprint.as_str())
+            {
                 return Err("HOST_REVOKE_OPERATION_CONFLICT");
             }
             binding.rental_session_id = Some(command.session_id.clone());
@@ -632,8 +651,11 @@ impl App {
         }
         // This denies new authorizations before touching existing channels. No
         // unknown session is treated as stopped, and no cleanup receipt is made.
-        self.invalidate_android_native_session_artifacts(&command.native_session_id).await;
-        crate::native_stream_scope::NATIVE_STREAM_SCOPES.stop(&command.native_session_id).await
+        self.invalidate_android_native_session_artifacts(&command.native_session_id)
+            .await;
+        crate::native_stream_scope::NATIVE_STREAM_SCOPES
+            .stop(&command.native_session_id)
+            .await
             .map_err(|_| "HOST_REVOKE_STREAM_TERMINATION_UNVERIFIED")
     }
 
@@ -1064,7 +1086,9 @@ impl App {
         // A fresh cookie capability may coexist with a consumed native bearer,
         // but must not extend the parent's deadline or become a Host login.
         tickets.retain(|_, value| value.expires_at_unix_ms > now);
-        if tickets.len() >= 4096 { return Err(AppError::Unauthorized); }
+        if tickets.len() >= 4096 {
+            return Err(AppError::Unauthorized);
+        }
         let cookie_record = AndroidNativeStreamTicketRecord {
             stream_ticket: format!("mlnatstream_{}", Uuid::new_v4().to_simple()),
             issued_at_unix_ms: now,

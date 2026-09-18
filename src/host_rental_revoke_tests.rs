@@ -259,6 +259,8 @@ async fn backend_command_revokes_prelogin_without_browser_and_replay_cannot_targ
                 .is_err()
         );
         assert!(!scope.is_cancelled());
+        assert!(!unrelated.is_cancelled());
+        assert!(other.lock().await.try_wait().unwrap().is_none());
         assert!(own.lock().await.try_wait().unwrap().is_none());
     }
     let verified = signed(c.clone());
@@ -296,6 +298,53 @@ async fn backend_command_revokes_prelogin_without_browser_and_replay_cannot_targ
     drop(app);
     std::fs::remove_dir_all(root).unwrap();
 }
+#[actix_web::test]
+async fn backend_command_after_restart_creates_only_exact_deny_tombstone() {
+    let root = std::env::temp_dir().join(format!("cg-revoke-restart-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let mut config = common::config::Config::default();
+    config.data_storage = common::config::StorageConfig::Json {
+        path: root.join("data.json").to_string_lossy().into(),
+        session_expiration_check_interval: Duration::from_secs(300),
+    };
+    let app = App::new(config).await.unwrap();
+    let mut old = command();
+    old.native_session_id = format!("old-native-{}", uuid::Uuid::new_v4());
+    let unrelated_id = format!("unrelated-{}", uuid::Uuid::new_v4());
+    let unrelated = crate::native_stream_scope::NATIVE_STREAM_SCOPES
+        .begin(&unrelated_id, 91)
+        .await
+        .unwrap();
+    let other = child(&unrelated).await;
+    assert_eq!(
+        app.revoke_backend_rental_stream(&signed(old.clone()))
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        crate::native_stream_scope::NATIVE_STREAM_SCOPES
+            .begin(&old.native_session_id, 92)
+            .await
+            .is_err()
+    );
+    assert!(!unrelated.is_cancelled());
+    assert!(other.lock().await.try_wait().unwrap().is_none());
+    // Exact replay remains idempotent and still is not a cleanup receipt.
+    assert_eq!(
+        app.revoke_backend_rental_stream(&signed(old))
+            .await
+            .unwrap(),
+        0
+    );
+    crate::native_stream_scope::NATIVE_STREAM_SCOPES
+        .stop(&unrelated_id)
+        .await
+        .unwrap();
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn worker_is_opt_in_and_cannot_claim_cleanup_complete() {
     let s = include_str!("host_rental_revoke.rs");
