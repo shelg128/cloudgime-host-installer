@@ -12,12 +12,13 @@ fn instant(ms: u64) -> SystemTime {
 }
 fn valid(now: u64, session: &str, generation: u64) -> String {
     format!(
-        r#"{{"schemaVersion":1,"provisioningBindingFingerprint":"{}","sessionId":"{}","prepareOperationId":"prepare_desktop_0001","handoffBindingId":"11111111-1111-4111-8111-111111111111","nativeSessionId":"native","claimId":"claim","pcId":"pc","userId":"user","applicationActivationId":"activation","windowsSessionId":1,"logonSid":"S-1-5-5-1-2","desktopPath":"CloudGimeAgent-{}\\Default","generation":{},"observedAtUnixMs":{}}}"#,
+        r#"{{"schemaVersion":1,"provisioningBindingFingerprint":"{}","sessionId":"{}","prepareOperationId":"prepare_desktop_0001","handoffBindingId":"11111111-1111-4111-8111-111111111111","nativeSessionId":"native","claimId":"claim","pcId":"pc","userId":"user","applicationActivationId":"activation","windowsSessionId":1,"logonSid":"S-1-5-5-1-2","desktopPath":"CloudGimeAgent-{}\\Default","generation":{},"observedAtUnixMs":{},"validUntilUnixMs":{}}}"#,
         "a".repeat(64),
         session,
         "b".repeat(32),
         generation,
-        now
+        now,
+        now + 30_000
     )
 }
 struct Fixture {

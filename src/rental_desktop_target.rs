@@ -36,6 +36,7 @@ pub(crate) struct RentalDesktopTarget {
     pub desktop_path: String,
     pub generation: u64,
     pub observed_at_unix_ms: u64,
+    pub valid_until_unix_ms: u64,
 }
 
 /// Must originate at authenticated setup, never constructed from the target file
@@ -283,10 +284,19 @@ fn validate(v: &RentalDesktopTarget, now: SystemTime) -> Result<(), TargetError>
     let observed = SystemTime::UNIX_EPOCH
         .checked_add(Duration::from_millis(v.observed_at_unix_ms))
         .ok_or(TargetError::Stale)?;
-    if now
-        .duration_since(observed)
-        .map_err(|_| TargetError::Stale)?
-        >= MAX_AGE
+    let valid_until = SystemTime::UNIX_EPOCH
+        .checked_add(Duration::from_millis(v.valid_until_unix_ms))
+        .ok_or(TargetError::Stale)?;
+    if valid_until <= observed
+        || valid_until
+            .duration_since(observed)
+            .map_err(|_| TargetError::Stale)?
+            > MAX_AGE
+        || now
+            .duration_since(observed)
+            .map_err(|_| TargetError::Stale)?
+            >= MAX_AGE
+        || now >= valid_until
     {
         return Err(TargetError::Stale);
     }
