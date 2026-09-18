@@ -93,7 +93,27 @@ impl NativeStreamRegistry {
         Ok(count)
     }
 }
+// Lifetime of the owning connection future, including early startup failure.
+// Cancellation is synchronous; OS termination is bounded and uses retained handles.
+pub(crate) struct NativeConnectionGuard(Arc<NativeStreamScope>);
+impl Drop for NativeConnectionGuard {
+    fn drop(&mut self) {
+        self.0.cancelled.send_replace(true);
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let scope = self.0.clone();
+            runtime.spawn(async move {
+                if let Err(error) = scope.stop_owned_children().await {
+                    log::warn!("[Scoped connection]: cleanup unverified: {error}");
+                }
+            });
+        }
+    }
+}
+
 impl NativeStreamScope {
+    pub(crate) fn connection_guard(self: &Arc<Self>) -> NativeConnectionGuard {
+        NativeConnectionGuard(self.clone())
+    }
     pub(crate) fn is_cancelled(&self) -> bool {
         *self.cancelled.borrow()
     }
@@ -199,6 +219,31 @@ mod tests {
         child
     }
     #[tokio::test]
+    async fn connection_failure_cancels_only_its_owned_children() {
+        let registry = NativeStreamRegistry::default();
+        let failed = registry.begin("failed-start", 1).await.unwrap();
+        let other = registry.begin("other", 2).await.unwrap();
+        let guard = failed.connection_guard();
+        let a = attach(&failed).await;
+        let b = attach(&other).await;
+        drop(guard);
+        assert!(failed.is_cancelled());
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if a.lock().await.try_wait().unwrap().is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(b.lock().await.try_wait().unwrap().is_none());
+        assert!(!other.is_cancelled());
+        registry.stop("other").await.unwrap();
+    }
+
+    #[tokio::test]
     async fn cleanup_one_session_never_takes_other_sessions_child() {
         let registry = NativeStreamRegistry::default();
         let old = registry.begin("old", 1).await.unwrap();
@@ -293,15 +338,14 @@ mod tests {
     fn native_stream_source_never_publishes_or_delayed_kills_global_children() {
         let source = include_str!("api/stream.rs");
         let normalized = source.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(normalized.contains(
-            "if native_scope.is_none() { replace_active_child(&ACTIVE_STREAM_CHILD"
-        ));
+        assert!(
+            normalized
+                .contains("if native_scope.is_none() { replace_active_child(&ACTIVE_STREAM_CHILD")
+        );
         assert!(normalized.contains(
             "if native_scope.is_none() { replace_active_child( &ACTIVE_WINDOW_WATCH_CHILD"
         ));
-        assert!(normalized.contains(
-            "if native_scope.is_none() { let child = child.clone();"
-        ));
+        assert!(normalized.contains("if native_scope.is_none() { let child = child.clone();"));
         let cleanup = source
             .split("pub(crate) async fn cleanup_android_native_stream_session")
             .nth(1)
