@@ -45,6 +45,7 @@ mod web;
 mod cli;
 mod human_json;
 mod native_stream_scope;
+mod host_rental_revoke;
 mod rental_desktop_target;
 #[path = "provisioning.rs"]
 mod provisioning;
@@ -264,6 +265,9 @@ async fn start(config: Config) -> Result<(), anyhow::Error> {
 
     let app = App::new(config.clone()).await?;
     let app = Data::new(app);
+    // Disabled by default; only polls immutable backend revoke commands.
+    // It cannot submit cleanup receipts or release claims.
+    let _rental_revoke_worker = host_rental_revoke::spawn_if_enabled(app.clone(), _bundle_root.clone());
 
     let bind_address = app.config().web_server.bind_address;
     let server = HttpServer::new({

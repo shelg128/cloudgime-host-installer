@@ -597,6 +597,46 @@ impl App {
         self.inner.storage.remove_session_token(session).await
     }
 
+    pub(crate) async fn revoke_backend_rental_stream(
+        &self,
+        verified: &crate::host_rental_revoke::VerifiedRevokeCommand,
+    ) -> Result<usize, &'static str> {
+        let command = verified.command();
+        let fingerprint = format!("backend-revoke:{}", hex::encode(command.digest()?));
+        {
+            let mut lifecycle = self.inner.android_native_session_lifecycle.write().await;
+            let state = lifecycle.get_mut(&command.native_session_id)
+                .ok_or("HOST_REVOKE_SESSION_NOT_FOUND")?;
+            let binding = state.rental_binding.as_mut().ok_or("HOST_REVOKE_RENTAL_BINDING_MISSING")?;
+            // Backend prelogin launch precedes prepare/billing, so those two
+            // optional IDs may initially be absent. Handoff + claim + native ID
+            // must always match; populated IDs are never overwritten.
+            if state.session_id != command.native_session_id
+                || binding.handoff_binding_id != command.handoff_binding_id
+                || binding.claim_id != command.claim_id
+                || binding.prepare_operation_id.is_some() != binding.rental_session_id.is_some()
+                || binding.rental_session_id.as_ref().is_some_and(|v| v != &command.session_id)
+                || binding.prepare_operation_id.as_ref().is_some_and(|v| v != &command.prepare_operation_id) {
+                return Err("HOST_REVOKE_RENTAL_BINDING_MISMATCH");
+            }
+            if state.last_action == "backend_revoke_received"
+                && state.last_reason.as_deref() != Some(fingerprint.as_str()) {
+                return Err("HOST_REVOKE_OPERATION_CONFLICT");
+            }
+            binding.rental_session_id = Some(command.session_id.clone());
+            binding.prepare_operation_id = Some(command.prepare_operation_id.clone());
+            state.hidden_state_status = "revoking".into();
+            state.last_action = "backend_revoke_received".into();
+            state.last_reason = Some(fingerprint);
+            state.last_updated_unix_ms = unix_time_ms_now();
+        }
+        // This denies new authorizations before touching existing channels. No
+        // unknown session is treated as stopped, and no cleanup receipt is made.
+        self.invalidate_android_native_session_artifacts(&command.native_session_id).await;
+        crate::native_stream_scope::NATIVE_STREAM_SCOPES.stop(&command.native_session_id).await
+            .map_err(|_| "HOST_REVOKE_STREAM_TERMINATION_UNVERIFIED")
+    }
+
     pub async fn issue_android_native_launch_token(
         &self,
         user_id: UserId,
