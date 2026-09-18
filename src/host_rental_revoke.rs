@@ -254,8 +254,8 @@ impl Drop for RevokeWorker {
         }
     }
 }
-pub(crate) fn spawn_if_enabled(app: Data<App>, root: PathBuf) -> RevokeWorker {
-    if std::env::var("CLOUDGIME_HOST_REVOKE_ENABLED").as_deref() != Ok("true") {
+pub(crate) fn spawn_if_enabled(app: Data<App>, root: PathBuf, enabled: bool) -> RevokeWorker {
+    if !enabled {
         return RevokeWorker(None);
     }
     RevokeWorker(Some(tokio::spawn(async move {
@@ -274,9 +274,14 @@ async fn run(app: Data<App>, root: PathBuf) -> Result<(), &'static str> {
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|_| "HOST_REVOKE_CLIENT_FAILED")?;
+    let mut last_poll_state: Option<&'static str> = None;
     loop {
         match poll(&client, &root, &pinned).await {
             Ok(commands) => {
+                if last_poll_state != Some("HOST_REVOKE_POLL_AUTHENTICATED") {
+                    log::info!("HOST_REVOKE_POLL_AUTHENTICATED");
+                    last_poll_state = Some("HOST_REVOKE_POLL_AUTHENTICATED");
+                }
                 for command in commands {
                     // No receipt is sent here: owned-child exit is not complete
                     // Sunshine/native-direct/alternative-remote cleanup evidence.
@@ -285,7 +290,12 @@ async fn run(app: Data<App>, root: PathBuf) -> Result<(), &'static str> {
                     }
                 }
             }
-            Err(code) => log::warn!("{code}"),
+            Err(code) => {
+                if last_poll_state != Some(code) {
+                    log::warn!("{code}");
+                }
+                last_poll_state = Some(code);
+            }
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }

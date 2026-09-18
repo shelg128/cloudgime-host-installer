@@ -43,12 +43,12 @@ mod app;
 mod web;
 
 mod cli;
+mod host_rental_revoke;
 mod human_json;
 mod native_stream_scope;
-mod host_rental_revoke;
-mod rental_desktop_target;
 #[path = "provisioning.rs"]
 mod provisioning;
+mod rental_desktop_target;
 mod stream_controller;
 
 #[actix_web::main]
@@ -267,7 +267,13 @@ async fn start(config: Config) -> Result<(), anyhow::Error> {
     let app = Data::new(app);
     // Disabled by default; only polls immutable backend revoke commands.
     // It cannot submit cleanup receipts or release claims.
-    let _rental_revoke_worker = host_rental_revoke::spawn_if_enabled(app.clone(), _bundle_root.clone());
+    let revoke_enabled = app.config().web_server.rental_access_revocation_enabled
+        && app.config().web_server.rental_stream_ticket_required;
+    if app.config().web_server.rental_access_revocation_enabled && !revoke_enabled {
+        warn!("HOST_REVOKE_DISABLED_TICKET_GATE_REQUIRED");
+    }
+    let _rental_revoke_worker =
+        host_rental_revoke::spawn_if_enabled(app.clone(), _bundle_root.clone(), revoke_enabled);
 
     let bind_address = app.config().web_server.bind_address;
     let server = HttpServer::new({

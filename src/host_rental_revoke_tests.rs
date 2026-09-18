@@ -299,7 +299,18 @@ async fn backend_command_revokes_prelogin_without_browser_and_replay_cannot_targ
 #[test]
 fn worker_is_opt_in_and_cannot_claim_cleanup_complete() {
     let s = include_str!("host_rental_revoke.rs");
-    assert!(s.contains("CLOUDGIME_HOST_REVOKE_ENABLED"));
+    let compact: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(compact.contains("if!enabled{returnRevokeWorker(None);}"));
+    let config: common::config::Config = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert!(!config.web_server.rental_access_revocation_enabled);
+    assert!(!config.web_server.rental_stream_ticket_required);
+    let main: String = include_str!("main.rs")
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert!(main.contains(
+        "rental_access_revocation_enabled&&app.config().web_server.rental_stream_ticket_required"
+    ));
     assert!(s.contains("https_only(true)"));
     assert!(s.contains("redirect(reqwest::redirect::Policy::none())"));
     assert!(!s.contains("/rental-cleanup-receipt"));

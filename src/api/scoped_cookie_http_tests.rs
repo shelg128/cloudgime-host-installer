@@ -383,7 +383,14 @@ async fn cookie_runtime_wiring_uses_scoped_authority_before_launch_and_cancels_b
     assert!(
         start.contains("let scoped_ticket = crate::api::auth::scoped_stream_ticket(&request)?;")
     );
-    assert!(start.contains("if let Some(stream_ticket) = scoped_ticket.as_ref()"));
+    assert!(start.contains("scoped_ticket.as_ref()"));
+    assert!(start.contains("authorize_android_native_stream_ticket_for_stream"));
+    assert!(
+        start
+            .find("authorize_android_native_stream_ticket_for_stream")
+            .unwrap()
+            < start.find("// -- Starting stage: launch streamer").unwrap()
+    );
     assert!(start.contains("monitor_ticket_scope(web_app.clone(), record.clone(), scope.clone())"));
     assert!(start.matches("scope_cancelled(&native_scope)").count() >= 2);
     let mic = source.split("pub async fn start_host_mic(").nth(1).unwrap();

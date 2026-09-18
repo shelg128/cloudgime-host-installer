@@ -259,6 +259,10 @@ pub struct WebServerConfig {
     /// tickets are accepted. Default false preserves legacy operator installs.
     #[serde(default)]
     pub rental_stream_ticket_required: bool,
+    /// Poll exact-bound backend revoke commands. This does not enable cleanup
+    /// receipts, Sentinel cleanup, billing, or claim release.
+    #[serde(default)]
+    pub rental_access_revocation_enabled: bool,
     pub forwarded_header: Option<ForwardedHeaders>,
 }
 
@@ -280,6 +284,7 @@ impl Default for WebServerConfig {
             first_login_assign_global_hosts: true,
             default_user_id: None,
             rental_stream_ticket_required: false,
+            rental_access_revocation_enabled: false,
             forwarded_header: None,
         }
     }
