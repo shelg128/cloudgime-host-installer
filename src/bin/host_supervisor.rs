@@ -914,7 +914,17 @@ fn service_watchdog_tick(
         .lifecycle_updated_at_unix_ms
         .is_some_and(|value| now_unix_ms().saturating_sub(value) <= 60_000);
 
-    let needs_recovery = if matches!(state.lifecycle_phase, LifecyclePhase::Failed) {
+    let stale_route_recovery = stale_route_recovery_can_restart(
+        &state,
+        now_unix_ms(),
+        required_processes_ready,
+        local_http_ready,
+        paths.command_path.exists(),
+        bundle_has_active_stream_session(paths)?,
+    );
+    let needs_recovery = if stale_route_recovery {
+        Some("service_watchdog_stale_route_recovery".to_string())
+    } else if matches!(state.lifecycle_phase, LifecyclePhase::Failed) {
         Some("service_watchdog_failed_phase".to_string())
     } else if !required_processes_ready {
         if matches!(
@@ -1038,6 +1048,85 @@ fn service_activation_tick(
     }
 
     Ok(())
+}
+
+// A client may request a route reconnect and then disappear. Healthy processes
+// alone must not silently turn that unfinished recovery into READY. Once idle
+// and stale, delegate to the existing bounded recovery command, which revalidates
+// activation and runtime health before publishing READY. No PC/route fallback.
+fn stale_route_recovery_can_restart(
+    state: &SupervisorState,
+    now: u64,
+    required_processes_ready: bool,
+    local_http_ready: bool,
+    command_pending: bool,
+    active_stream: bool,
+) -> bool {
+    matches!(state.lifecycle_phase, LifecyclePhase::Recovering)
+        && state.lifecycle_reason.as_deref() == Some("route_failure_reconnect")
+        && required_processes_ready
+        && local_http_ready
+        && !command_pending
+        && !active_stream
+        && !matches!(state.last_command_status.as_deref(), Some("running" | "queued"))
+        && state.lifecycle_updated_at_unix_ms.is_some_and(|updated| {
+            updated > 0 && now.checked_sub(updated).is_some_and(|age| age > 60_000)
+        })
+}
+
+#[cfg(test)]
+mod stale_route_recovery_tests {
+    use super::*;
+
+    fn idle_stale() -> SupervisorState {
+        SupervisorState {
+            lifecycle_phase: LifecyclePhase::Recovering,
+            lifecycle_reason: Some("route_failure_reconnect".into()),
+            lifecycle_updated_at_unix_ms: Some(100_000),
+            last_command_status: Some("ok".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn idle_stale_route_recovery_enters_bounded_restart_not_ready_override() {
+        let state = idle_stale();
+        assert!(stale_route_recovery_can_restart(&state, 160_001, true, true, false, false));
+        assert!(matches!(state.lifecycle_phase, LifecyclePhase::Recovering));
+    }
+
+    #[test]
+    fn recovery_does_not_interrupt_media_or_commands_or_mask_unhealthy_runtime() {
+        for (processes, http, pending, active) in [
+            (false, true, false, false), (true, false, false, false),
+            (true, true, true, false), (true, true, false, true),
+        ] {
+            assert!(!stale_route_recovery_can_restart(&idle_stale(), 200_000, processes, http, pending, active));
+        }
+        for status in ["running", "queued"] {
+            let mut state = idle_stale();
+            state.last_command_status = Some(status.into());
+            assert!(!stale_route_recovery_can_restart(&state, 200_000, true, true, false, false));
+        }
+    }
+
+    #[test]
+    fn fresh_unknown_future_and_other_lifecycle_states_never_trigger_route_recovery() {
+        let state = idle_stale();
+        for now in [99_999, 100_000, 160_000] {
+            assert!(!stale_route_recovery_can_restart(&state, now, true, true, false, false));
+        }
+        for stamp in [None, Some(0)] {
+            let mut state = idle_stale(); state.lifecycle_updated_at_unix_ms = stamp;
+            assert!(!stale_route_recovery_can_restart(&state, 200_000, true, true, false, false));
+        }
+        for phase in [LifecyclePhase::Ready, LifecyclePhase::Starting, LifecyclePhase::Stopping, LifecyclePhase::Failed] {
+            let mut state = idle_stale(); state.lifecycle_phase = phase;
+            assert!(!stale_route_recovery_can_restart(&state, 200_000, true, true, false, false));
+        }
+        let mut state = idle_stale(); state.lifecycle_reason = Some("sunshine_capture_init_failed".into());
+        assert!(!stale_route_recovery_can_restart(&state, 200_000, true, true, false, false));
+    }
 }
 
 fn normalize_failed_phase_if_runtime_healthy(
