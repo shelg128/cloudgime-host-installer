@@ -17,6 +17,14 @@
       "auto-detach": true,
       "wait-all": true,
       "image-path": "steam.png"
+    },
+    {
+      "name": "CloudGime Sentinel Login",
+      "cmd": "C:\\Program Files\\Sentinel Launcher\\Sentinel Launcher.exe",
+      "working-dir": "C:\\Program Files\\Sentinel Launcher",
+      "auto-detach": true,
+      "wait-all": true,
+      "image-path": "desktop.png"
     }
   ]
 }

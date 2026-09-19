@@ -33,6 +33,8 @@ use serde_json::Value;
 mod provisioning;
 #[path = "../host_node_runtime.rs"]
 mod host_node_runtime;
+#[path = "../sunshine_profile.rs"]
+mod sunshine_profile;
 
 #[cfg(windows)]
 use windows_service::{
@@ -596,9 +598,14 @@ fn run() -> Result<()> {
             #[cfg(windows)]
             host_node_runtime::sync(&paths, &mut activation)?;
             if !host_node_runtime::allows(&activation) { bail!("NODE_RUNTIME_NOT_AUTHORIZED") }
+            let runtime_key = read_selected_runtime_key(&paths);
+            let runtime_dir = resolve_runtime_dir(&paths, &runtime_key);
+            let apps_path = runtime_dir.join("config").join("apps.json");
+            let profile_changed = sunshine_profile::reconcile_sentinel_profile_file(&apps_path)?;
             println!("{}", serde_json::json!({"ok":true,"pcId":activation.sentinel_pc_id,
                 "hostId":activation.host_id,"activationState":activation.activation_state,
-                "setupTokenUsed":false,"runtimeStarted":false,"readinessClaimed":false}));
+                "setupTokenUsed":false,"runtimeStarted":false,"readinessClaimed":false,
+                "sentinelProfileChanged":profile_changed}));
             Ok(())
         }
         SupervisorCommand::Status => {
@@ -4219,6 +4226,12 @@ fn compact_log_tail(raw: &str, max_chars: usize) -> String {
 }
 
 fn start_sunshine_runtime(paths: &BundlePaths, runtime_dir: &Path) -> Result<u32> {
+    let apps_path = runtime_dir.join("config").join("apps.json");
+    let profile_changed = sunshine_profile::reconcile_sentinel_profile_file(&apps_path)
+        .with_context(|| format!("failed to reconcile Sentinel Sunshine profile at {}", apps_path.display()))?;
+    if profile_changed {
+        append_supervisor_log(paths, "reconciled Sentinel Sunshine single-instance profile")?;
+    }
     let sunshine_service_binary = runtime_dir.join("tools").join("sunshinesvc.exe");
     if sunshine_service_binary.exists() {
         match ensure_managed_sunshine_service(paths, runtime_dir).and_then(|sunshine_service| {
