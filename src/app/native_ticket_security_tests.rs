@@ -624,6 +624,152 @@ async fn valid_bearer_controls_require_exact_ids_and_live_lifecycle() {
     );
 }
 
+async fn rental_device_ticket_fixture() -> (App, PathBuf, AndroidNativeStreamTicketRecord) {
+    let (app, root) = fixture().await;
+    let binding = AndroidNativeRentalBindingRecord {
+        handoff_binding_id: Uuid::new_v4().to_string(),
+        claim_id: "claim-root".into(),
+        prepare_operation_id: None,
+        rental_session_id: None,
+    };
+    let issued = app.issue_android_native_launch_token(
+        UserId(9001), HostId(1), AppId(1379015545),
+        AndroidNativeHostBindingRecord {
+            name: "fixture".into(), address: "127.0.0.1".into(), http_port: 47989,
+            https_port: None, external_port: None, unique_id: None, local_ip: None,
+        },
+        AndroidNativeTrustBootstrapRecord {
+            paired: false, pair_mode: "fixture".into(), client_unique_id: None,
+            client_certificate_pem: None, client_private_key_pem: None,
+            server_certificate_pem: None,
+        },
+        Some(binding),
+    ).await;
+    let (_, mut ticket) = app.consume_android_native_launch_token_with_stream_ticket(
+        &issued.launch_token,
+    ).await.unwrap();
+    // A short remaining lease makes accidental extension by sibling issuance visible.
+    ticket.expires_at_unix_ms = unix_time_ms_now() + 60_000;
+    app.inner.android_native_stream_tickets.write().await
+        .insert(ticket.stream_ticket.clone(), ticket.clone());
+    (app, root, ticket)
+}
+
+#[actix_web::test]
+async fn same_claim_sibling_tickets_coexist_without_extending_authority() {
+    let (app, root, first) = rental_device_ticket_fixture().await;
+    let second = app.issue_sibling_rental_stream_ticket(
+        &first.stream_ticket, "claim-root", first.host_id, first.app_id,
+    ).await.unwrap();
+    let third = app.issue_sibling_rental_stream_ticket(
+        &second.stream_ticket, "claim-root", first.host_id, first.app_id,
+    ).await.unwrap();
+    assert_ne!(first.stream_ticket, second.stream_ticket);
+    assert_ne!(second.stream_ticket, third.stream_ticket);
+    for ticket in [&first, &second, &third] {
+        assert_eq!(ticket.session_id, first.session_id);
+        assert_eq!(ticket.token_id, first.token_id, "identifier remains bound to the root lifecycle");
+        assert_eq!(ticket.user_id, first.user_id);
+        assert_eq!(ticket.host_id, first.host_id);
+        assert_eq!(ticket.app_id, first.app_id);
+        assert_eq!(ticket.rental_binding, first.rental_binding);
+        assert_eq!(ticket.expires_at_unix_ms, first.expires_at_unix_ms);
+        assert!(app.authorize_android_native_stream_ticket_for_stream(
+            &ticket.stream_ticket, ticket.host_id, ticket.app_id,
+        ).await.is_ok());
+    }
+    let before = app.inner.android_native_stream_tickets.read().await.len();
+    for (credential, claim, host, application) in [
+        ("bad-bearer", "claim-root", first.host_id, first.app_id),
+        (first.token_id.as_str(), "claim-root", first.host_id, first.app_id),
+        (first.stream_ticket.as_str(), "other-claim", first.host_id, first.app_id),
+        (first.stream_ticket.as_str(), " claim-root", first.host_id, first.app_id),
+        (first.stream_ticket.as_str(), "", first.host_id, first.app_id),
+        (first.stream_ticket.as_str(), "claim-root", HostId(2), first.app_id),
+        (first.stream_ticket.as_str(), "claim-root", first.host_id, AppId(881448767)),
+    ] {
+        assert!(app.issue_sibling_rental_stream_ticket(credential, claim, host, application).await.is_err());
+        assert_eq!(app.inner.android_native_stream_tickets.read().await.len(), before);
+    }
+    // This is the same terminal lifecycle guard used by authorization, not just map removal.
+    app.update_android_native_session_lifecycle(
+        Some(&first.stream_ticket), Some(&first.token_id), Some(&first.session_id),
+        "session_revoke_requested".into(), None, None,
+    ).await.unwrap();
+    for ticket in [&first, &second, &third] {
+        assert!(app.peek_android_native_stream_ticket(&ticket.stream_ticket).await.is_err());
+        assert!(app.issue_sibling_rental_stream_ticket(
+            &ticket.stream_ticket, "claim-root", ticket.host_id, ticket.app_id,
+        ).await.is_err());
+        assert!(app.refresh_android_native_stream_ticket(
+            &ticket.stream_ticket, Some(&ticket.token_id), Some(&ticket.session_id),
+        ).await.is_err());
+    }
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[actix_web::test]
+async fn sibling_ticket_requires_exact_live_root_binding() {
+    let (app, root, parent) = rental_device_ticket_fixture().await;
+    let baseline = app.inner.android_native_session_lifecycle.read().await[&parent.session_id].clone();
+    for case in 0..8 {
+        let mut state = baseline.clone();
+        match case {
+            0 => state.user_id = UserId(555),
+            1 => state.token_id = "different-root-token-id".into(),
+            2 => state.rental_binding.as_mut().unwrap().claim_id = "other-claim".into(),
+            3 => state.rental_binding.as_mut().unwrap().handoff_binding_id = Uuid::new_v4().to_string(),
+            4 => state.rental_binding = None,
+            5 => state.hidden_state_status = "revoking".into(),
+            6 => state.completed_at_unix_ms = Some(unix_time_ms_now()),
+            _ => state.session_status = "ended".into(),
+        }
+        app.inner.android_native_session_lifecycle.write().await.insert(parent.session_id.clone(), state);
+        assert!(app.issue_sibling_rental_stream_ticket(
+            &parent.stream_ticket, "claim-root", parent.host_id, parent.app_id,
+        ).await.is_err(), "case {case} must fail without minting a bearer");
+        assert_eq!(app.inner.android_native_stream_tickets.read().await.len(), 1);
+    }
+    app.inner.android_native_session_lifecycle.write().await.insert(parent.session_id.clone(), baseline);
+    let mut consumed = parent.clone();
+    consumed.consumed_at_unix_ms = Some(unix_time_ms_now());
+    app.inner.android_native_stream_tickets.write().await.insert(parent.stream_ticket.clone(), consumed);
+    assert!(matches!(app.issue_sibling_rental_stream_ticket(
+        &parent.stream_ticket, "claim-root", parent.host_id, parent.app_id,
+    ).await, Err(AppError::AndroidNativeStreamTicketConsumed)));
+    let mut expired = parent.clone();
+    expired.expires_at_unix_ms = unix_time_ms_now().saturating_sub(1);
+    app.inner.android_native_stream_tickets.write().await.insert(parent.stream_ticket.clone(), expired);
+    assert!(app.issue_sibling_rental_stream_ticket(
+        &parent.stream_ticket, "claim-root", parent.host_id, parent.app_id,
+    ).await.is_err());
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[actix_web::test]
+async fn sibling_capability_limit_is_bounded_and_does_not_evict_other_bearers() {
+    let (app, root, parent) = rental_device_ticket_fixture().await;
+    // Capability capacity is not a device count. Parent + 63 siblings = 64.
+    for _ in 1..64 {
+        app.issue_sibling_rental_stream_ticket(
+            &parent.stream_ticket, "claim-root", parent.host_id, parent.app_id,
+        ).await.unwrap();
+    }
+    assert_eq!(app.inner.android_native_stream_tickets.read().await.len(), 64);
+    assert!(matches!(app.issue_sibling_rental_stream_ticket(
+        &parent.stream_ticket, "claim-root", parent.host_id, parent.app_id,
+    ).await, Err(AppError::AndroidNativeTicketCapacity)));
+    let tickets = app.inner.android_native_stream_tickets.read().await.values().cloned().collect::<Vec<_>>();
+    for ticket in tickets {
+        assert!(app.peek_android_native_stream_ticket(&ticket.stream_ticket).await.is_ok());
+        assert_eq!(ticket.expires_at_unix_ms, parent.expires_at_unix_ms);
+    }
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[actix_web::test]
 async fn valid_refresh_requires_possession_and_keeps_host_app_binding() {
     let (app, _root) = fixture().await;

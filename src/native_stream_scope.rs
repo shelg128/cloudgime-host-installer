@@ -3,7 +3,7 @@
 //! server termination proof, or a claim-release authority. No global/PID scan.
 use std::{
     collections::HashMap,
-    sync::{Arc, LazyLock},
+    sync::{Arc, LazyLock, Weak},
     time::Duration,
 };
 use tokio::{
@@ -16,17 +16,22 @@ const CAPACITY: usize = 4096;
 const STOP_TIMEOUT: Duration = Duration::from_secs(8);
 #[derive(Default)]
 pub(crate) struct NativeStreamRegistry {
-    sessions: Mutex<HashMap<String, Entry>>,
+    sessions: Arc<Mutex<HashMap<String, Entry>>>,
 }
 #[derive(Default)]
 struct Entry {
     revoked: bool,
+    registered: bool,
+    verified_child_exits: usize,
     connections: HashMap<u64, Arc<NativeStreamScope>>,
 }
 pub(crate) static NATIVE_STREAM_SCOPES: LazyLock<NativeStreamRegistry> =
     LazyLock::new(NativeStreamRegistry::default);
 
 pub(crate) struct NativeStreamScope {
+    registry: Weak<Mutex<HashMap<String, Entry>>>,
+    session_id: String,
+    generation: u64,
     cancelled: watch::Sender<bool>,
     children: Mutex<Vec<Arc<Mutex<Child>>>>,
 }
@@ -58,9 +63,13 @@ impl NativeStreamRegistry {
         }
         let (cancelled, _) = watch::channel(false);
         let scope = Arc::new(NativeStreamScope {
+            registry: Arc::downgrade(&self.sessions),
+            session_id: session_id.into(),
+            generation,
             cancelled,
             children: Mutex::new(Vec::new()),
         });
+        entry.registered = true;
         entry.connections.insert(generation, scope.clone());
         Ok(scope)
     }
@@ -97,21 +106,26 @@ impl NativeStreamRegistry {
             // Even a revoke arriving before begin creates a deny tombstone.
             let entry = sessions.entry(session_id.into()).or_default();
             entry.revoked = true;
+            if !entry.registered {
+                return Err("native_scope_no_registered_connection".into());
+            }
             for scope in entry.connections.values() {
                 scope.cancelled.send_replace(true);
             }
             entry.connections.values().cloned().collect::<Vec<_>>()
         };
-        if scopes.is_empty() {
-            return Err("native_scope_no_registered_connection".into());
-        }
-        let mut count = 0;
+        // Closing one device can retire its scope concurrently. Each successful
+        // stop is recorded once under the registry lock, so a repeated root
+        // revoke returns stable evidence without counting a child twice.
         for scope in scopes {
-            count += timeout(STOP_TIMEOUT, scope.stop_children())
-                .await
-                .map_err(|_| "native_child_exit_not_verified".to_string())??;
+            scope.stop_owned_children().await?;
         }
-        Ok(count)
+        let sessions = self.sessions.lock().await;
+        let entry = sessions.get(session_id).ok_or("native_scope_missing")?;
+        if !entry.connections.is_empty() {
+            return Err("native_child_exit_not_verified".into());
+        }
+        Ok(entry.verified_child_exits)
     }
 }
 // Lifetime of the owning connection future, including early startup failure.
@@ -154,9 +168,23 @@ impl NativeStreamScope {
     // children. A cancelled launch cannot be reported stopped while unregistered.
     pub(crate) async fn stop_owned_children(&self) -> Result<usize, String> {
         self.cancelled.send_replace(true);
-        timeout(STOP_TIMEOUT, self.stop_children())
+        let count = timeout(STOP_TIMEOUT, self.stop_children())
             .await
-            .map_err(|_| "native_child_exit_not_verified".to_string())?
+            .map_err(|_| "native_child_exit_not_verified".to_string())??;
+        // Never discard an unverified child on error/timeout. A cancelled scope
+        // still consumes capacity until every retained OS handle has exited.
+        if let Some(registry) = self.registry.upgrade() {
+            let mut sessions = registry.lock().await;
+            if let Some(entry) = sessions.get_mut(&self.session_id) {
+                let same_scope = entry.connections.get(&self.generation)
+                    .is_some_and(|current| std::ptr::eq(Arc::as_ptr(current), self));
+                if same_scope {
+                    entry.connections.remove(&self.generation);
+                    entry.verified_child_exits = entry.verified_child_exits.saturating_add(count);
+                }
+            }
+        }
+        Ok(count)
     }
 
     pub(crate) async fn launch_permit(&self) -> Result<NativeLaunchPermit<'_>, &'static str> {
@@ -262,6 +290,94 @@ mod tests {
         assert!(b.lock().await.try_wait().unwrap().is_none());
         assert!(!other.is_cancelled());
         registry.stop("other").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn disconnect_one_device_preserves_sibling_and_releases_capacity() {
+        let registry = NativeStreamRegistry::default();
+        let phone = registry.begin("rental-root", 1).await.unwrap();
+        let phone_child = attach(&phone).await;
+        for generation in 2..=25 {
+            let pc = registry.begin("rental-root", generation).await.unwrap();
+            let pc_child = attach(&pc).await;
+            let guard = pc.connection_guard();
+            drop(guard);
+            timeout(Duration::from_secs(10), async {
+                loop {
+                    let retired = !registry.sessions.lock().await["rental-root"]
+                        .connections.contains_key(&generation);
+                    if retired { break; }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.unwrap();
+            assert!(pc_child.lock().await.try_wait().unwrap().is_some());
+            assert!(!phone.is_cancelled());
+            assert!(phone_child.lock().await.try_wait().unwrap().is_none());
+        }
+        let entry_count = registry.sessions.lock().await["rental-root"].connections.len();
+        assert_eq!(entry_count, 1, "completed PC connections must not consume slots");
+        assert_eq!(registry.stop("rental-root").await.unwrap(), 25);
+        assert!(phone_child.lock().await.try_wait().unwrap().is_some());
+        assert_eq!(registry.stop("rental-root").await.unwrap(), 25);
+        assert!(registry.begin("rental-root", 26).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn delayed_cleanup_of_old_generation_does_not_remove_reused_slot() {
+        let registry = NativeStreamRegistry::default();
+        let old = registry.begin("root", 7).await.unwrap();
+        let old_child = attach(&old).await;
+        assert_eq!(old.stop_owned_children().await.unwrap(), 1);
+        let current = registry.begin("root", 7).await.unwrap();
+        let current_child = attach(&current).await;
+        // A delayed duplicate stop/guard drop must not retire the new scope.
+        assert_eq!(old.stop_owned_children().await.unwrap(), 1);
+        assert!(old_child.lock().await.try_wait().unwrap().is_some());
+        let sessions = registry.sessions.lock().await;
+        assert!(Arc::ptr_eq(&sessions["root"].connections[&7], &current));
+        assert_eq!(sessions["root"].verified_child_exits, 1);
+        drop(sessions);
+        assert!(current_child.lock().await.try_wait().unwrap().is_none());
+        assert_eq!(registry.stop("root").await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_root_revokes_count_each_retired_child_once() {
+        let registry = NativeStreamRegistry::default();
+        let pc = registry.begin("root", 1).await.unwrap();
+        let hp = registry.begin("root", 2).await.unwrap();
+        let x = attach(&pc).await;
+        let y = attach(&hp).await;
+        let (a, b, closing) = tokio::join!(
+            registry.stop("root"), registry.stop("root"), pc.stop_owned_children()
+        );
+        assert_eq!(a.unwrap(), 2);
+        assert_eq!(b.unwrap(), 2);
+        assert_eq!(closing.unwrap(), 1);
+        assert_eq!(registry.sessions.lock().await["root"].verified_child_exits, 2);
+        assert!(x.lock().await.try_wait().unwrap().is_some());
+        assert!(y.lock().await.try_wait().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn cancelled_stop_retains_scope_until_child_exit_is_verified() {
+        let registry = Arc::new(NativeStreamRegistry::default());
+        let pc = registry.begin("root", 1).await.unwrap();
+        let child = attach(&pc).await;
+        let held_child_lock = child.lock().await;
+        let revoked = registry.clone();
+        let stop = tokio::spawn(async move { revoked.stop("root").await });
+        timeout(Duration::from_secs(2), pc.cancelled()).await.unwrap();
+        stop.abort();
+        let _ = stop.await;
+        let sessions = registry.sessions.lock().await;
+        assert!(sessions["root"].connections.contains_key(&1));
+        assert_eq!(sessions["root"].verified_child_exits, 0);
+        drop(sessions);
+        assert!(registry.begin("root", 2).await.is_err());
+        drop(held_child_lock);
+        assert_eq!(registry.stop("root").await.unwrap(), 1);
+        assert!(child.lock().await.try_wait().unwrap().is_some());
     }
 
     #[tokio::test]

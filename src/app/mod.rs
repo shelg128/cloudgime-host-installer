@@ -96,6 +96,8 @@ pub enum AppError {
     AndroidNativeStreamTicketBindingMismatch,
     #[error("the android native session is no longer active")]
     AndroidNativeSessionInactive,
+    #[error("the rental root ticket capacity has been reached")]
+    AndroidNativeTicketCapacity,
     #[error("there is no active android native owner session to share")]
     AndroidNativeSharedSessionActiveOwnerNotFound,
     #[error("the android native shared session invite was not found")]
@@ -145,6 +147,7 @@ impl ResponseError for AppError {
             Self::AndroidNativeStreamTicketConsumed => StatusCode::CONFLICT,
             Self::AndroidNativeStreamTicketBindingMismatch => StatusCode::FORBIDDEN,
             Self::AndroidNativeSessionInactive => StatusCode::GONE,
+            Self::AndroidNativeTicketCapacity => StatusCode::CONFLICT,
             Self::AndroidNativeSharedSessionActiveOwnerNotFound => StatusCode::CONFLICT,
             Self::AndroidNativeSharedSessionInviteNotFound => StatusCode::NOT_FOUND,
             Self::AndroidNativeSharedSessionInviteExpired => StatusCode::UNAUTHORIZED,
@@ -1002,6 +1005,63 @@ impl App {
         ) {
             return Err(AppError::AndroidNativeSessionInactive);
         }
+        Ok(record)
+    }
+
+    /// Derive another opaque capability for the exact same rental root. This is
+    /// not a device identity/limit or a public attach API. Backend authorization,
+    /// multi-peer media and display ownership must be wired before exposing it.
+    pub(crate) async fn issue_sibling_rental_stream_ticket(
+        &self,
+        parent_ticket: &str,
+        expected_claim_id: &str,
+        host_id: HostId,
+        app_id: AppId,
+    ) -> Result<AndroidNativeStreamTicketRecord, AppError> {
+        // Bound stored capabilities, NOT physical devices. Ticket refresh and
+        // microphone channels may legitimately create several per device.
+        const MAX_ROOT_TICKET_CAPABILITIES: usize = 64;
+        let now = unix_time_ms_now();
+        let lifecycle = self.inner.android_native_session_lifecycle.read().await;
+        let mut tickets = self.inner.android_native_stream_tickets.write().await;
+        tickets.retain(|_, value| value.expires_at_unix_ms > now);
+        let parent = tickets.get(parent_ticket).cloned()
+            .ok_or(AppError::AndroidNativeStreamTicketNotFound)?;
+        let binding = parent.rental_binding.as_ref()
+            .ok_or(AppError::AndroidNativeStreamTicketBindingMismatch)?;
+        if parent.consumed_at_unix_ms.is_some() {
+            return Err(AppError::AndroidNativeStreamTicketConsumed);
+        }
+        if expected_claim_id.is_empty() || expected_claim_id.trim() != expected_claim_id
+            || expected_claim_id.chars().any(char::is_control)
+            || parent.host_id != host_id || parent.app_id != app_id
+            || binding.claim_id != expected_claim_id
+        {
+            return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
+        }
+        if !native_binding_active(&lifecycle, &parent.session_id, &parent.token_id, parent.user_id) {
+            return Err(AppError::AndroidNativeSessionInactive);
+        }
+        let state = lifecycle.get(&parent.session_id)
+            .ok_or(AppError::AndroidNativeSessionInactive)?;
+        if state.rental_binding.as_ref() != Some(binding) {
+            return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
+        }
+        let siblings = tickets.values().filter(|ticket| ticket.session_id == parent.session_id).count();
+        if siblings >= MAX_ROOT_TICKET_CAPABILITIES || tickets.len() >= 4096 {
+            return Err(AppError::AndroidNativeTicketCapacity);
+        }
+        let record = AndroidNativeStreamTicketRecord {
+            stream_ticket: format!("mlnatstream_{}", Uuid::new_v4().to_simple()),
+            issued_at_unix_ms: now,
+            // A sibling never extends the parent's authority or rental deadline.
+            expires_at_unix_ms: parent.expires_at_unix_ms,
+            consumed_at_unix_ms: None,
+            ..parent
+        };
+        // Keep lifecycle read lock until insertion; revoke cannot interleave and
+        // leave behind an authorized sibling after the root is terminal.
+        tickets.insert(record.stream_ticket.clone(), record.clone());
         Ok(record)
     }
 
