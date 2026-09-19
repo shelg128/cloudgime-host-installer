@@ -2807,6 +2807,7 @@ class ViewerApp implements Component {
     private streamChromeBoundsTimerId: number | null = null
     private lastStreamChromeBoundsSignature = ""
     private videoStallWatchTimer: number | null = null
+    private videoStallWatchBusy = false
     private videoStallLastProgressSample: VideoProgressSample | null = null
     private videoStallLastProgressAt = 0
     private videoStallLastKickAt = 0
@@ -4394,10 +4395,26 @@ class ViewerApp implements Component {
     }
 
     private async tickVideoStallWatch() {
+        // setInterval must not overlap asynchronous stats/renderer recovery.
+        if (this.videoStallWatchBusy) return
+        this.videoStallWatchBusy = true
+        try {
+            await this.observeVideoStallWatch()
+        } finally {
+            this.videoStallWatchBusy = false
+        }
+    }
+
+    private async observeVideoStallWatch() {
         if (!this.stream || this.reconnecting || this.isDisplayTransitionActive() || this.startupInputLocked || document.visibilityState != "visible") {
             return
         }
 
+        const observedStream = this.stream
+        const observationStillCurrent = () => this.stream === observedStream
+            && !this.reconnecting && !this.isDisplayTransitionActive()
+            && !this.startupInputLocked && document.visibilityState === "visible"
+            && Date.now() >= this.videoStallSuppressedUntil
         const media = this.getActiveStreamMediaElement()
         if (!media) {
             return
@@ -4450,12 +4467,14 @@ class ViewerApp implements Component {
                     // ignore autoplay rejections; the reconnect guard below will recover if needed
                 }
             }
-            this.stream.getVideoRenderer()?.onUserInteraction()
+            if (!observationStillCurrent()) return
+            observedStream.getVideoRenderer()?.onUserInteraction()
         }
 
         const recoveryThresholdMs = inMotionGuardWindow ? 8000 : 12000
         if (stalledMs >= recoveryThresholdMs && Date.now() - this.videoStallLastRecoveryAt >= 15000) {
-            const hadInboundVideoActivity = await this.stream.hasInboundVideoActivitySince(this.videoStallLastInboundActivitySnapshot)
+            const hadInboundVideoActivity = await observedStream.hasInboundVideoActivitySince(this.videoStallLastInboundActivitySnapshot)
+            if (!observationStillCurrent()) return
             if (inMotionGuardWindow && hadInboundVideoActivity && stalledMs < 12000) {
                 this.stream?.logClientEvent("Suppressing video stall reconnect because inbound video is still progressing")
                 void this.refreshVideoStallInboundActivityBaseline(true)
@@ -4481,7 +4500,8 @@ class ViewerApp implements Component {
             const canRecoverRendererInPlace = hadInboundVideoActivity
                 && Date.now() - this.videoStallLastRendererRecoveryAt >= 12000
             if (canRecoverRendererInPlace) {
-                const recoveredRenderer = await this.stream.recoverVideoRendererInPlace("video stall watchdog")
+                const recoveredRenderer = await observedStream.recoverVideoRendererInPlace("video stall watchdog")
+                if (!observationStillCurrent()) return
                 if (recoveredRenderer) {
                     this.videoStallLastRendererRecoveryAt = Date.now()
                     this.videoStallLastRecoveryAt = Date.now()
@@ -4492,14 +4512,13 @@ class ViewerApp implements Component {
                 }
             }
 
+            // Visual progress alone cannot distinguish a static/background
+            // desktop from a decoder stall. Preserve the authorized Direct
+            // transport; actual ICE/socket failures retain their recovery path.
             this.videoStallLastRecoveryAt = Date.now()
-            this.setStreamRecoveryFreezeFrame(this.captureVisibleStreamFrame())
-            this.setStreamRecoveryOverlayVisible(true)
-            this.setConnectionRoute("negotiating", this.translate(
-                "Video stalled. Recovering the stream.",
-                "Video macet. Memulihkan stream."
-            ))
-            void this.reconnectStream("video stall watchdog")
+            observedStream.requestIdrFrame()
+            observedStream.logClientEvent("Preserving Direct session: video watchdog requested an IDR without reconnect")
+            this.resetVideoStallWatch()
         }
     }
 
@@ -15471,6 +15490,7 @@ class ViewerApp implements Component {
         this.lastRecoveryEvent = "Waiting for resume"
         this.lastRecoveryArmed = false
         this.clearResumeRecoveryTimer()
+        this.resetVideoStallWatch()
         this.stream?.getInput().raiseAllKeys()
         this.pushTouchDebugLine("lifecycle", `hidden reason=${reason}`)
         this.syncDesktopUtilityDockState()
@@ -15494,7 +15514,14 @@ class ViewerApp implements Component {
         this.lastRecoveryArmed = false
     }
 
+    private resumeExistingStreamAfterVisibilityChange() {
+        // Background duration must not count as foreground decoder stalling.
+        this.suppressVideoStallRecovery(8000)
+        this.stream?.resumeControlHeartbeat()
+    }
+
     private scheduleResumeRecovery(reason: string, hiddenDurationMs: number) {
+        this.resumeExistingStreamAfterVisibilityChange()
         this.lastLifecycleEvent = hiddenDurationMs > 0
             ? `Visible via ${reason} / ${(hiddenDurationMs / 1000).toFixed(hiddenDurationMs >= 10000 ? 0 : 1)}s hidden`
             : `Visible via ${reason}`
@@ -15506,13 +15533,9 @@ class ViewerApp implements Component {
         }
 
         const aggressiveResumeReconnect = this.isMobileResumeAutoReconnectEnabled()
-        const shouldReconnect =
-            reason == "online"
-            || this.currentRouteState == "failed"
-            || (aggressiveResumeReconnect && (
-                this.currentRouteState == "negotiating"
-                || hiddenDurationMs >= 8000
-            ))
+        // Tab focus, elapsed background time, or an online event alone must
+        // not tear down a usable peer connection. Recover only a failed route.
+        const shouldReconnect = this.currentRouteState == "failed"
 
         this.pushTouchDebugLine("resume", `reason=${reason} hidden=${hiddenDurationMs}ms reconnect=${shouldReconnect ? "yes" : "no"} route=${this.currentRouteState} aggressive=${aggressiveResumeReconnect ? "yes" : "no"}`)
         if (shouldReconnect && this.touchDebugAutoSnapshotEnabled) {
@@ -15533,7 +15556,8 @@ class ViewerApp implements Component {
         this.resumeRecoveryTimer = window.setTimeout(() => {
             this.resumeRecoveryTimer = null
 
-            if (document.visibilityState !== "visible" || this.reconnecting || !this.stream) {
+            if (document.visibilityState !== "visible" || this.reconnecting || !this.stream
+                || this.currentRouteState !== "failed") {
                 return
             }
 
@@ -15562,6 +15586,7 @@ class ViewerApp implements Component {
 
         this.lastHiddenAt = 0
         this.clearResumeRecoveryTimer()
+        this.resumeExistingStreamAfterVisibilityChange()
         this.lastLifecycleEvent = "Visible via visibilitychange"
         this.lastRecoveryEvent = "Resume reconnect disabled"
         this.syncDesktopUtilityDockState()

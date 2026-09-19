@@ -494,14 +494,16 @@ export class Stream implements Component {
         this.usedBootstrapDeviceMatchStartup = startupPlan.usedBootstrap
         this.preferredRuntimeStreamerSize = startupPlan.promotedSize
         this.streamerSize = startupPlan.startupSize
-        this.startupGuardTimeoutMs = Math.max(
-            8000,
+        // Display preparation and capture refresh can exceed 14 seconds.
+        // Bound the wait, but do not race a valid Host startup.
+        this.startupGuardTimeoutMs = Math.min(90000, Math.max(
+            45000,
             Math.round(
                 Number.isFinite(startupGuardTimeoutMs ?? NaN)
                     ? Number(startupGuardTimeoutMs)
-                    : (isTouchMobileLikeClient() ? 14000 : 11000)
+                    : 45000
             )
-        )
+        ))
         this.logClientEvent(
             `created build=${this.buildLabel} initDynamic=${this.dynamicDisplayMatchInitEnabled ? "yes" : "no"} startup=${this.streamerSize[0]}x${this.streamerSize[1]} bootstrap=${this.usedBootstrapDeviceMatchStartup ? "yes" : "no"} promoted=${this.preferredRuntimeStreamerSize ? `${this.preferredRuntimeStreamerSize[0]}x${this.preferredRuntimeStreamerSize[1]}` : "none"} startupGuard=${this.startupGuardTimeoutMs}ms`
         )
@@ -583,7 +585,13 @@ export class Stream implements Component {
         const timeoutMs = this.startupGuardTimeoutMs
         this.startStreamGuardTimer = window.setTimeout(() => {
             this.startStreamGuardTimer = null
-            if (this.connectionCompleted) {
+            if (this.connectionCompleted || this.ws.readyState !== WebSocket.OPEN) {
+                return
+            }
+            if (document.visibilityState !== "visible") {
+                // A delayed background timer is not proof of failed startup.
+                // Server ticket expiry/control-channel limits remain authoritative.
+                this.armStartStreamGuardTimer()
                 return
             }
 
@@ -682,6 +690,11 @@ export class Stream implements Component {
                 ts_ms: Date.now(),
             }
         } satisfies StreamClientMessage))
+    }
+
+    resumeControlHeartbeat() {
+        // Reuse the existing authorized channel; never issue a new ticket.
+        this.sendWsHeartbeat()
     }
 
     private startWsHeartbeat() {
