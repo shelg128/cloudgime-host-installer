@@ -237,7 +237,12 @@ async fn backend_command_revokes_prelogin_without_browser_and_replay_cannot_targ
         .begin(&launch.session_id, 1)
         .await
         .unwrap();
+    let sibling = crate::native_stream_scope::NATIVE_STREAM_SCOPES
+        .begin(&launch.session_id, 2)
+        .await
+        .unwrap();
     let own = child(&scope).await;
+    let sibling_child = child(&sibling).await;
     let other_id = format!("unrelated-{}", uuid::Uuid::new_v4());
     let unrelated = crate::native_stream_scope::NATIVE_STREAM_SCOPES
         .begin(&other_id, 2)
@@ -259,17 +264,21 @@ async fn backend_command_revokes_prelogin_without_browser_and_replay_cannot_targ
                 .is_err()
         );
         assert!(!scope.is_cancelled());
+        assert!(!sibling.is_cancelled());
         assert!(!unrelated.is_cancelled());
         assert!(other.lock().await.try_wait().unwrap().is_none());
         assert!(own.lock().await.try_wait().unwrap().is_none());
+        assert!(sibling_child.lock().await.try_wait().unwrap().is_none());
     }
     let verified = signed(c.clone());
     assert_eq!(
         app.revoke_backend_rental_stream(&verified).await.unwrap(),
-        1
+        2
     );
     assert!(scope.is_cancelled());
+    assert!(sibling.is_cancelled());
     assert!(own.lock().await.try_wait().unwrap().is_some());
+    assert!(sibling_child.lock().await.try_wait().unwrap().is_some());
     assert!(other.lock().await.try_wait().unwrap().is_none());
     assert!(
         app.peek_android_native_stream_ticket(&ticket.stream_ticket)
@@ -284,7 +293,7 @@ async fn backend_command_revokes_prelogin_without_browser_and_replay_cannot_targ
     );
     assert_eq!(
         app.revoke_backend_rental_stream(&verified).await.unwrap(),
-        1
+        2
     );
     c.operation_id = "55555555-5555-4555-8555-555555555555".into();
     assert_eq!(
