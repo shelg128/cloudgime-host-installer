@@ -759,7 +759,14 @@ fn stage_child_binary(source_path: &Path, session_token: &str) -> Result<PathBuf
     let Some(runtime_dir) = current_runtime_dir() else {
         return Err("failed to determine runtime directory".to_string());
     };
+    stage_child_binary_into(&runtime_dir, source_path, session_token)
+}
 
+fn stage_child_binary_into(
+    runtime_dir: &Path,
+    source_path: &Path,
+    session_token: &str,
+) -> Result<PathBuf, String> {
     let file_stem = source_path
         .file_stem()
         .and_then(|name| name.to_str())
@@ -778,10 +785,16 @@ fn stage_child_binary(source_path: &Path, session_token: &str) -> Result<PathBuf
         )
     })?;
 
+    // A browser may reconnect while the previous child for the same rental
+    // session is still shutting down. Windows locks a running executable, so a
+    // session-only filename makes the reconnect copy fail. Keep the rental
+    // session in the audit-friendly name but add a per-launch UUID. This is a
+    // universal Node rule and never depends on a PC ID.
+    let launch_id = Uuid::new_v4();
     let staged_name = if extension.is_empty() {
-        format!("{file_stem}-{session_token}")
+        format!("{file_stem}-{session_token}-{launch_id}")
     } else {
-        format!("{file_stem}-{session_token}.{extension}")
+        format!("{file_stem}-{session_token}-{launch_id}.{extension}")
     };
     let staged_path = staged_dir.join(staged_name);
     fs::copy(source_path, &staged_path).map_err(|err| {
@@ -801,6 +814,34 @@ fn cleanup_staged_child_binary(path: &Path) {
             "[Stream]: failed to remove staged child binary {}: {err}",
             path.display()
         );
+    }
+}
+
+#[cfg(test)]
+mod child_staging_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_launches_for_one_session_use_independent_files() {
+        let root = std::env::temp_dir().join(format!("cg-child-stage-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create fixture root");
+        let source = root.join("streamer.exe");
+        fs::write(&source, b"fixture-streamer").expect("write fixture source");
+
+        let first = stage_child_binary_into(&root, &source, "same-rental-session")
+            .expect("stage first launch");
+        let second = stage_child_binary_into(&root, &source, "same-rental-session")
+            .expect("stage reconnect launch");
+
+        assert_ne!(first, second, "reconnect must never reuse a running executable path");
+        assert_eq!(fs::read(&first).unwrap(), b"fixture-streamer");
+        assert_eq!(fs::read(&second).unwrap(), b"fixture-streamer");
+        cleanup_staged_child_binary(&first);
+        assert!(!first.exists(), "first launch cleanup must remove only its file");
+        assert!(second.exists(), "first launch cleanup must not remove reconnect file");
+        cleanup_staged_child_binary(&second);
+        let _ = fs::remove_file(&source);
+        let _ = fs::remove_dir_all(&root);
     }
 }
 
