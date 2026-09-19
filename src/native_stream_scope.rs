@@ -32,6 +32,7 @@ pub(crate) struct NativeStreamScope {
     registry: Weak<Mutex<HashMap<String, Entry>>>,
     session_id: String,
     generation: u64,
+    primary: bool,
     cancelled: watch::Sender<bool>,
     children: Mutex<Vec<Arc<Mutex<Child>>>>,
 }
@@ -61,11 +62,13 @@ impl NativeStreamRegistry {
         if entry.connections.len() >= 16 || entry.connections.contains_key(&generation) {
             return Err("native_connection_conflict");
         }
+        let primary = entry.connections.is_empty();
         let (cancelled, _) = watch::channel(false);
         let scope = Arc::new(NativeStreamScope {
             registry: Arc::downgrade(&self.sessions),
             session_id: session_id.into(),
             generation,
+            primary,
             cancelled,
             children: Mutex::new(Vec::new()),
         });
@@ -148,6 +151,9 @@ impl Drop for NativeConnectionGuard {
 impl NativeStreamScope {
     pub(crate) fn connection_guard(self: &Arc<Self>) -> NativeConnectionGuard {
         NativeConnectionGuard(self.clone())
+    }
+    pub(crate) fn is_primary(&self) -> bool {
+        self.primary
     }
     pub(crate) fn is_cancelled(&self) -> bool {
         *self.cancelled.borrow()
