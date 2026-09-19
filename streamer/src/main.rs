@@ -988,6 +988,26 @@ impl HostMouseCursorState {
     }
 }
 
+fn should_hide_host_cursor(mode: HostMouseEmulationMode) -> bool {
+    // Shared-desktop streams use the Windows cursor as the renter's pointer.
+    // Hiding it makes working input look broken. Keep this match exhaustive so
+    // any future client-rendered-cursor mode must opt into hiding explicitly.
+    match mode {
+        HostMouseEmulationMode::RelativeNative | HostMouseEmulationMode::AbsoluteFollow => false,
+    }
+}
+
+#[cfg(test)]
+mod host_cursor_policy_tests {
+    use super::*;
+
+    #[test]
+    fn shared_desktop_mouse_modes_keep_windows_cursor_visible() {
+        assert!(!should_hide_host_cursor(HostMouseEmulationMode::RelativeNative));
+        assert!(!should_hide_host_cursor(HostMouseEmulationMode::AbsoluteFollow));
+    }
+}
+
 #[derive(Debug, Default)]
 struct HostCursorVisibilityState {
     hidden_for_stream: bool,
@@ -1449,11 +1469,15 @@ impl StreamConnection {
     /// Runs every 1 second. Windows may silently restore system cursors during
     /// fullscreen transitions, UAC prompts, or DPI changes — this watchdog
     /// ensures the host cursor stays invisible for the entire stream session.
-    async fn enforce_cursor_hidden_while_streaming(&self) {
+    async fn enforce_cursor_policy_while_streaming(&self) {
         let has_active_stream = self.stream.read().await.is_some();
         if has_active_stream {
-            self.set_host_cursor_hidden_for_stream(true, "cursor_enforcer")
-                .await;
+            let mode = self.mouse_cursor_state.lock().await.mode;
+            self.set_host_cursor_hidden_for_stream(
+                should_hide_host_cursor(mode),
+                "cursor_enforcer",
+            )
+            .await;
         }
     }
 
@@ -1566,7 +1590,7 @@ impl StreamConnection {
                         return;
                     };
 
-                    this.enforce_cursor_hidden_while_streaming().await;
+                    this.enforce_cursor_policy_while_streaming().await;
                 }
             }
         });
@@ -2888,7 +2912,8 @@ impl StreamConnection {
 
     // Start Moonlight Stream
     async fn start_stream(self: &Arc<Self>, settings: StreamSettings) -> Result<(), anyhow::Error> {
-        self.set_host_cursor_hidden_for_stream(true, "start_stream")
+        let hide_cursor = should_hide_host_cursor(settings.host_mouse_emulation);
+        self.set_host_cursor_hidden_for_stream(hide_cursor, "start_stream")
             .await;
         let result = self.start_stream_inner(settings).await;
         if result.is_err() && self.stream.read().await.is_none() {
