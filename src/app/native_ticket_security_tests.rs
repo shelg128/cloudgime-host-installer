@@ -770,6 +770,57 @@ async fn sibling_capability_limit_is_bounded_and_does_not_evict_other_bearers() 
     std::fs::remove_dir_all(root).unwrap();
 }
 
+
+#[actix_web::test]
+async fn explicit_same_claim_root_launch_is_separate_bearer_and_never_extends_authority() {
+    let (app, root) = fixture().await;
+    let binding = AndroidNativeRentalBindingRecord {
+        handoff_binding_id: Uuid::new_v4().to_string(), claim_id: "claim-root".into(),
+        prepare_operation_id: None, rental_session_id: None,
+    };
+    let first = app.issue_android_native_launch_token(
+        UserId(9001), HostId(1), AppId(1379015545),
+        AndroidNativeHostBindingRecord {name:"a".into(),address:"127.0.0.1".into(),http_port:47989,https_port:None,external_port:None,unique_id:None,local_ip:None},
+        AndroidNativeTrustBootstrapRecord {paired:false,pair_mode:"a".into(),client_unique_id:None,client_certificate_pem:None,client_private_key_pem:None,server_certificate_pem:None},
+        Some(binding.clone()),
+    ).await;
+    let (_, mut ticket) = app.consume_android_native_launch_token_with_stream_ticket(&first.launch_token).await.unwrap();
+    ticket.expires_at_unix_ms = unix_time_ms_now() + 60_000;
+    app.inner.android_native_stream_tickets.write().await.insert(ticket.stream_ticket.clone(), ticket.clone());
+    let second = app.issue_android_native_sibling_launch_token(
+        &first.session_id, first.user_id, first.host_id, first.app_id,
+        first.host_binding.clone(), first.trust_bootstrap.clone(), binding.clone(),
+    ).await.unwrap();
+    assert_eq!(second.session_id, first.session_id);
+    assert_eq!(second.token_id, first.token_id);
+    assert_ne!(second.launch_token, first.launch_token);
+    assert!(second.expires_at_unix_ms <= ticket.expires_at_unix_ms);
+    let (_, sibling_ticket) = app.consume_android_native_launch_token_with_stream_ticket(&second.launch_token).await.unwrap();
+    assert_eq!(sibling_ticket.session_id, ticket.session_id);
+    assert_eq!(sibling_ticket.expires_at_unix_ms, ticket.expires_at_unix_ms);
+    let renewed = app.refresh_android_native_stream_ticket(&sibling_ticket.stream_ticket, None, None).await.unwrap();
+    assert_eq!(renewed.expires_at_unix_ms, ticket.expires_at_unix_ms);
+    assert_eq!(sibling_ticket.rental_binding, ticket.rental_binding);
+    assert!(app.peek_android_native_stream_ticket(&ticket.stream_ticket).await.is_ok());
+    assert!(app.peek_android_native_stream_ticket(&sibling_ticket.stream_ticket).await.is_ok());
+
+    let token_count = app.inner.android_native_launch_tokens.read().await.len();
+    let mut other_binding = binding.clone(); other_binding.claim_id = "other".into();
+    for result in [
+        app.issue_android_native_sibling_launch_token("missing", first.user_id, first.host_id, first.app_id, first.host_binding.clone(), first.trust_bootstrap.clone(), binding.clone()).await,
+        app.issue_android_native_sibling_launch_token(&first.session_id, UserId(7), first.host_id, first.app_id, first.host_binding.clone(), first.trust_bootstrap.clone(), binding.clone()).await,
+        app.issue_android_native_sibling_launch_token(&first.session_id, first.user_id, HostId(2), first.app_id, first.host_binding.clone(), first.trust_bootstrap.clone(), binding.clone()).await,
+        app.issue_android_native_sibling_launch_token(&first.session_id, first.user_id, first.host_id, AppId(2), first.host_binding.clone(), first.trust_bootstrap.clone(), binding.clone()).await,
+        app.issue_android_native_sibling_launch_token(&first.session_id, first.user_id, first.host_id, first.app_id, first.host_binding.clone(), first.trust_bootstrap.clone(), other_binding).await,
+    ] { assert!(result.is_err()); }
+    assert_eq!(app.inner.android_native_launch_tokens.read().await.len(), token_count);
+    app.update_android_native_session_lifecycle(Some(&ticket.stream_ticket),Some(&first.token_id),Some(&first.session_id),"session_revoke_requested".into(),None,None).await.unwrap();
+    assert!(app.issue_android_native_sibling_launch_token(&first.session_id, first.user_id, first.host_id, first.app_id, first.host_binding.clone(), first.trust_bootstrap.clone(), binding).await.is_err());
+    assert!(app.peek_android_native_stream_ticket(&ticket.stream_ticket).await.is_err());
+    assert!(app.peek_android_native_stream_ticket(&sibling_ticket.stream_ticket).await.is_err());
+    drop(app); std::fs::remove_dir_all(root).unwrap();
+}
+
 #[actix_web::test]
 async fn valid_refresh_requires_possession_and_keeps_host_app_binding() {
     let (app, _root) = fixture().await;

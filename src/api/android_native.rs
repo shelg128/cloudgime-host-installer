@@ -684,6 +684,7 @@ struct AndroidNativeRentalBindingRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PostAndroidNativeTunnelLaunchTokenRequest {
     host_id: Option<u32>,
     app_id: Option<u32>,
@@ -697,6 +698,8 @@ struct PostAndroidNativeTunnelLaunchTokenRequest {
     client_platform: Option<String>,
     #[serde(default, rename = "rentalBinding")]
     rental_binding: Option<AndroidNativeRentalBindingRequest>,
+    #[serde(default, rename = "rootNativeSessionId")]
+    root_native_session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1317,6 +1320,7 @@ pub(crate) async fn issue_android_native_launch_response(
     requested_app_id: AppId,
     native_shell: &str,
     rental_binding: Option<crate::app::AndroidNativeRentalBindingRecord>,
+    root_session_id: Option<&str>,
 ) -> Result<PostAndroidNativeLaunchTokenResponse, AppError> {
     let app_id = pick_effective_launch_app_id(host.list_apps(user).await?, requested_app_id)?;
     let detailed = host.detailed_host(user).await?;
@@ -1373,16 +1377,16 @@ pub(crate) async fn issue_android_native_launch_response(
     };
     let transport_policy = build_transport_policy(app, &host_binding, None).await;
 
-    let record = app
-        .issue_android_native_launch_token(
-            user.id(),
-            host_id,
-            app_id,
-            host_binding,
-            trust_bootstrap,
-            rental_binding,
-        )
-        .await;
+    let record = if let Some(root_session_id) = root_session_id {
+        app.issue_android_native_sibling_launch_token(
+            root_session_id, user.id(), host_id, app_id, host_binding, trust_bootstrap,
+            rental_binding.ok_or(AppError::AndroidNativeStreamTicketBindingMismatch)?,
+        ).await?
+    } else {
+        app.issue_android_native_launch_token(
+            user.id(), host_id, app_id, host_binding, trust_bootstrap, rental_binding,
+        ).await
+    };
 
     let open_native_path = prefixed_path(
         &app.config().web_server.url_path_prefix,
@@ -1493,6 +1497,7 @@ pub async fn post_android_native_launch_token(
         requested_app_id,
         native_shell,
         None,
+        None,
     )
     .await?;
 
@@ -1534,6 +1539,7 @@ pub async fn post_android_native_launch_token_from_tunnel(
         requested_app_id,
         native_shell,
         rental_binding,
+        request.root_native_session_id.as_deref(),
     )
     .await?;
 

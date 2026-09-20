@@ -438,6 +438,7 @@ async fn get_quick_launch_target(
         selected_app.id,
         "windows",
         None,
+        None,
     )
     .await?;
 

@@ -98,6 +98,8 @@ pub enum AppError {
     AndroidNativeSessionInactive,
     #[error("the rental root ticket capacity has been reached")]
     AndroidNativeTicketCapacity,
+    #[error("the rental root already has the maximum pending device launches")]
+    AndroidNativeDeviceLimit,
     #[error("there is no active android native owner session to share")]
     AndroidNativeSharedSessionActiveOwnerNotFound,
     #[error("the android native shared session invite was not found")]
@@ -148,6 +150,7 @@ impl ResponseError for AppError {
             Self::AndroidNativeStreamTicketBindingMismatch => StatusCode::FORBIDDEN,
             Self::AndroidNativeSessionInactive => StatusCode::GONE,
             Self::AndroidNativeTicketCapacity => StatusCode::CONFLICT,
+            Self::AndroidNativeDeviceLimit => StatusCode::CONFLICT,
             Self::AndroidNativeSharedSessionActiveOwnerNotFound => StatusCode::CONFLICT,
             Self::AndroidNativeSharedSessionInviteNotFound => StatusCode::NOT_FOUND,
             Self::AndroidNativeSharedSessionInviteExpired => StatusCode::UNAUTHORIZED,
@@ -234,6 +237,8 @@ pub struct AndroidNativeLaunchTokenRecord {
     pub issued_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
     pub consumed_at_unix_ms: Option<u64>,
+    // An additional device inherits this hard authority ceiling from its root.
+    pub stream_authority_expires_at_unix_ms: Option<u64>,
     pub rental_binding: Option<AndroidNativeRentalBindingRecord>,
     pub session_policy: common::api_bindings::AndroidNativeSessionPolicy,
     pub feature_profile: common::api_bindings::AndroidNativeFeatureProfile,
@@ -244,6 +249,7 @@ pub struct AndroidNativeLaunchTokenRecord {
 #[derive(Debug, Clone)]
 pub struct AndroidNativeStreamTicketRecord {
     pub stream_ticket: String,
+    pub authority_expires_at_unix_ms: Option<u64>,
     pub token_id: String,
     pub session_id: String,
     pub user_id: UserId,
@@ -686,6 +692,7 @@ impl App {
             issued_at_unix_ms: now,
             expires_at_unix_ms: now + TOKEN_TTL_MS,
             consumed_at_unix_ms: None,
+            stream_authority_expires_at_unix_ms: None,
             rental_binding: rental_binding.clone(),
             session_policy: common::api_bindings::AndroidNativeSessionPolicy {
                 allow_add_host_ui: false,
@@ -738,6 +745,83 @@ impl App {
             },
         );
         record
+    }
+
+    pub async fn issue_android_native_sibling_launch_token(
+        &self,
+        root_session_id: &str,
+        user_id: UserId,
+        host_id: HostId,
+        app_id: AppId,
+        host_binding: AndroidNativeHostBindingRecord,
+        trust_bootstrap: AndroidNativeTrustBootstrapRecord,
+        rental_binding: AndroidNativeRentalBindingRecord,
+    ) -> Result<AndroidNativeLaunchTokenRecord, AppError> {
+        const TOKEN_TTL_MS: u64 = 300_000;
+        const MAX_PENDING_DEVICE_LAUNCHES: usize = 3;
+        let now = unix_time_ms_now();
+        if root_session_id.trim().is_empty() || root_session_id != root_session_id.trim()
+            || root_session_id.len() > 256
+        {
+            return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
+        }
+        let lifecycle = self.inner.android_native_session_lifecycle.read().await;
+        let root = lifecycle.get(root_session_id).ok_or(AppError::AndroidNativeSessionInactive)?;
+        let canonical = root.rental_binding.as_ref()
+            .ok_or(AppError::AndroidNativeStreamTicketBindingMismatch)?;
+        if root.session_id != root_session_id || root.user_id != user_id || !native_lifecycle_active(root)
+            || canonical.claim_id != rental_binding.claim_id
+            || rental_binding.prepare_operation_id.is_some() != rental_binding.rental_session_id.is_some()
+            || (canonical.rental_session_id.is_some()
+                && canonical.rental_session_id != rental_binding.rental_session_id)
+            || (canonical.prepare_operation_id.is_some()
+                && canonical.prepare_operation_id != rental_binding.prepare_operation_id)
+        {
+            return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
+        }
+        let tickets = self.inner.android_native_stream_tickets.read().await;
+        let authority_expires_at = tickets.values().filter(|ticket| {
+            ticket.expires_at_unix_ms > now
+                && ticket.session_id == root_session_id
+                && ticket.token_id == root.token_id
+                && ticket.user_id == user_id
+                && ticket.host_id == host_id
+                && ticket.app_id == app_id
+                && ticket.rental_binding.as_ref().is_some_and(|binding| {
+                    binding.claim_id == canonical.claim_id
+                })
+                && ticket.consumed_at_unix_ms.is_none()
+        }).map(|ticket| ticket.authority_expires_at_unix_ms
+            .map_or(ticket.expires_at_unix_ms, |cap| cap.min(ticket.expires_at_unix_ms))).max()
+          .ok_or(AppError::AndroidNativeStreamTicketBindingMismatch)?;
+        drop(tickets);
+        let record = AndroidNativeLaunchTokenRecord {
+            token_id: root.token_id.clone(),
+            launch_token: format!("mlnatlaunch_{}", Uuid::new_v4().to_simple()),
+            session_id: root_session_id.to_string(), user_id, host_id, app_id,
+            issued_at_unix_ms: now,
+            expires_at_unix_ms: (now + TOKEN_TTL_MS).min(authority_expires_at),
+            consumed_at_unix_ms: None,
+            stream_authority_expires_at_unix_ms: Some(authority_expires_at),
+            rental_binding: Some(rental_binding),
+            session_policy: common::api_bindings::AndroidNativeSessionPolicy {
+                allow_add_host_ui: false, token_managed: true, billing_managed: true,
+            },
+            feature_profile: default_android_native_feature_profile(),
+            host_binding, trust_bootstrap,
+        };
+        // Retain the lifecycle read lock through insertion: a revoke must not
+        // overtake validation and leave a usable launch token behind.
+        let mut tokens = self.inner.android_native_launch_tokens.write().await;
+        tokens.retain(|_, token| token.expires_at_unix_ms > now
+            && token.consumed_at_unix_ms.is_none());
+        if tokens.values().filter(|token| token.session_id == root_session_id).count()
+            >= MAX_PENDING_DEVICE_LAUNCHES
+        {
+            return Err(AppError::AndroidNativeDeviceLimit);
+        }
+        tokens.insert(record.launch_token.clone(), record.clone());
+        Ok(record)
     }
 
     async fn invalidate_android_native_session_artifacts(&self, session_id: &str) {
@@ -840,15 +924,19 @@ impl App {
 
         let now = unix_time_ms_now();
         let stream_ticket = format!("mlnatstream_{}", Uuid::new_v4().to_simple());
+        let expires_at_unix_ms = launch_record.stream_authority_expires_at_unix_ms
+            .map_or(now + STREAM_TICKET_TTL_MS, |cap| cap.min(now + STREAM_TICKET_TTL_MS));
+        if expires_at_unix_ms <= now { return Err(AppError::AndroidNativeStreamTicketExpired); }
         let record = AndroidNativeStreamTicketRecord {
             stream_ticket: stream_ticket.clone(),
+            authority_expires_at_unix_ms: launch_record.stream_authority_expires_at_unix_ms,
             token_id: launch_record.token_id.clone(),
             session_id: launch_record.session_id.clone(),
             user_id: launch_record.user_id,
             host_id: launch_record.host_id,
             app_id: launch_record.app_id,
             issued_at_unix_ms: now,
-            expires_at_unix_ms: now + STREAM_TICKET_TTL_MS,
+            expires_at_unix_ms,
             consumed_at_unix_ms: None,
             rental_binding: launch_record.rental_binding.clone(),
         };
@@ -1056,6 +1144,7 @@ impl App {
             issued_at_unix_ms: now,
             // A sibling never extends the parent's authority or rental deadline.
             expires_at_unix_ms: parent.expires_at_unix_ms,
+            authority_expires_at_unix_ms: Some(parent.expires_at_unix_ms),
             consumed_at_unix_ms: None,
             ..parent
         };
@@ -1103,13 +1192,15 @@ impl App {
         let refreshed_ticket = format!("mlnatstream_{}", Uuid::new_v4().to_simple());
         let refreshed_record = AndroidNativeStreamTicketRecord {
             stream_ticket: refreshed_ticket.clone(),
+            authority_expires_at_unix_ms: source.authority_expires_at_unix_ms,
             token_id: source.token_id,
             session_id: source.session_id,
             user_id: source.user_id,
             host_id: source.host_id,
             app_id: source.app_id,
             issued_at_unix_ms: now,
-            expires_at_unix_ms: now + STREAM_TICKET_TTL_MS,
+            expires_at_unix_ms: source.authority_expires_at_unix_ms
+                .map_or(now + STREAM_TICKET_TTL_MS, |cap| cap.min(now + STREAM_TICKET_TTL_MS)),
             consumed_at_unix_ms: None,
             rental_binding: source.rental_binding.clone(),
         };

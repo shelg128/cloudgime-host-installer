@@ -5347,11 +5347,21 @@ pub async fn start_host(
             None
         };
         let _native_connection_guard = native_scope.as_ref().map(|scope| scope.connection_guard());
+        let connection_is_primary = native_scope.as_ref().is_none_or(|scope| scope.is_primary());
         if let (Some(scope), Some(record)) = (native_scope.as_ref(), android_native_stream_ticket_record.as_ref()) {
             monitor_ticket_scope(web_app.clone(), record.clone(), scope.clone());
         }
-        let stream_generation = begin_active_stream_generation(&dynamic_display_session_token);
-        preempt_active_stream_runtime(&dynamic_display_session_token).await;
+        let stream_generation = if connection_is_primary {
+            let generation = begin_active_stream_generation(&dynamic_display_session_token);
+            preempt_active_stream_runtime(&dynamic_display_session_token).await;
+            generation
+        } else {
+            append_host_stream_trace(&format!(
+                "MULTIDEVICE_SECONDARY_BOUND token={} registration_id={} policy=no_preempt_no_display_authority",
+                dynamic_display_session_token, registration_id
+            ));
+            0
+        };
         if let Some(profile) = runtime_profile_snapshot.as_ref() {
             append_host_stream_trace(&format!(
                 "RUNTIME_PROFILE token={} runtime={} encoder={}",
@@ -6053,8 +6063,13 @@ pub async fn start_host(
             },
             None => None,
         };
-        match spawn_window_primary_watch(&dynamic_display_session_token).await {
-            Ok(window_watch_child) => {
+        let window_watch = if connection_is_primary {
+            spawn_window_primary_watch(&dynamic_display_session_token).await.map(Some)
+        } else {
+            Ok(None)
+        };
+        match window_watch {
+            Ok(Some(window_watch_child)) => {
                 if let Some(permit) = watch_permit.as_mut() {
                     permit.attach(window_watch_child.clone());
                 }
@@ -6069,6 +6084,12 @@ pub async fn start_host(
                 }
                 append_host_stream_trace(&format!(
                     "WINDOW_WATCH_STARTED token={}",
+                    dynamic_display_session_token
+                ));
+            }
+            Ok(None) => {
+                append_host_stream_trace(&format!(
+                    "WINDOW_WATCH_SKIPPED token={} reason=multidevice_secondary",
                     dynamic_display_session_token
                 ));
             }
@@ -6291,8 +6312,8 @@ pub async fn start_host(
             })
             .await;
 
-        let mut dynamic_display_match_requested = dynamic_display_match;
-        let mut stream_display_prepare_requested = true;
+        let mut dynamic_display_match_requested = dynamic_display_match && connection_is_primary;
+        let mut stream_display_prepare_requested = connection_is_primary;
         let mut ws_close_logged = false;
         let mut pre_connect_stop_reason: Option<String> = None;
         let mut pending_control_message: Option<Message> = None;
@@ -6395,6 +6416,20 @@ pub async fn start_host(
                             dynamic_display_session_token,
                             sanitize_trace_value(route),
                             sanitize_trace_value(detail)
+                        ));
+                        continue;
+                    }
+
+                    if !connection_is_primary
+                        && matches!(message, StreamClientMessage::ProjectDisplay { .. })
+                    {
+                        let _ = server_ws_sender.send(StreamServerMessage::DebugLog {
+                            message: "Only the primary device can change display mode.".to_string(),
+                            ty: Some(LogMessageType::Recover),
+                        });
+                        append_host_stream_trace(&format!(
+                            "DISPLAY_MODE_REJECTED token={} reason=multidevice_secondary",
+                            dynamic_display_session_token
                         ));
                         continue;
                     }

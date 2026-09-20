@@ -61,6 +61,15 @@ async fn tunnel_requires_exact_host_runtime_bearer_and_strict_rental_binding() {
     );
     assert!(validate_tunnel_rental_binding(Some("sentinel_prelogin"),None,Some(invalid(serde_json::json!({"handoffBindingId":uuid::Uuid::new_v4().to_string(),"claimId":"c","prepareOperationId":"prepare_fixture_0001"})))).is_err());
     assert!(serde_json::from_value::<AndroidNativeRentalBindingRequest>(serde_json::json!({"handoffBindingId":uuid::Uuid::new_v4().to_string(),"claimId":"c","extra":true})).is_err());
+
+    let root_payload:PostAndroidNativeTunnelLaunchTokenRequest=serde_json::from_value(serde_json::json!({
+        "streamProfile":"sentinel_prelogin","rootNativeSessionId":"android-native-root",
+        "rentalBinding":{"handoffBindingId":uuid::Uuid::new_v4().to_string(),"claimId":"claim-1"}
+    })).unwrap();
+    assert_eq!(root_payload.root_native_session_id.as_deref(),Some("android-native-root"));
+    assert!(serde_json::from_value::<PostAndroidNativeTunnelLaunchTokenRequest>(serde_json::json!({
+        "streamProfile":"sentinel_prelogin","rootNativeSessionId":"root","rentalBinding":{"handoffBindingId":uuid::Uuid::new_v4().to_string(),"claimId":"c"},"extra":true
+    })).is_err());
 }
 
 #[actix_web::test]
