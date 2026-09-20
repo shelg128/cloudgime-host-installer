@@ -1003,8 +1003,12 @@ mod host_cursor_policy_tests {
 
     #[test]
     fn shared_desktop_mouse_modes_keep_windows_cursor_visible() {
-        assert!(!should_hide_host_cursor(HostMouseEmulationMode::RelativeNative));
-        assert!(!should_hide_host_cursor(HostMouseEmulationMode::AbsoluteFollow));
+        assert!(!should_hide_host_cursor(
+            HostMouseEmulationMode::RelativeNative
+        ));
+        assert!(!should_hide_host_cursor(
+            HostMouseEmulationMode::AbsoluteFollow
+        ));
     }
 }
 
@@ -2933,13 +2937,12 @@ impl StreamConnection {
             .wrapping_add(1);
         let had_existing_stream = { self.stream.read().await.is_some() };
         let previous_active_settings = { self.active_stream_settings.lock().await.clone() };
-        if had_existing_stream {
-            self.preserve_client_during_stream_replace_generation
-                .store(stream_generation, Ordering::Release);
-        } else {
-            self.preserve_client_during_stream_replace_generation
-                .store(0, Ordering::Release);
-        }
+        // Keep the browser transport alive for the whole upstream setup/retry
+        // transaction, including the first stream. A transient RTSP failure can
+        // invoke stage_failed/connection_terminated before start_connection()
+        // returns; closing WebRTC there makes the internal retries useless.
+        self.preserve_client_during_stream_replace_generation
+            .store(stream_generation, Ordering::Release);
         {
             let mut mouse_state = self.mouse_cursor_state.lock().await;
             mouse_state.set_mode(
@@ -3466,6 +3469,25 @@ impl StreamConnection {
     }
 }
 
+fn should_preserve_client_for_generation(
+    preserved_generation: u32,
+    callback_generation: u32,
+) -> bool {
+    preserved_generation != 0 && preserved_generation == callback_generation
+}
+
+#[cfg(test)]
+mod upstream_retry_guard_tests {
+    use super::should_preserve_client_for_generation;
+
+    #[test]
+    fn only_callbacks_from_the_active_retry_transaction_are_suppressed() {
+        assert!(should_preserve_client_for_generation(7, 7));
+        assert!(!should_preserve_client_for_generation(0, 7));
+        assert!(!should_preserve_client_for_generation(7, 8));
+    }
+}
+
 struct StreamConnectionListener {
     stream: Weak<StreamConnection>,
     generation: u32,
@@ -3482,10 +3504,12 @@ impl StreamConnectionListener {
     }
 
     fn is_preserving_client_session(&self, stream: &StreamConnection) -> bool {
-        stream
-            .preserve_client_during_stream_replace_generation
-            .load(Ordering::Acquire)
-            == self.generation
+        should_preserve_client_for_generation(
+            stream
+                .preserve_client_during_stream_replace_generation
+                .load(Ordering::Acquire),
+            self.generation,
+        )
     }
 }
 
