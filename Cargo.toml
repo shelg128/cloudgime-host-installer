@@ -92,6 +92,10 @@ cmake = { version = "0.1.54" }
 moonlight-common = { path = "./vendor/moonlight-common-rust" }
 moonlight-common-sys = { path = "./vendor/moonlight-common-rust/moonlight-common-sys" }
 
+[patch.crates-io]
+# Windows ICE sockets must reject overlapping wildcard/interface binds.
+webrtc-util = { path = "./vendor/webrtc-util" }
+
 [workspace.lints.clippy]
 too_many_arguments = "allow"
 unwrap_used = "warn"

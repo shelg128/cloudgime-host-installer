@@ -149,6 +149,9 @@ fn is_overlay_interface_name(name: &str) -> bool {
     .any(|needle| normalized.contains(needle))
 }
 
+#[cfg(all(test, windows))]
+mod windows_udp_ownership_tests;
+
 fn should_allow_candidate_interface(name: &str) -> bool {
     !is_overlay_interface_name(name)
 }
