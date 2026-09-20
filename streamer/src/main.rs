@@ -1387,6 +1387,36 @@ fn pending_message_kind(message: &ServerIpcMessage) -> &'static str {
     }
 }
 
+fn inbound_packet_kind(packet: &InboundPacket) -> &'static str {
+    match packet {
+        InboundPacket::General { .. } => "general",
+        InboundPacket::MouseMove { .. } => "mouse_move",
+        InboundPacket::MousePosition { .. } => "mouse_position",
+        InboundPacket::MouseButton { .. } => "mouse_button",
+        InboundPacket::HighResScroll { .. } => "high_res_scroll",
+        InboundPacket::Scroll { .. } => "scroll",
+        InboundPacket::Key { .. } => "key",
+        InboundPacket::Text { .. } => "text",
+        InboundPacket::ControllerConnected { .. } => "controller_connected",
+        InboundPacket::ControllerDisconnected { .. } => "controller_disconnected",
+        InboundPacket::ControllerState { .. } => "controller_state",
+        InboundPacket::Touch { .. } => "touch",
+        InboundPacket::Rtt { .. } => "rtt",
+        InboundPacket::RequestVideoIdr => "request_video_idr",
+    }
+}
+
+#[cfg(test)]
+mod pre_stream_input_tests {
+    #[test]
+    fn drop_counter_logs_first_and_each_hundredth_only() {
+        let logged = (1_u32..=205)
+            .filter(|count| *count == 1 || *count % 100 == 0)
+            .collect::<Vec<_>>();
+        assert_eq!(logged, vec![1, 100, 200]);
+    }
+}
+
 struct StreamConnection {
     pub runtime: Handle,
     pub moonlight: MoonlightInstance,
@@ -1417,6 +1447,7 @@ struct StreamConnection {
     mouse_position_packets: AtomicU32,
     mouse_move_packets: AtomicU32,
     mouse_input_errors: AtomicU32,
+    pre_stream_input_drops: AtomicU32,
     mouse_button_states: Mutex<[bool; 5]>,
     // Timeout / Terminate
     pub timeout_terminate_request: Mutex<Option<Instant>>,
@@ -1538,6 +1569,7 @@ impl StreamConnection {
             mouse_position_packets: AtomicU32::new(0),
             mouse_move_packets: AtomicU32::new(0),
             mouse_input_errors: AtomicU32::new(0),
+            pre_stream_input_drops: AtomicU32::new(0),
             mouse_button_states: Mutex::new([false; 5]),
             timeout_terminate_request: Default::default(),
             terminate: Notify::default(),
@@ -2023,9 +2055,18 @@ impl StreamConnection {
             return;
         }
 
+        // Never queue or replay control input before Moonlight has an active
+        // upstream. Besides log spam, replaying an old click/key after connect
+        // can operate the renter desktop without matching current user intent.
         let stream_lock = self.stream.read().await;
         let Some(stream) = stream_lock.as_ref() else {
-            warn!("Failed to send packet {packet:?} because of missing stream");
+            let count = self.pre_stream_input_drops.fetch_add(1, Ordering::Relaxed) + 1;
+            if count == 1 || count % 100 == 0 {
+                info!(
+                    "[Input]: dropped pre-stream packet count={count} kind={}",
+                    inbound_packet_kind(&packet)
+                );
+            }
             return;
         };
 
