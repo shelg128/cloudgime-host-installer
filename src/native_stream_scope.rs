@@ -8,7 +8,7 @@ use std::{
 };
 use tokio::{
     process::Child,
-    sync::{Mutex, MutexGuard, watch},
+    sync::{Mutex, MutexGuard, OwnedMutexGuard, watch},
     time::timeout,
 };
 
@@ -24,6 +24,10 @@ struct Entry {
     registered: bool,
     verified_child_exits: usize,
     connections: HashMap<u64, Arc<NativeStreamScope>>,
+    // Sunshine accepts concurrent sessions but its encrypted RTSP setup is not
+    // safe when two clients handshake at the exact same time. Serialize only
+    // that startup phase; established streams do not retain this gate.
+    startup_gate: Arc<Mutex<()>>,
 }
 pub(crate) static NATIVE_STREAM_SCOPES: LazyLock<NativeStreamRegistry> =
     LazyLock::new(NativeStreamRegistry::default);
@@ -33,6 +37,7 @@ pub(crate) struct NativeStreamScope {
     session_id: String,
     generation: u64,
     primary: bool,
+    startup_gate: Arc<Mutex<()>>,
     cancelled: watch::Sender<bool>,
     children: Mutex<Vec<Arc<Mutex<Child>>>>,
 }
@@ -69,6 +74,7 @@ impl NativeStreamRegistry {
             session_id: session_id.into(),
             generation,
             primary,
+            startup_gate: entry.startup_gate.clone(),
             cancelled,
             children: Mutex::new(Vec::new()),
         });
@@ -158,6 +164,18 @@ impl NativeStreamScope {
     pub(crate) fn is_cancelled(&self) -> bool {
         *self.cancelled.borrow()
     }
+    pub(crate) async fn startup_permit(&self) -> Result<OwnedMutexGuard<()>, &'static str> {
+        let mut signal = self.cancelled.subscribe();
+        if *signal.borrow() {
+            return Err("native_scope_revoked");
+        }
+        tokio::select! {
+            guard = self.startup_gate.clone().lock_owned() => {
+                if self.is_cancelled() { Err("native_scope_revoked") } else { Ok(guard) }
+            }
+            _ = signal.changed() => Err("native_scope_revoked"),
+        }
+    }
     pub(crate) async fn cancelled(&self) {
         let mut signal = self.cancelled.subscribe();
         if *signal.borrow() {
@@ -182,7 +200,9 @@ impl NativeStreamScope {
         if let Some(registry) = self.registry.upgrade() {
             let mut sessions = registry.lock().await;
             if let Some(entry) = sessions.get_mut(&self.session_id) {
-                let same_scope = entry.connections.get(&self.generation)
+                let same_scope = entry
+                    .connections
+                    .get(&self.generation)
                     .is_some_and(|current| std::ptr::eq(Arc::as_ptr(current), self));
                 if same_scope {
                     entry.connections.remove(&self.generation);
@@ -311,21 +331,49 @@ mod tests {
             timeout(Duration::from_secs(10), async {
                 loop {
                     let retired = !registry.sessions.lock().await["rental-root"]
-                        .connections.contains_key(&generation);
-                    if retired { break; }
+                        .connections
+                        .contains_key(&generation);
+                    if retired {
+                        break;
+                    }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
             assert!(pc_child.lock().await.try_wait().unwrap().is_some());
             assert!(!phone.is_cancelled());
             assert!(phone_child.lock().await.try_wait().unwrap().is_none());
         }
-        let entry_count = registry.sessions.lock().await["rental-root"].connections.len();
-        assert_eq!(entry_count, 1, "completed PC connections must not consume slots");
+        let entry_count = registry.sessions.lock().await["rental-root"]
+            .connections
+            .len();
+        assert_eq!(
+            entry_count, 1,
+            "completed PC connections must not consume slots"
+        );
         assert_eq!(registry.stop("rental-root").await.unwrap(), 25);
         assert!(phone_child.lock().await.try_wait().unwrap().is_some());
         assert_eq!(registry.stop("rental-root").await.unwrap(), 25);
         assert!(registry.begin("rental-root", 26).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn sibling_startup_is_serial_until_permit_release() {
+        let registry = NativeStreamRegistry::default();
+        let pc = registry.begin("root", 1).await.unwrap();
+        let hp = registry.begin("root", 2).await.unwrap();
+        let pc_permit = pc.startup_permit().await.unwrap();
+        let hp_wait = hp.startup_permit();
+        tokio::pin!(hp_wait);
+        assert!(
+            timeout(Duration::from_millis(50), &mut hp_wait)
+                .await
+                .is_err()
+        );
+        drop(pc_permit);
+        assert!(timeout(Duration::from_secs(1), &mut hp_wait).await.is_ok());
+        registry.stop("root").await.unwrap();
     }
 
     #[tokio::test]
@@ -355,12 +403,17 @@ mod tests {
         let x = attach(&pc).await;
         let y = attach(&hp).await;
         let (a, b, closing) = tokio::join!(
-            registry.stop("root"), registry.stop("root"), pc.stop_owned_children()
+            registry.stop("root"),
+            registry.stop("root"),
+            pc.stop_owned_children()
         );
         assert_eq!(a.unwrap(), 2);
         assert_eq!(b.unwrap(), 2);
         assert_eq!(closing.unwrap(), 1);
-        assert_eq!(registry.sessions.lock().await["root"].verified_child_exits, 2);
+        assert_eq!(
+            registry.sessions.lock().await["root"].verified_child_exits,
+            2
+        );
         assert!(x.lock().await.try_wait().unwrap().is_some());
         assert!(y.lock().await.try_wait().unwrap().is_some());
     }
@@ -373,7 +426,9 @@ mod tests {
         let held_child_lock = child.lock().await;
         let revoked = registry.clone();
         let stop = tokio::spawn(async move { revoked.stop("root").await });
-        timeout(Duration::from_secs(2), pc.cancelled()).await.unwrap();
+        timeout(Duration::from_secs(2), pc.cancelled())
+            .await
+            .unwrap();
         stop.abort();
         let _ = stop.await;
         let sessions = registry.sessions.lock().await;

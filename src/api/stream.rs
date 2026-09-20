@@ -833,12 +833,21 @@ mod child_staging_tests {
         let second = stage_child_binary_into(&root, &source, "same-rental-session")
             .expect("stage reconnect launch");
 
-        assert_ne!(first, second, "reconnect must never reuse a running executable path");
+        assert_ne!(
+            first, second,
+            "reconnect must never reuse a running executable path"
+        );
         assert_eq!(fs::read(&first).unwrap(), b"fixture-streamer");
         assert_eq!(fs::read(&second).unwrap(), b"fixture-streamer");
         cleanup_staged_child_binary(&first);
-        assert!(!first.exists(), "first launch cleanup must remove only its file");
-        assert!(second.exists(), "first launch cleanup must not remove reconnect file");
+        assert!(
+            !first.exists(),
+            "first launch cleanup must remove only its file"
+        );
+        assert!(
+            second.exists(),
+            "first launch cleanup must not remove reconnect file"
+        );
         cleanup_staged_child_binary(&second);
         let _ = fs::remove_file(&source);
         let _ = fs::remove_dir_all(&root);
@@ -917,12 +926,24 @@ mod connection_identity_tests {
         let pc = connection_moonlight_client_id("paired-user", Some("root"), 1);
         let hp = connection_moonlight_client_id("paired-user", Some("root"), 2);
         assert_ne!(pc, hp);
-        assert_ne!(pc, connection_moonlight_client_id("paired-user", Some("other"), 1));
-        assert_ne!(pc, connection_moonlight_client_id("other-user", Some("root"), 1));
-        assert_eq!(pc, connection_moonlight_client_id("paired-user", Some("root"), 1));
+        assert_ne!(
+            pc,
+            connection_moonlight_client_id("paired-user", Some("other"), 1)
+        );
+        assert_ne!(
+            pc,
+            connection_moonlight_client_id("other-user", Some("root"), 1)
+        );
+        assert_eq!(
+            pc,
+            connection_moonlight_client_id("paired-user", Some("root"), 1)
+        );
         assert_eq!(pc.len(), 32);
         assert!(pc.bytes().all(|b| b.is_ascii_hexdigit()));
-        assert_eq!(connection_moonlight_client_id("legacy user!", None, 1), "legacyuser");
+        assert_eq!(
+            connection_moonlight_client_id("legacy user!", None, 1),
+            "legacyuser"
+        );
     }
 }
 
@@ -2601,8 +2622,11 @@ async fn cleanup_bundle_stream_processes(session_token: &str) {
 // Fresh authorization is checked even if the client is idle or WebRTC media
 // bypasses WebSocket transport. No lease is extended by this watchdog. This
 // revokes only owned channels; it does not claim Sunshine/cleanup receipts.
-pub(super) fn monitor_ticket_scope(app: Data<App>, record: crate::app::AndroidNativeStreamTicketRecord,
-    scope: Arc<crate::native_stream_scope::NativeStreamScope>) -> tokio::task::JoinHandle<()> {
+pub(super) fn monitor_ticket_scope(
+    app: Data<App>,
+    record: crate::app::AndroidNativeStreamTicketRecord,
+    scope: Arc<crate::native_stream_scope::NativeStreamScope>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -2610,8 +2634,15 @@ pub(super) fn monitor_ticket_scope(app: Data<App>, record: crate::app::AndroidNa
                 _ = scope.cancelled() => return,
                 _ = sleep(Duration::from_secs(1)) => {}
             }
-            let valid = timeout(Duration::from_secs(2), app.authorize_android_native_stream_ticket_for_stream(
-                &record.stream_ticket, record.host_id, record.app_id)).await;
+            let valid = timeout(
+                Duration::from_secs(2),
+                app.authorize_android_native_stream_ticket_for_stream(
+                    &record.stream_ticket,
+                    record.host_id,
+                    record.app_id,
+                ),
+            )
+            .await;
             if !matches!(valid, Ok(Ok(_))) {
                 if let Err(error) = scope.stop_owned_children().await {
                     warn!("[Scoped stream]: child cutoff unverified: {error}");
@@ -5058,6 +5089,7 @@ async fn forward_stream_server_message(
     stream_connection_established: &AtomicBool,
     video_flow_ready_observed: &AtomicBool,
     start_stream_received: &AtomicBool,
+    startup_permit: &mut Option<tokio::sync::OwnedMutexGuard<()>>,
     warned_closed: &mut bool,
 ) {
     match &message {
@@ -5169,6 +5201,7 @@ async fn forward_stream_server_message(
 
     if matches!(message, StreamServerMessage::ConnectionComplete { .. }) {
         stream_connection_established.store(true, Ordering::Release);
+        startup_permit.take();
         note_host_lifecycle_phase("ready", "connection_complete");
         if legacy_runtime_selected_for_session {
             reset_legacy_runtime_startup_failure_state().await;
@@ -5299,7 +5332,8 @@ pub async fn start_host(
 
         let host_id = HostId(host_id);
         let app_id = AppId(app_id);
-        let android_native_stream_ticket_record = if let Some(stream_ticket) = scoped_ticket.as_ref()
+        let android_native_stream_ticket_record = if let Some(stream_ticket) =
+            scoped_ticket.as_ref()
         {
             match web_app
                 .authorize_android_native_stream_ticket_for_stream(&stream_ticket, host_id, app_id)
@@ -5384,7 +5418,10 @@ pub async fn start_host(
         };
         let _native_connection_guard = native_scope.as_ref().map(|scope| scope.connection_guard());
         let connection_is_primary = native_scope.as_ref().is_none_or(|scope| scope.is_primary());
-        if let (Some(scope), Some(record)) = (native_scope.as_ref(), android_native_stream_ticket_record.as_ref()) {
+        if let (Some(scope), Some(record)) = (
+            native_scope.as_ref(),
+            android_native_stream_ticket_record.as_ref(),
+        ) {
             monitor_ticket_scope(web_app.clone(), record.clone(), scope.clone());
         }
         let stream_generation = if connection_is_primary {
@@ -6100,7 +6137,9 @@ pub async fn start_host(
             None => None,
         };
         let window_watch = if connection_is_primary {
-            spawn_window_primary_watch(&dynamic_display_session_token).await.map(Some)
+            spawn_window_primary_watch(&dynamic_display_session_token)
+                .await
+                .map(Some)
         } else {
             Ok(None)
         };
@@ -6150,6 +6189,17 @@ pub async fn start_host(
         let dynamic_display_match_active = Arc::new(AtomicBool::new(false));
         let prepared_display_active = Arc::new(AtomicBool::new(false));
         let (server_ws_sender, mut server_ws_receiver) = unbounded_channel::<StreamServerMessage>();
+        let startup_permit = match native_scope.as_ref() {
+            Some(scope) => match scope.startup_permit().await {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    let _ = ipc_sender.send(ServerIpcMessage::Stop).await;
+                    let _ = session.close(None).await;
+                    return;
+                }
+            },
+            None => None,
+        };
 
         // Redirect ipc message into ws
         let mut write_session = session.clone();
@@ -6168,6 +6218,7 @@ pub async fn start_host(
             let stream_generation = stream_generation;
             async move {
                 let mut warned_closed = false;
+                let mut startup_permit = startup_permit;
                 let mut ipc_receiver_closed = false;
                 let mut server_ws_receiver_closed = false;
                 loop {
@@ -6194,6 +6245,7 @@ pub async fn start_host(
                                      &stream_connection_established,
                                      &video_flow_ready_observed,
                                      &start_stream_received,
+                                     &mut startup_permit,
                                      &mut warned_closed,
                                  ).await;
                                 }
@@ -6243,6 +6295,7 @@ pub async fn start_host(
                                      &stream_connection_established,
                                      &video_flow_ready_observed,
                                      &start_stream_received,
+                                     &mut startup_permit,
                                      &mut warned_closed,
                                  ).await;
                                 }
@@ -6339,7 +6392,9 @@ pub async fn start_host(
                 host_address: streamer_host_control_address,
                 host_http_port: http_port,
                 client_unique_id: Some(connection_moonlight_client_id(
-                    &client_unique_id, android_native_owner_session_id.as_deref(), registration_id,
+                    &client_unique_id,
+                    android_native_owner_session_id.as_deref(),
+                    registration_id,
                 )),
                 client_private_key: pair_info.client_private_key,
                 client_certificate: pair_info.client_certificate,
@@ -8654,12 +8709,13 @@ pub async fn start_host_mic(
         append_host_stream_trace(&format!("MIC_SIDECAR_INIT host_id={host_id}"));
 
         let mut mic_ticket_record = None;
-        let auth_error = if let Some(stream_ticket) = scoped_ticket.as_ref()
-        {
+        let auth_error = if let Some(stream_ticket) = scoped_ticket.as_ref() {
             web_app
                 .authorize_android_native_stream_ticket_for_host(&stream_ticket, HostId(host_id))
                 .await
-                .map(|record| { mic_ticket_record = Some(record); })
+                .map(|record| {
+                    mic_ticket_record = Some(record);
+                })
         } else {
             match web_app.user_by_auth(auth).await {
                 Ok(mut user) => user.host(HostId(host_id)).await.map(|_| ()),
@@ -8686,16 +8742,37 @@ pub async fn start_host_mic(
             return;
         }
         let native_scope = if let Some(record) = mic_ticket_record.as_ref() {
-            let registration = ACTIVE_NATIVE_CONNECTION_ID.fetch_add(1, Ordering::AcqRel).saturating_add(1);
-            match crate::native_stream_scope::NATIVE_STREAM_SCOPES.begin(&record.session_id, registration).await {
-                Ok(scope) => { monitor_ticket_scope(web_app.clone(), record.clone(), scope.clone()); Some(scope) },
-                Err(_) => { let _ = session.close(None).await; return; }
+            let registration = ACTIVE_NATIVE_CONNECTION_ID
+                .fetch_add(1, Ordering::AcqRel)
+                .saturating_add(1);
+            match crate::native_stream_scope::NATIVE_STREAM_SCOPES
+                .begin(&record.session_id, registration)
+                .await
+            {
+                Ok(scope) => {
+                    monitor_ticket_scope(web_app.clone(), record.clone(), scope.clone());
+                    Some(scope)
+                }
+                Err(_) => {
+                    let _ = session.close(None).await;
+                    return;
+                }
             }
-        } else { None };
+        } else {
+            None
+        };
         let _native_connection_guard = native_scope.as_ref().map(|scope| scope.connection_guard());
         let mut launch_permit = if let Some(scope) = native_scope.as_ref() {
-            match scope.launch_permit().await { Ok(permit) => Some(permit), Err(_) => { let _=session.close(None).await; return; } }
-        } else { None };
+            match scope.launch_permit().await {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    let _ = session.close(None).await;
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         append_host_stream_trace(&format!("MIC_SIDECAR_AUTH_OK host_id={host_id}"));
 
         let _ = send_json_ws_message(
@@ -8798,7 +8875,9 @@ pub async fn start_host_mic(
         >(span, stdin, stdout, child.stderr.take())
         .await;
         let child = Arc::new(Mutex::new(child));
-        if let Some(permit) = launch_permit.as_mut() { permit.attach(child.clone()); }
+        if let Some(permit) = launch_permit.as_mut() {
+            permit.attach(child.clone());
+        }
         drop(launch_permit);
         if native_scope.is_none() {
             replace_active_child(&ACTIVE_MIC_SIDECAR_CHILD, child.clone(), "Mic Sidecar").await;
@@ -8818,7 +8897,9 @@ pub async fn start_host_mic(
                         _ = crate::native_stream_scope::scope_cancelled(&native_scope) => break,
                         message = ipc_receiver.recv() => message,
                     };
-                    let Some(message) = message else { break; };
+                    let Some(message) = message else {
+                        break;
+                    };
                     match message {
                         MicSidecarIpcMessage::WebSocket(message) => {
                             append_host_stream_trace(&format!(
@@ -8866,7 +8947,9 @@ pub async fn start_host_mic(
                 _ = crate::native_stream_scope::scope_cancelled(&native_scope) => break,
                 message = stream.recv() => message,
             };
-            let Some(Ok(message)) = message else { break; };
+            let Some(Ok(message)) = message else {
+                break;
+            };
             match message {
                 Message::Text(text) => {
                     let Ok(message) = serde_json::from_str::<MicSidecarClientMessage>(&text) else {
@@ -8897,9 +8980,15 @@ pub async fn start_host_mic(
         }
 
         if let Some(scope) = native_scope.as_ref() {
-            let _ = timeout(Duration::from_secs(1), ipc_sender.send(MicSidecarServerIpcMessage::Stop)).await;
+            let _ = timeout(
+                Duration::from_secs(1),
+                ipc_sender.send(MicSidecarServerIpcMessage::Stop),
+            )
+            .await;
             let _ = timeout(Duration::from_secs(1), session.close(None)).await;
-            if let Err(error) = scope.stop_owned_children().await { warn!("[Scoped mic]: cutoff unverified: {error}"); }
+            if let Err(error) = scope.stop_owned_children().await {
+                warn!("[Scoped mic]: cutoff unverified: {error}");
+            }
             return;
         }
         ipc_sender.send(MicSidecarServerIpcMessage::Stop).await;
