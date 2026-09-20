@@ -35,6 +35,8 @@ mod provisioning;
 mod host_node_runtime;
 #[path = "../sunshine_profile.rs"]
 mod sunshine_profile;
+#[path = "../sunshine_channels.rs"]
+mod sunshine_channels;
 
 #[cfg(windows)]
 use windows_service::{
@@ -602,10 +604,13 @@ fn run() -> Result<()> {
             let runtime_dir = resolve_runtime_dir(&paths, &runtime_key);
             let apps_path = runtime_dir.join("config").join("apps.json");
             let profile_changed = sunshine_profile::reconcile_sentinel_profile_file(&apps_path)?;
+            let channels_changed = sunshine_channels::reconcile_sunshine_channels_file(
+                &runtime_dir.join("config").join("sunshine.conf"),
+            )?;
             println!("{}", serde_json::json!({"ok":true,"pcId":activation.sentinel_pc_id,
                 "hostId":activation.host_id,"activationState":activation.activation_state,
                 "setupTokenUsed":false,"runtimeStarted":false,"readinessClaimed":false,
-                "sentinelProfileChanged":profile_changed}));
+                "sentinelProfileChanged":profile_changed,"sunshineChannelsChanged":channels_changed}));
             Ok(())
         }
         SupervisorCommand::Status => {
@@ -4320,6 +4325,11 @@ fn start_sunshine_runtime(paths: &BundlePaths, runtime_dir: &Path) -> Result<u32
         .with_context(|| format!("failed to reconcile Sentinel Sunshine profile at {}", apps_path.display()))?;
     if profile_changed {
         append_supervisor_log(paths, "reconciled Sentinel Sunshine single-instance profile")?;
+    }
+    if sunshine_channels::reconcile_sunshine_channels_file(
+        &runtime_dir.join("config").join("sunshine.conf"),
+    )? {
+        append_supervisor_log(paths, "reconciled Sunshine channels=3 for same-claim devices")?;
     }
     let sunshine_service_binary = runtime_dir.join("tools").join("sunshinesvc.exe");
     if sunshine_service_binary.exists() {

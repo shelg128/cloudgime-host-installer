@@ -787,6 +787,7 @@ function New-SunshineConfig {
 
     return @"
 port = $SunshineHttpPort
+channels = 3
 system_tray = disabled
 upnp = disabled
 origin_web_ui_allowed = pc

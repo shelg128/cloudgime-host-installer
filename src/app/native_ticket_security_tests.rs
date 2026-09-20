@@ -822,6 +822,163 @@ async fn explicit_same_claim_root_launch_is_separate_bearer_and_never_extends_au
 }
 
 #[actix_web::test]
+async fn same_claim_can_join_before_first_device_consumes_launch() {
+    let (app, root) = fixture().await;
+    let binding = AndroidNativeRentalBindingRecord {
+        handoff_binding_id: Uuid::new_v4().to_string(),
+        claim_id: "claim-pending-root".into(),
+        prepare_operation_id: None,
+        rental_session_id: None,
+    };
+    let first = app
+        .issue_android_native_launch_token(
+            UserId(9001),
+            HostId(1),
+            AppId(1379015545),
+            AndroidNativeHostBindingRecord {
+                name: "a".into(),
+                address: "127.0.0.1".into(),
+                http_port: 47989,
+                https_port: None,
+                external_port: None,
+                unique_id: None,
+                local_ip: None,
+            },
+            AndroidNativeTrustBootstrapRecord {
+                paired: false,
+                pair_mode: "a".into(),
+                client_unique_id: None,
+                client_certificate_pem: None,
+                client_private_key_pem: None,
+                server_certificate_pem: None,
+            },
+            Some(binding.clone()),
+        )
+        .await;
+    assert!(
+        app.inner
+            .android_native_stream_tickets
+            .read()
+            .await
+            .is_empty()
+    );
+    let pending_count = app.inner.android_native_launch_tokens.read().await.len();
+    let mut wrong_claim = binding.clone();
+    wrong_claim.claim_id = "other-claim".into();
+    for rejected in [
+        app.issue_android_native_sibling_launch_token(
+            &first.session_id,
+            first.user_id,
+            first.host_id,
+            first.app_id,
+            first.host_binding.clone(),
+            first.trust_bootstrap.clone(),
+            wrong_claim,
+        )
+        .await,
+        app.issue_android_native_sibling_launch_token(
+            &first.session_id,
+            first.user_id,
+            HostId(2),
+            first.app_id,
+            first.host_binding.clone(),
+            first.trust_bootstrap.clone(),
+            binding.clone(),
+        )
+        .await,
+        app.issue_android_native_sibling_launch_token(
+            &first.session_id,
+            first.user_id,
+            first.host_id,
+            AppId(2),
+            first.host_binding.clone(),
+            first.trust_bootstrap.clone(),
+            binding.clone(),
+        )
+        .await,
+    ] {
+        assert!(matches!(
+            rejected,
+            Err(AppError::AndroidNativeStreamTicketBindingMismatch)
+        ));
+    }
+    assert_eq!(
+        app.inner.android_native_launch_tokens.read().await.len(),
+        pending_count
+    );
+    let mut second_binding = binding.clone();
+    second_binding.handoff_binding_id = Uuid::new_v4().to_string();
+    let second = app
+        .issue_android_native_sibling_launch_token(
+            &first.session_id,
+            first.user_id,
+            first.host_id,
+            first.app_id,
+            first.host_binding.clone(),
+            first.trust_bootstrap.clone(),
+            second_binding.clone(),
+        )
+        .await
+        .expect("parallel devices must join a pending root, not require first playback");
+    assert_eq!(second.session_id, first.session_id);
+    assert_ne!(second.launch_token, first.launch_token);
+    let mut third_binding = binding.clone();
+    third_binding.handoff_binding_id = Uuid::new_v4().to_string();
+    let third = app
+        .issue_android_native_sibling_launch_token(
+            &first.session_id,
+            first.user_id,
+            first.host_id,
+            first.app_id,
+            first.host_binding.clone(),
+            first.trust_bootstrap.clone(),
+            third_binding,
+        )
+        .await
+        .unwrap();
+    assert_eq!(third.session_id, first.session_id);
+    let mut fourth_binding = binding.clone();
+    fourth_binding.handoff_binding_id = Uuid::new_v4().to_string();
+    assert!(matches!(
+        app.issue_android_native_sibling_launch_token(
+            &first.session_id,
+            first.user_id,
+            first.host_id,
+            first.app_id,
+            first.host_binding.clone(),
+            first.trust_bootstrap.clone(),
+            fourth_binding,
+        )
+        .await,
+        Err(AppError::AndroidNativeDeviceLimit)
+    ));
+    // Either device may reach the player first. Neither consumes the other's bearer.
+    let (_, second_ticket) = app
+        .consume_android_native_launch_token_with_stream_ticket(&second.launch_token)
+        .await
+        .unwrap();
+    let (_, first_ticket) = app
+        .consume_android_native_launch_token_with_stream_ticket(&first.launch_token)
+        .await
+        .unwrap();
+    assert_eq!(second_ticket.rental_binding, Some(second_binding));
+    assert_eq!(first_ticket.rental_binding, Some(binding));
+    assert!(second_ticket.expires_at_unix_ms <= first_ticket.expires_at_unix_ms);
+    assert!(
+        app.peek_android_native_stream_ticket(&first_ticket.stream_ticket)
+            .await
+            .is_ok()
+    );
+    assert!(
+        app.peek_android_native_stream_ticket(&second_ticket.stream_ticket)
+            .await
+            .is_ok()
+    );
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[actix_web::test]
 async fn valid_refresh_requires_possession_and_keeps_host_app_binding() {
     let (app, _root) = fixture().await;
     let issued = launch(&app).await;

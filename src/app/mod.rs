@@ -760,18 +760,26 @@ impl App {
         const TOKEN_TTL_MS: u64 = 300_000;
         const MAX_PENDING_DEVICE_LAUNCHES: usize = 3;
         let now = unix_time_ms_now();
-        if root_session_id.trim().is_empty() || root_session_id != root_session_id.trim()
+        if root_session_id.trim().is_empty()
+            || root_session_id != root_session_id.trim()
             || root_session_id.len() > 256
         {
             return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
         }
         let lifecycle = self.inner.android_native_session_lifecycle.read().await;
-        let root = lifecycle.get(root_session_id).ok_or(AppError::AndroidNativeSessionInactive)?;
-        let canonical = root.rental_binding.as_ref()
+        let root = lifecycle
+            .get(root_session_id)
+            .ok_or(AppError::AndroidNativeSessionInactive)?;
+        let canonical = root
+            .rental_binding
+            .as_ref()
             .ok_or(AppError::AndroidNativeStreamTicketBindingMismatch)?;
-        if root.session_id != root_session_id || root.user_id != user_id || !native_lifecycle_active(root)
+        if root.session_id != root_session_id
+            || root.user_id != user_id
+            || !native_lifecycle_active(root)
             || canonical.claim_id != rental_binding.claim_id
-            || rental_binding.prepare_operation_id.is_some() != rental_binding.rental_session_id.is_some()
+            || rental_binding.prepare_operation_id.is_some()
+                != rental_binding.rental_session_id.is_some()
             || (canonical.rental_session_id.is_some()
                 && canonical.rental_session_id != rental_binding.rental_session_id)
             || (canonical.prepare_operation_id.is_some()
@@ -780,42 +788,92 @@ impl App {
             return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
         }
         let tickets = self.inner.android_native_stream_tickets.read().await;
-        let authority_expires_at = tickets.values().filter(|ticket| {
-            ticket.expires_at_unix_ms > now
-                && ticket.session_id == root_session_id
-                && ticket.token_id == root.token_id
-                && ticket.user_id == user_id
-                && ticket.host_id == host_id
-                && ticket.app_id == app_id
-                && ticket.rental_binding.as_ref().is_some_and(|binding| {
-                    binding.claim_id == canonical.claim_id
-                })
-                && ticket.consumed_at_unix_ms.is_none()
-        }).map(|ticket| ticket.authority_expires_at_unix_ms
-            .map_or(ticket.expires_at_unix_ms, |cap| cap.min(ticket.expires_at_unix_ms))).max()
-          .ok_or(AppError::AndroidNativeStreamTicketBindingMismatch)?;
+        let authority_expires_at = tickets
+            .values()
+            .filter(|ticket| {
+                ticket.expires_at_unix_ms > now
+                    && ticket.session_id == root_session_id
+                    && ticket.token_id == root.token_id
+                    && ticket.user_id == user_id
+                    && ticket.host_id == host_id
+                    && ticket.app_id == app_id
+                    && ticket
+                        .rental_binding
+                        .as_ref()
+                        .is_some_and(|binding| binding.claim_id == canonical.claim_id)
+                    && ticket.consumed_at_unix_ms.is_none()
+            })
+            .map(|ticket| {
+                ticket
+                    .authority_expires_at_unix_ms
+                    .map_or(ticket.expires_at_unix_ms, |cap| {
+                        cap.min(ticket.expires_at_unix_ms)
+                    })
+            })
+            .max();
+        // The first device may not have exchanged its launch token yet. Keep
+        // the ticket read lock until the launch-token lock is acquired so a
+        // concurrent exchange cannot disappear between the two authority reads.
+        // A pending sibling never extends the canonical launch deadline, and its
+        // stream lease is capped from the canonical issuance time (not the join).
+        let mut tokens = self.inner.android_native_launch_tokens.write().await;
+        let (authority_expires_at, launch_expires_at) = match authority_expires_at {
+            Some(cap) => (cap, now + TOKEN_TTL_MS),
+            None => {
+                let pending = tokens
+                    .values()
+                    .find(|token| {
+                        token.session_id == root_session_id
+                            && token.token_id == root.token_id
+                            && token.user_id == user_id
+                            && token.host_id == host_id
+                            && token.app_id == app_id
+                            && token.expires_at_unix_ms > now
+                            && token.rental_binding.as_ref() == Some(canonical)
+                    })
+                    .ok_or(AppError::AndroidNativeStreamTicketBindingMismatch)?;
+                // A consumed launch can briefly exist before its stream ticket
+                // is inserted. Its original expiry/binding still bounds this join.
+                let cap = pending
+                    .stream_authority_expires_at_unix_ms
+                    .unwrap_or(pending.issued_at_unix_ms + 8 * 60 * 60 * 1000);
+                (cap, pending.expires_at_unix_ms)
+            }
+        };
+        if authority_expires_at <= now {
+            return Err(AppError::AndroidNativeStreamTicketExpired);
+        }
         drop(tickets);
         let record = AndroidNativeLaunchTokenRecord {
             token_id: root.token_id.clone(),
             launch_token: format!("mlnatlaunch_{}", Uuid::new_v4().to_simple()),
-            session_id: root_session_id.to_string(), user_id, host_id, app_id,
+            session_id: root_session_id.to_string(),
+            user_id,
+            host_id,
+            app_id,
             issued_at_unix_ms: now,
-            expires_at_unix_ms: (now + TOKEN_TTL_MS).min(authority_expires_at),
+            expires_at_unix_ms: launch_expires_at.min(authority_expires_at),
             consumed_at_unix_ms: None,
             stream_authority_expires_at_unix_ms: Some(authority_expires_at),
             rental_binding: Some(rental_binding),
             session_policy: common::api_bindings::AndroidNativeSessionPolicy {
-                allow_add_host_ui: false, token_managed: true, billing_managed: true,
+                allow_add_host_ui: false,
+                token_managed: true,
+                billing_managed: true,
             },
             feature_profile: default_android_native_feature_profile(),
-            host_binding, trust_bootstrap,
+            host_binding,
+            trust_bootstrap,
         };
         // Retain the lifecycle read lock through insertion: a revoke must not
         // overtake validation and leave a usable launch token behind.
-        let mut tokens = self.inner.android_native_launch_tokens.write().await;
-        tokens.retain(|_, token| token.expires_at_unix_ms > now
-            && token.consumed_at_unix_ms.is_none());
-        if tokens.values().filter(|token| token.session_id == root_session_id).count()
+        tokens.retain(|_, token| {
+            token.expires_at_unix_ms > now && token.consumed_at_unix_ms.is_none()
+        });
+        if tokens
+            .values()
+            .filter(|token| token.session_id == root_session_id)
+            .count()
             >= MAX_PENDING_DEVICE_LAUNCHES
         {
             return Err(AppError::AndroidNativeDeviceLimit);
