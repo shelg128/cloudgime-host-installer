@@ -890,6 +890,42 @@ fn sanitize_moonlight_client_unique_id(value: &str) -> String {
     }
 }
 
+fn connection_moonlight_client_id(base: &str, root: Option<&str>, registration: u64) -> String {
+    match root {
+        Some(root) => {
+            use sha2::{Digest, Sha256};
+            let mut hash = Sha256::new();
+            hash.update(b"cloudgime:moonlight-connection:v1\0");
+            hash.update(base.as_bytes());
+            hash.update(b"\0");
+            hash.update(root.as_bytes());
+            hash.update(b"\0");
+            hash.update(registration.to_be_bytes());
+            // Transport identity is not rental authority. Keep pairing material
+            // unchanged, but never reuse a Sunshine client ID across devices.
+            hex::encode(&hash.finalize()[..16])
+        }
+        None => sanitize_moonlight_client_unique_id(base),
+    }
+}
+
+#[cfg(test)]
+mod connection_identity_tests {
+    use super::*;
+    #[test]
+    fn same_rental_devices_and_reconnects_have_distinct_transport_ids() {
+        let pc = connection_moonlight_client_id("paired-user", Some("root"), 1);
+        let hp = connection_moonlight_client_id("paired-user", Some("root"), 2);
+        assert_ne!(pc, hp);
+        assert_ne!(pc, connection_moonlight_client_id("paired-user", Some("other"), 1));
+        assert_ne!(pc, connection_moonlight_client_id("other-user", Some("root"), 1));
+        assert_eq!(pc, connection_moonlight_client_id("paired-user", Some("root"), 1));
+        assert_eq!(pc.len(), 32);
+        assert!(pc.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(connection_moonlight_client_id("legacy user!", None, 1), "legacyuser");
+    }
+}
+
 fn now_unix_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -6302,7 +6338,9 @@ pub async fn start_host(
                 },
                 host_address: streamer_host_control_address,
                 host_http_port: http_port,
-                client_unique_id: Some(client_unique_id),
+                client_unique_id: Some(connection_moonlight_client_id(
+                    &client_unique_id, android_native_owner_session_id.as_deref(), registration_id,
+                )),
                 client_private_key: pair_info.client_private_key,
                 client_certificate: pair_info.client_certificate,
                 server_certificate: pair_info.server_certificate,
