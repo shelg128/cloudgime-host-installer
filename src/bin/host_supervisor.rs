@@ -29,14 +29,16 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[path = "../provisioning.rs"]
-mod provisioning;
 #[path = "../host_node_runtime.rs"]
 mod host_node_runtime;
-#[path = "../sunshine_profile.rs"]
-mod sunshine_profile;
+#[path = "../provisioning.rs"]
+mod provisioning;
+#[path = "../runtime_service.rs"]
+mod runtime_service;
 #[path = "../sunshine_channels.rs"]
 mod sunshine_channels;
+#[path = "../sunshine_profile.rs"]
+mod sunshine_profile;
 
 #[cfg(windows)]
 use windows_service::{
@@ -534,6 +536,73 @@ const ACTIVATION_STATUS_SYNC_INTERVAL_SECS: u64 = 15;
 const ACTIVATION_HEARTBEAT_INTERVAL_SECS: u64 = 30;
 const LOW_VRAM_GPU_TOTAL_MIB: u64 = 1536;
 const LOW_VRAM_GPU_FREE_MIB: u64 = 512;
+const SERVICE_WATCHDOG_FAILURE_CONFIRMATIONS: u32 = 3;
+
+#[derive(Debug, Default)]
+struct ServiceWatchdogObservation {
+    reason: Option<String>,
+    consecutive_failures: u32,
+    first_observed_at: Option<Instant>,
+}
+
+impl ServiceWatchdogObservation {
+    fn clear(&mut self) {
+        self.reason = None;
+        self.consecutive_failures = 0;
+        self.first_observed_at = None;
+    }
+
+    fn observe(&mut self, reason: &str) -> bool {
+        self.observe_until(reason, SERVICE_WATCHDOG_FAILURE_CONFIRMATIONS)
+    }
+
+    fn observe_until(&mut self, reason: &str, confirmations: u32) -> bool {
+        if self.reason.as_deref() == Some(reason) {
+            self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        } else {
+            self.reason = Some(reason.to_string());
+            self.consecutive_failures = 1;
+            self.first_observed_at = Some(Instant::now());
+        }
+        self.consecutive_failures >= confirmations.max(1)
+    }
+}
+
+#[cfg(test)]
+mod service_watchdog_observation_tests {
+    use super::*;
+
+    #[test]
+    fn confirms_only_three_consecutive_identical_failures() {
+        let mut observation = ServiceWatchdogObservation::default();
+        assert!(!observation.observe("http"));
+        assert!(!observation.observe("http"));
+        assert!(observation.observe("http"));
+        assert_eq!(observation.consecutive_failures, 3);
+    }
+
+    #[test]
+    fn healthy_probe_and_reason_change_reset_confirmation() {
+        let mut observation = ServiceWatchdogObservation::default();
+        assert!(!observation.observe("http"));
+        assert!(!observation.observe("http"));
+        observation.clear();
+        assert!(!observation.observe("http"));
+        assert!(!observation.observe("process"));
+        assert_eq!(observation.consecutive_failures, 1);
+        assert!(!observation.observe("process"));
+        assert!(observation.observe("process"));
+        observation.clear();
+        assert!(!observation.observe_until("active", 6));
+        for _ in 0..4 {
+            assert!(!observation.observe_until("active", 6));
+        }
+        assert!(observation.observe_until("active", 6));
+        observation.clear();
+        assert!(observation.reason.is_none());
+        assert!(observation.first_observed_at.is_none());
+    }
+}
 
 fn push_recent_incident(
     state: &mut SupervisorState,
@@ -596,10 +665,14 @@ fn run() -> Result<()> {
         ),
         SupervisorCommand::RevalidateNode => {
             let mut activation = read_activation_state(&paths);
-            if !activation.universal_node { bail!("NODE_NOT_PROVISIONED") }
+            if !activation.universal_node {
+                bail!("NODE_NOT_PROVISIONED")
+            }
             #[cfg(windows)]
             host_node_runtime::sync(&paths, &mut activation)?;
-            if !host_node_runtime::allows(&activation) { bail!("NODE_RUNTIME_NOT_AUTHORIZED") }
+            if !host_node_runtime::allows(&activation) {
+                bail!("NODE_RUNTIME_NOT_AUTHORIZED")
+            }
             let runtime_key = read_selected_runtime_key(&paths);
             let runtime_dir = resolve_runtime_dir(&paths, &runtime_key);
             let apps_path = runtime_dir.join("config").join("apps.json");
@@ -607,10 +680,13 @@ fn run() -> Result<()> {
             let channels_changed = sunshine_channels::reconcile_sunshine_channels_file(
                 &runtime_dir.join("config").join("sunshine.conf"),
             )?;
-            println!("{}", serde_json::json!({"ok":true,"pcId":activation.sentinel_pc_id,
+            println!(
+                "{}",
+                serde_json::json!({"ok":true,"pcId":activation.sentinel_pc_id,
                 "hostId":activation.host_id,"activationState":activation.activation_state,
                 "setupTokenUsed":false,"runtimeStarted":false,"readinessClaimed":false,
-                "sentinelProfileChanged":profile_changed,"sunshineChannelsChanged":channels_changed}));
+                "sentinelProfileChanged":profile_changed,"sunshineChannelsChanged":channels_changed})
+            );
             Ok(())
         }
         SupervisorCommand::Status => {
@@ -830,6 +906,7 @@ fn run_service_main() -> Result<()> {
     append_supervisor_log(&paths, "service status RUNNING")?;
     let mut last_watchdog_tick = Instant::now();
     let mut last_watchdog_recovery_at: Option<Instant> = None;
+    let mut watchdog_observation = ServiceWatchdogObservation::default();
     let mut last_activation_status_sync_at: Option<Instant> = None;
     let mut last_activation_heartbeat_at: Option<Instant> = None;
     while !stop_requested.load(Ordering::SeqCst) {
@@ -854,8 +931,12 @@ fn run_service_main() -> Result<()> {
             ) {
                 append_supervisor_log(&paths, &format!("service activation sync error: {err:#}"))?;
             }
-            if let Err(err) = service_watchdog_tick(&paths, &config, &mut last_watchdog_recovery_at)
-            {
+            if let Err(err) = service_watchdog_tick(
+                &paths,
+                &config,
+                &mut last_watchdog_recovery_at,
+                &mut watchdog_observation,
+            ) {
                 append_supervisor_log(&paths, &format!("service watchdog error: {err:#}"))?;
             }
             last_watchdog_tick = Instant::now();
@@ -885,22 +966,39 @@ fn service_watchdog_tick(
     paths: &BundlePaths,
     config: &Config,
     last_watchdog_recovery_at: &mut Option<Instant>,
+    observation: &mut ServiceWatchdogObservation,
 ) -> Result<()> {
     maybe_restore_host_cursor_defaults_if_idle(paths)?;
 
     let activation = read_activation_state(paths);
     if !activation_allows_runtime(paths, &activation) {
+        observation.clear();
         stop_runtime_when_activation_locked(paths, &activation)?;
         return Ok(());
     }
 
     if !daemon_is_running(paths) {
+        let reason = "service_watchdog_daemon_missing";
+        if !observation.observe(reason) {
+            append_supervisor_log(
+                paths,
+                &format!(
+                    "service_watchdog observation pending reason={reason} consecutive={}/{}",
+                    observation.consecutive_failures, SERVICE_WATCHDOG_FAILURE_CONFIRMATIONS
+                ),
+            )?;
+            return Ok(());
+        }
         if watchdog_recovery_allowed(last_watchdog_recovery_at, Duration::from_secs(15)) {
-            record_service_watchdog_trigger(paths, "service_watchdog_daemon_missing")?;
-            append_supervisor_log(paths, "service_watchdog daemon missing -> start_bundle")?;
+            record_service_watchdog_trigger(paths, reason)?;
+            append_supervisor_log(
+                paths,
+                "service_watchdog confirmed daemon missing -> start_bundle",
+            )?;
             ensure_user_session_daemon_running(paths)?;
             request_user_daemon_operation(paths, DaemonCommandKind::StartBundle)?;
             *last_watchdog_recovery_at = Some(Instant::now());
+            observation.clear();
         }
         return Ok(());
     }
@@ -919,13 +1017,14 @@ fn service_watchdog_tick(
         .lifecycle_updated_at_unix_ms
         .is_some_and(|value| now_unix_ms().saturating_sub(value) <= 60_000);
 
+    let active_stream = bundle_has_active_stream_session(paths)?;
     let stale_route_recovery = stale_route_recovery_can_restart(
         &state,
         now_unix_ms(),
         required_processes_ready,
         local_http_ready,
         paths.command_path.exists(),
-        bundle_has_active_stream_session(paths)?,
+        active_stream,
     );
     let needs_recovery = if stale_route_recovery {
         Some("service_watchdog_stale_route_recovery".to_string())
@@ -956,8 +1055,33 @@ fn service_watchdog_tick(
     };
 
     let Some(reason) = needs_recovery else {
+        observation.clear();
         return Ok(());
     };
+
+    // A live stream gets a longer confirmation window so one slow local HTTP
+    // response or process snapshot cannot interrupt active rental media.
+    let confirmations = if active_stream {
+        SERVICE_WATCHDOG_FAILURE_CONFIRMATIONS * 2
+    } else {
+        SERVICE_WATCHDOG_FAILURE_CONFIRMATIONS
+    };
+    if !observation.observe_until(&reason, confirmations) {
+        append_supervisor_log(
+            paths,
+            &format!(
+                "service_watchdog observation pending reason={} consecutive={}/{} active_stream={} phase={:?} required_processes_ready={} local_http_ready={}",
+                reason,
+                observation.consecutive_failures,
+                confirmations,
+                active_stream,
+                state.lifecycle_phase,
+                required_processes_ready,
+                local_http_ready
+            ),
+        )?;
+        return Ok(());
+    }
 
     if !watchdog_recovery_allowed(last_watchdog_recovery_at, Duration::from_secs(20)) {
         return Ok(());
@@ -979,6 +1103,7 @@ fn service_watchdog_tick(
         },
     )?;
     *last_watchdog_recovery_at = Some(Instant::now());
+    observation.clear();
     Ok(())
 }
 
@@ -991,7 +1116,9 @@ fn service_activation_tick(
 ) -> Result<()> {
     let mut activation = read_activation_state(paths);
     if activation.universal_node {
-        if last_status_sync_at.is_none_or(|last| last.elapsed() >= Duration::from_secs(ACTIVATION_STATUS_SYNC_INTERVAL_SECS)) {
+        if last_status_sync_at.is_none_or(|last| {
+            last.elapsed() >= Duration::from_secs(ACTIVATION_STATUS_SYNC_INTERVAL_SECS)
+        }) {
             *last_status_sync_at = Some(Instant::now());
             if host_node_runtime::sync(paths, &mut activation).is_err() {
                 append_supervisor_log(paths, "NODE_REVALIDATION_PENDING_NO_SETUP_TOKEN_REQUIRED")?;
@@ -1001,7 +1128,9 @@ fn service_activation_tick(
             stop_runtime_when_activation_locked(paths, &activation)?;
             return Ok(());
         }
-        if last_heartbeat_at.is_none_or(|last| last.elapsed() >= Duration::from_secs(ACTIVATION_HEARTBEAT_INTERVAL_SECS)) {
+        if last_heartbeat_at.is_none_or(|last| {
+            last.elapsed() >= Duration::from_secs(ACTIVATION_HEARTBEAT_INTERVAL_SECS)
+        }) {
             *last_heartbeat_at = Some(Instant::now());
             send_activation_heartbeat(paths, config, &mut activation)?;
         }
@@ -1073,7 +1202,10 @@ fn stale_route_recovery_can_restart(
         && local_http_ready
         && !command_pending
         && !active_stream
-        && !matches!(state.last_command_status.as_deref(), Some("running" | "queued"))
+        && !matches!(
+            state.last_command_status.as_deref(),
+            Some("running" | "queued")
+        )
         && state.lifecycle_updated_at_unix_ms.is_some_and(|updated| {
             updated > 0 && now.checked_sub(updated).is_some_and(|age| age > 60_000)
         })
@@ -1096,22 +1228,35 @@ mod stale_route_recovery_tests {
     #[test]
     fn idle_stale_route_recovery_enters_bounded_restart_not_ready_override() {
         let state = idle_stale();
-        assert!(stale_route_recovery_can_restart(&state, 160_001, true, true, false, false));
+        assert!(stale_route_recovery_can_restart(
+            &state, 160_001, true, true, false, false
+        ));
         assert!(matches!(state.lifecycle_phase, LifecyclePhase::Recovering));
     }
 
     #[test]
     fn recovery_does_not_interrupt_media_or_commands_or_mask_unhealthy_runtime() {
         for (processes, http, pending, active) in [
-            (false, true, false, false), (true, false, false, false),
-            (true, true, true, false), (true, true, false, true),
+            (false, true, false, false),
+            (true, false, false, false),
+            (true, true, true, false),
+            (true, true, false, true),
         ] {
-            assert!(!stale_route_recovery_can_restart(&idle_stale(), 200_000, processes, http, pending, active));
+            assert!(!stale_route_recovery_can_restart(
+                &idle_stale(),
+                200_000,
+                processes,
+                http,
+                pending,
+                active
+            ));
         }
         for status in ["running", "queued"] {
             let mut state = idle_stale();
             state.last_command_status = Some(status.into());
-            assert!(!stale_route_recovery_can_restart(&state, 200_000, true, true, false, false));
+            assert!(!stale_route_recovery_can_restart(
+                &state, 200_000, true, true, false, false
+            ));
         }
     }
 
@@ -1119,18 +1264,34 @@ mod stale_route_recovery_tests {
     fn fresh_unknown_future_and_other_lifecycle_states_never_trigger_route_recovery() {
         let state = idle_stale();
         for now in [99_999, 100_000, 160_000] {
-            assert!(!stale_route_recovery_can_restart(&state, now, true, true, false, false));
+            assert!(!stale_route_recovery_can_restart(
+                &state, now, true, true, false, false
+            ));
         }
         for stamp in [None, Some(0)] {
-            let mut state = idle_stale(); state.lifecycle_updated_at_unix_ms = stamp;
-            assert!(!stale_route_recovery_can_restart(&state, 200_000, true, true, false, false));
+            let mut state = idle_stale();
+            state.lifecycle_updated_at_unix_ms = stamp;
+            assert!(!stale_route_recovery_can_restart(
+                &state, 200_000, true, true, false, false
+            ));
         }
-        for phase in [LifecyclePhase::Ready, LifecyclePhase::Starting, LifecyclePhase::Stopping, LifecyclePhase::Failed] {
-            let mut state = idle_stale(); state.lifecycle_phase = phase;
-            assert!(!stale_route_recovery_can_restart(&state, 200_000, true, true, false, false));
+        for phase in [
+            LifecyclePhase::Ready,
+            LifecyclePhase::Starting,
+            LifecyclePhase::Stopping,
+            LifecyclePhase::Failed,
+        ] {
+            let mut state = idle_stale();
+            state.lifecycle_phase = phase;
+            assert!(!stale_route_recovery_can_restart(
+                &state, 200_000, true, true, false, false
+            ));
         }
-        let mut state = idle_stale(); state.lifecycle_reason = Some("sunshine_capture_init_failed".into());
-        assert!(!stale_route_recovery_can_restart(&state, 200_000, true, true, false, false));
+        let mut state = idle_stale();
+        state.lifecycle_reason = Some("sunshine_capture_init_failed".into());
+        assert!(!stale_route_recovery_can_restart(
+            &state, 200_000, true, true, false, false
+        ));
     }
 }
 
@@ -3246,7 +3407,8 @@ fn read_activation_state(paths: &BundlePaths) -> HostActivationStateRecord {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => "{}".into(),
             Err(_) => return host_node_runtime::failed_state(),
         };
-        let Ok(mut state) = serde_json::from_str::<HostActivationStateRecord>(strip_utf8_bom(&raw)) else {
+        let Ok(mut state) = serde_json::from_str::<HostActivationStateRecord>(strip_utf8_bom(&raw))
+        else {
             return host_node_runtime::failed_state();
         };
         state.universal_node = true;
@@ -3306,7 +3468,10 @@ fn save_activation_state(paths: &BundlePaths, state: &HostActivationStateRecord)
     sanitized.runtime_token.clear();
     if state.universal_node {
         sanitized.credential_ref.clear();
-        return provisioning::write_host_runtime_cache(&paths.activation_state_path, &serde_json::to_value(&sanitized)?);
+        return provisioning::write_host_runtime_cache(
+            &paths.activation_state_path,
+            &serde_json::to_value(&sanitized)?,
+        );
     }
     let serialized = serde_json::to_string_pretty(&sanitized)?;
     fs::write(&paths.activation_state_path, format!("{serialized}\n")).with_context(|| {
@@ -3877,19 +4042,45 @@ fn stop_bundle_processes(paths: &BundlePaths, scope: StopScope) -> Result<()> {
         ),
     )?;
     let config = load_config(paths)?;
-    let _ = stop_managed_windows_service(paths, &default_sunshine_service_name(paths));
+    // Registered runtime services are stopped only through SCM. Failure is
+    // propagated; never translate access denied/timeout into taskkill.
+    let runtime_service_managed =
+        stop_managed_windows_service(paths, &default_sunshine_service_name(paths))?;
     if let Some(state) = read_state(paths) {
         let pids = match scope {
             StopScope::RuntimeOnly => vec![state.sunshine_pid],
             StopScope::All => vec![state.sunshine_pid, state.web_server_pid, state.frpc_pid],
         };
         for pid in pids.into_iter().flatten() {
+            if runtime_service_managed && Some(pid) == state.sunshine_pid {
+                append_supervisor_log(
+                    paths,
+                    &format!(
+                        "planned runtime service stop verified by SCM; skipping forced pid termination pid={pid}"
+                    ),
+                )?;
+                continue;
+            }
             let _ = taskkill_pid(pid);
         }
     }
 
     let processes = list_bundle_processes(paths, scope)?;
-    for (pid, _) in processes {
+    for (pid, image) in processes {
+        let name = image
+            .file_name()
+            .map(|value| value.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if runtime_service_managed && matches!(name.as_str(), "sunshine.exe" | "sunshinesvc.exe") {
+            append_supervisor_log(
+                paths,
+                &format!(
+                    "planned runtime service stop verified by SCM; skipping forced image termination pid={pid} image={}",
+                    image.display()
+                ),
+            )?;
+            continue;
+        }
         let _ = taskkill_pid(pid);
     }
 
@@ -4322,14 +4513,25 @@ fn compact_log_tail(raw: &str, max_chars: usize) -> String {
 fn start_sunshine_runtime(paths: &BundlePaths, runtime_dir: &Path) -> Result<u32> {
     let apps_path = runtime_dir.join("config").join("apps.json");
     let profile_changed = sunshine_profile::reconcile_sentinel_profile_file(&apps_path)
-        .with_context(|| format!("failed to reconcile Sentinel Sunshine profile at {}", apps_path.display()))?;
+        .with_context(|| {
+            format!(
+                "failed to reconcile Sentinel Sunshine profile at {}",
+                apps_path.display()
+            )
+        })?;
     if profile_changed {
-        append_supervisor_log(paths, "reconciled Sentinel Sunshine single-instance profile")?;
+        append_supervisor_log(
+            paths,
+            "reconciled Sentinel Sunshine single-instance profile",
+        )?;
     }
     if sunshine_channels::reconcile_sunshine_channels_file(
         &runtime_dir.join("config").join("sunshine.conf"),
     )? {
-        append_supervisor_log(paths, "reconciled Sunshine channels=3 for same-claim devices")?;
+        append_supervisor_log(
+            paths,
+            "reconciled Sunshine channels=3 for same-claim devices",
+        )?;
     }
     let sunshine_service_binary = runtime_dir.join("tools").join("sunshinesvc.exe");
     if sunshine_service_binary.exists() {
@@ -4511,7 +4713,7 @@ fn start_managed_windows_service(_paths: &BundlePaths, service_name: &str) -> Re
 }
 
 #[cfg(windows)]
-fn stop_managed_windows_service(paths: &BundlePaths, service_name: &str) -> Result<()> {
+fn stop_managed_windows_service(paths: &BundlePaths, service_name: &str) -> Result<bool> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .context("failed to connect to the Windows service manager")?;
     let service = manager
@@ -4524,8 +4726,19 @@ fn stop_managed_windows_service(paths: &BundlePaths, service_name: &str) -> Resu
         .query_status()
         .with_context(|| format!("failed to query Windows service {service_name}"))?;
     if status.current_state == WindowsServiceState::Stopped {
-        return Ok(());
+        append_supervisor_log(
+            paths,
+            &format!("managed Windows service {service_name} already stopped"),
+        )?;
+        return Ok(true);
     }
+    append_supervisor_log(
+        paths,
+        &format!(
+            "planned Windows service stop requested service={service_name} state={:?} pid={:?} scm_exit={:?}",
+            status.current_state, status.process_id, status.exit_code
+        ),
+    )?;
     if status.current_state != WindowsServiceState::StopPending {
         service
             .stop()
@@ -4537,14 +4750,19 @@ fn stop_managed_windows_service(paths: &BundlePaths, service_name: &str) -> Resu
         WindowsServiceState::Stopped,
         Duration::from_secs(35),
     )?;
+    let final_status = service.query_status()?;
     append_supervisor_log(
         paths,
-        &format!("stopped managed Windows service {service_name}"),
-    )
+        &format!(
+            "planned Windows service stop completed service={service_name} state={:?} pid={:?} scm_exit={:?}",
+            final_status.current_state, final_status.process_id, final_status.exit_code
+        ),
+    )?;
+    Ok(true)
 }
 
 #[cfg(not(windows))]
-fn stop_managed_windows_service(_paths: &BundlePaths, service_name: &str) -> Result<()> {
+fn stop_managed_windows_service(_paths: &BundlePaths, service_name: &str) -> Result<bool> {
     bail!("Windows service {service_name} cannot be stopped on this platform")
 }
 
@@ -4746,9 +4964,13 @@ fn local_http_ready(config: &Config) -> Result<bool> {
     let request =
         format!("GET {path} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\n\r\n");
     use std::io::{Read as _, Write as _};
-    stream.write_all(request.as_bytes())?;
+    if stream.write_all(request.as_bytes()).is_err() {
+        return Ok(false);
+    }
     let mut response = String::new();
-    stream.read_to_string(&mut response)?;
+    if stream.read_to_string(&mut response).is_err() {
+        return Ok(false);
+    }
     let Some(first_line) = response.lines().next() else {
         return Ok(false);
     };

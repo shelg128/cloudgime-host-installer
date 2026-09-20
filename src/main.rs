@@ -49,6 +49,7 @@ mod native_stream_scope;
 #[path = "provisioning.rs"]
 mod provisioning;
 mod rental_desktop_target;
+mod runtime_service;
 mod stream_controller;
 
 #[actix_web::main]
