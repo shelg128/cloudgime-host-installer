@@ -377,6 +377,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn revoke_unblocks_waiting_startup_without_waiting_for_holder() {
+        let registry = NativeStreamRegistry::default();
+        let pc = registry.begin("root-cancel", 1).await.unwrap();
+        let hp = registry.begin("root-cancel", 2).await.unwrap();
+        let _held = pc.startup_permit().await.unwrap();
+        let waiting = hp.startup_permit();
+        tokio::pin!(waiting);
+        assert!(
+            timeout(Duration::from_millis(20), &mut waiting)
+                .await
+                .is_err()
+        );
+        timeout(Duration::from_secs(1), registry.stop("root-cancel"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            timeout(Duration::from_secs(1), &mut waiting)
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert!(hp.startup_permit().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn independent_roots_do_not_share_startup_gate() {
+        let registry = NativeStreamRegistry::default();
+        let pc = registry.begin("root-a", 1).await.unwrap();
+        let other = registry.begin("root-b", 2).await.unwrap();
+        let _held = pc.startup_permit().await.unwrap();
+        let _other = timeout(Duration::from_secs(1), other.startup_permit())
+            .await
+            .unwrap()
+            .unwrap();
+        registry.stop("root-a").await.unwrap();
+        registry.stop("root-b").await.unwrap();
+    }
+
+    #[tokio::test]
     async fn delayed_cleanup_of_old_generation_does_not_remove_reused_slot() {
         let registry = NativeStreamRegistry::default();
         let old = registry.begin("root", 7).await.unwrap();
