@@ -937,6 +937,12 @@ export class WebRTCTransport implements Transport {
             iceCandidatePoolSize: 4,
             ...configuration
         })
+        // Negotiate the receive-only media sections in the first offer. A later
+        // data-only -> media offer from the Host can change Chrome's ICE role
+        // while the Host retains its original role, breaking consent checks.
+        // These receive-only tracks do not request microphone/camera permission.
+        this.peer.addTransceiver("video", { direction: "recvonly" })
+        this.peer.addTransceiver("audio", { direction: "recvonly" })
         this.peer.addEventListener("error", this.onError.bind(this))
 
         this.peer.addEventListener("negotiationneeded", this.onNegotiationNeeded.bind(this))

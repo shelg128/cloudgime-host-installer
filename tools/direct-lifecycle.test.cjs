@@ -8,6 +8,15 @@ const ts = require('typescript');
 const root = process.env.DIRECT_LIFECYCLE_SOURCE_ROOT || path.join(__dirname, '..');
 const sources = Object.fromEntries(['web/stream.ts','web/stream/index.ts'].map(rel => [rel, ts.createSourceFile(rel, fs.readFileSync(path.join(root,rel),'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TS)]));
 function findNode(sf, predicate) { let found; function visit(n) { if(predicate(n)) { found=n; return; } if(!found)ts.forEachChild(n,visit); } visit(sf); assert.ok(found,'source method/expression must exist');return found; }
+test('WebRTC first offer pre-negotiates receive-only media before data channels', () => {
+ const text=fs.readFileSync(path.join(root,'web/stream/transport/webrtc.ts'),'utf8');
+ const peer=text.indexOf('this.peer = new RTCPeerConnection');
+ const video=text.indexOf('this.peer.addTransceiver("video", { direction: "recvonly" })',peer);
+ const audio=text.indexOf('this.peer.addTransceiver("audio", { direction: "recvonly" })',peer);
+ const channels=text.indexOf('this.initChannels()',peer);
+ assert.ok(peer>=0&&video>peer&&audio>video&&channels>audio,'media transceivers must precede first data-channel offer');
+});
+
 function harness(file, methods) {
  const sf=sources[file], timers=new Map(), events=[];let now=100000,nextTimer=1;
  class Video { constructor(){this.paused=false;this.readyState=4;this.videoWidth=1280;this.videoHeight=720;} async play(){} }
