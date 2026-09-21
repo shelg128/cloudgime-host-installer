@@ -16,7 +16,7 @@ param(
     [int]$WebRtcBasePort = 40000,
     [int]$WebRtcBlockSize = 50,
     [string]$UrlPathPrefix = "/stream",
-    [string]$TurnHost = "64.120.92.154",
+    [string]$TurnHost = "104.234.174.86",
     [int]$TurnPort = 3478,
     [string]$TurnUsername = "mlturn",
     [string]$TurnCredential = "Shelgy678789",
