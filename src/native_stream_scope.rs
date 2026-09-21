@@ -194,24 +194,31 @@ impl NativeStreamScope {
     /// command. Ownership is retained throughout; timeout does not authorize
     /// release and the caller must still invoke `stop_owned_children`.
     pub(crate) async fn wait_owned_children_exit(&self, max_wait: Duration) -> bool {
-        let started = tokio::time::Instant::now();
-        loop {
-            let children = self.children.lock().await;
-            let mut all_exited = true;
-            for child in children.iter() {
-                match child.lock().await.try_wait() {
-                    Ok(Some(_)) => {}
-                    Ok(None) | Err(_) => all_exited = false,
+        if self.is_cancelled() {
+            return false;
+        }
+        let observe = async {
+            loop {
+                // Snapshot handles only; do not retain registry/children locks
+                // while waiting. Revoke must be able to acquire them immediately.
+                let children = self.children.lock().await.clone();
+                let mut all_exited = true;
+                for child in children {
+                    match child.lock().await.try_wait() {
+                        Ok(Some(_)) => {}
+                        Ok(None) | Err(_) => all_exited = false,
+                    }
                 }
+                if all_exited {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
             }
-            drop(children);
-            if all_exited {
-                return true;
-            }
-            if started.elapsed() >= max_wait {
-                return false;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
+        tokio::select! {
+            biased;
+            _ = self.cancelled() => false,
+            result = timeout(max_wait, observe) => result.unwrap_or(false),
         }
     }
 
@@ -332,6 +339,54 @@ mod tests {
         child.lock().await.wait().await.unwrap();
         assert!(scope.wait_owned_children_exit(Duration::from_secs(1)).await);
         assert_eq!(scope.stop_owned_children().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn grace_deadline_covers_locked_child_and_revoke_is_immediate() {
+        let registry = NativeStreamRegistry::default();
+        let scope = registry.begin("bounded-grace", 1).await.unwrap();
+        let child = attach(&scope).await;
+        let held = child.lock().await;
+        assert!(
+            !timeout(
+                Duration::from_secs(1),
+                scope.wait_owned_children_exit(Duration::from_millis(30))
+            )
+            .await
+            .unwrap()
+        );
+        let waiting = scope.wait_owned_children_exit(Duration::from_secs(60));
+        tokio::pin!(waiting);
+        assert!(
+            timeout(Duration::from_millis(20), &mut waiting)
+                .await
+                .is_err()
+        );
+        scope.cancelled.send_replace(true);
+        assert!(
+            !timeout(Duration::from_millis(200), &mut waiting)
+                .await
+                .unwrap()
+        );
+        drop(held);
+        scope.stop_owned_children().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn grace_does_not_delay_root_cutoff_or_stop_sibling() {
+        let registry = NativeStreamRegistry::default();
+        let pc = registry.begin("grace-root", 1).await.unwrap();
+        let hp = registry.begin("grace-root", 2).await.unwrap();
+        let a = attach(&pc).await;
+        let b = attach(&hp).await;
+        let (grace, revoked) = tokio::join!(
+            pc.wait_owned_children_exit(Duration::from_secs(60)),
+            timeout(Duration::from_secs(3), registry.stop("grace-root")),
+        );
+        assert!(!grace);
+        assert_eq!(revoked.unwrap().unwrap(), 2);
+        assert!(a.lock().await.try_wait().unwrap().is_some());
+        assert!(b.lock().await.try_wait().unwrap().is_some());
     }
 
     #[tokio::test]

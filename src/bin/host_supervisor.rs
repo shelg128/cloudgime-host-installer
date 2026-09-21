@@ -31,6 +31,8 @@ use serde_json::Value;
 
 #[path = "../host_node_runtime.rs"]
 mod host_node_runtime;
+#[path = "../local_http_health.rs"]
+mod local_http_health;
 #[path = "../provisioning.rs"]
 mod provisioning;
 #[path = "../runtime_service.rs"]
@@ -4946,72 +4948,10 @@ fn wait_for_tcp_ready(address: &str, port: u16, timeout: Duration) -> Result<()>
 }
 
 fn local_http_ready(config: &Config) -> Result<bool> {
-    let address = config.web_server.bind_address;
-    let path_prefix = normalize_url_path_prefix(&config.web_server.url_path_prefix);
-    let path = format!("{path_prefix}/");
-    let mut stream = match TcpStream::connect_timeout(&address, Duration::from_secs(2)) {
-        Ok(stream) => stream,
-        Err(_) => return Ok(false),
-    };
-    stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
-    stream.set_write_timeout(Some(Duration::from_secs(3))).ok();
-
-    let host_header = match address {
-        SocketAddr::V4(value) => format!("{}:{}", value.ip(), value.port()),
-        SocketAddr::V6(value) => format!("[{}]:{}", value.ip(), value.port()),
-    };
-
-    let request =
-        format!("GET {path} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\n\r\n");
-    use std::io::{Read as _, Write as _};
-    if stream.write_all(request.as_bytes()).is_err() {
-        return Ok(false);
-    }
-    // Read only until the first status line is complete. TCP may split it over
-    // several packets, while keep-alive means waiting for EOF is incorrect.
-    let mut response = Vec::with_capacity(256);
-    let mut chunk = [0_u8; 128];
-    for _ in 0..4 {
-        let bytes_read = match stream.read(&mut chunk) {
-            Ok(value) if value > 0 => value,
-            _ => return Ok(false),
-        };
-        response.extend_from_slice(&chunk[..bytes_read]);
-        if response.contains(&b'\n') {
-            return Ok(http_probe_status_ready(&response));
-        }
-    }
-    Ok(false)
-}
-
-fn http_probe_status_ready(response: &[u8]) -> bool {
-    let first_line = response
-        .split(|byte| *byte == b'\n')
-        .next()
-        .unwrap_or_default();
-    let Ok(first_line) = std::str::from_utf8(first_line) else {
-        return false;
-    };
-    let status_code = first_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or_default();
-    (200..500).contains(&status_code)
-}
-
-#[cfg(test)]
-mod local_http_probe_tests {
-    use super::http_probe_status_ready;
-    #[test]
-    fn accepts_status_line_without_waiting_for_connection_close() {
-        assert!(http_probe_status_ready(
-            b"HTTP/1.1 200 OK\r\nConnection: keep-alive\r\n"
-        ));
-        assert!(http_probe_status_ready(b"HTTP/1.1 401 Unauthorized\r\n"));
-        assert!(!http_probe_status_ready(b"HTTP/1.1 500 Error\r\n"));
-        assert!(!http_probe_status_ready(b"garbage"));
-    }
+    Ok(local_http_health::probe(
+        config.web_server.bind_address,
+        &config.web_server.url_path_prefix,
+    ))
 }
 
 fn normalize_url_path_prefix(value: &str) -> String {
