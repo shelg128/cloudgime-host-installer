@@ -4967,19 +4967,45 @@ fn local_http_ready(config: &Config) -> Result<bool> {
     if stream.write_all(request.as_bytes()).is_err() {
         return Ok(false);
     }
-    let mut response = String::new();
-    if stream.read_to_string(&mut response).is_err() {
-        return Ok(false);
-    }
-    let Some(first_line) = response.lines().next() else {
-        return Ok(false);
+    // Do not wait for a keep-alive connection to close. One bounded read is
+    // sufficient to classify the HTTP status line and avoids false watchdog
+    // failures when the local server legitimately keeps the socket open.
+    let mut response = [0_u8; 512];
+    let bytes_read = match stream.read(&mut response) {
+        Ok(value) if value > 0 => value,
+        _ => return Ok(false),
+    };
+    Ok(http_probe_status_ready(&response[..bytes_read]))
+}
+
+fn http_probe_status_ready(response: &[u8]) -> bool {
+    let first_line = response
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
+    let Ok(first_line) = std::str::from_utf8(first_line) else {
+        return false;
     };
     let status_code = first_line
         .split_whitespace()
         .nth(1)
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or_default();
-    Ok((200..500).contains(&status_code))
+    (200..500).contains(&status_code)
+}
+
+#[cfg(test)]
+mod local_http_probe_tests {
+    use super::http_probe_status_ready;
+    #[test]
+    fn accepts_status_line_without_waiting_for_connection_close() {
+        assert!(http_probe_status_ready(
+            b"HTTP/1.1 200 OK\r\nConnection: keep-alive\r\n"
+        ));
+        assert!(http_probe_status_ready(b"HTTP/1.1 401 Unauthorized\r\n"));
+        assert!(!http_probe_status_ready(b"HTTP/1.1 500 Error\r\n"));
+        assert!(!http_probe_status_ready(b"garbage"));
+    }
 }
 
 fn normalize_url_path_prefix(value: &str) -> String {
