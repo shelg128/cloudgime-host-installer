@@ -3443,12 +3443,19 @@ impl StreamConnection {
 
         debug!("[Stream]: Stopping...");
         self.release_all_pressed_mouse_buttons("stop").await;
-        {
+        let upstream_stop = {
             let mut stream = self.stream.write().await;
-            if let Some(stream) = stream.take() {
-                spawn_blocking(move || {
-                    stream.stop();
-                });
+            stream
+                .take()
+                .map(|stream| spawn_blocking(move || stream.stop()))
+        };
+        if let Some(upstream_stop) = upstream_stop {
+            // Stop RTSP/RTP before closing WebRTC. Closing the downstream socket
+            // first leaves Sunshine briefly sending UDP to a dead destination.
+            match timeout(Duration::from_secs(3), upstream_stop).await {
+                Ok(Ok(())) => debug!("[Stream]: upstream stopped before transport close"),
+                Ok(Err(error)) => warn!("[Stream]: upstream stop worker failed: {error}"),
+                Err(_) => warn!("[Stream]: upstream stop timed out before transport close"),
             }
         }
         self.shutdown_gamepad_broker().await;
@@ -3515,6 +3522,14 @@ fn should_preserve_client_for_generation(
     callback_generation: u32,
 ) -> bool {
     preserved_generation != 0 && preserved_generation == callback_generation
+}
+
+#[cfg(test)]
+mod upstream_stop_order_tests {
+    #[test]
+    fn upstream_stop_budget_is_shorter_than_session_timeout() {
+        assert!(std::time::Duration::from_secs(3) < super::TIMEOUT_DURATION);
+    }
 }
 
 #[cfg(test)]
