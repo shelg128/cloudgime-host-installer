@@ -190,6 +190,31 @@ impl NativeStreamScope {
     // Caller holds this permit from BEFORE spawning until ownership is attached.
     // stop() marks cancellation first, then waits for the permit before inspecting
     // children. A cancelled launch cannot be reported stopped while unregistered.
+    /// Gives owned children a short grace window after an authenticated Stop
+    /// command. Ownership is retained throughout; timeout does not authorize
+    /// release and the caller must still invoke `stop_owned_children`.
+    pub(crate) async fn wait_owned_children_exit(&self, max_wait: Duration) -> bool {
+        let started = tokio::time::Instant::now();
+        loop {
+            let children = self.children.lock().await;
+            let mut all_exited = true;
+            for child in children.iter() {
+                match child.lock().await.try_wait() {
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(_) => all_exited = false,
+                }
+            }
+            drop(children);
+            if all_exited {
+                return true;
+            }
+            if started.elapsed() >= max_wait {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
     pub(crate) async fn stop_owned_children(&self) -> Result<usize, String> {
         self.cancelled.send_replace(true);
         let count = timeout(STOP_TIMEOUT, self.stop_children())
@@ -293,6 +318,22 @@ mod tests {
         assert!(permit.attach(child.clone()));
         child
     }
+    #[tokio::test]
+    async fn graceful_wait_observes_exit_without_releasing_scope() {
+        let registry = NativeStreamRegistry::default();
+        let scope = registry.begin("grace", 1).await.unwrap();
+        let child = attach(&scope).await;
+        assert!(
+            !scope
+                .wait_owned_children_exit(Duration::from_millis(30))
+                .await
+        );
+        child.lock().await.start_kill().unwrap();
+        child.lock().await.wait().await.unwrap();
+        assert!(scope.wait_owned_children_exit(Duration::from_secs(1)).await);
+        assert_eq!(scope.stop_owned_children().await.unwrap(), 1);
+    }
+
     #[tokio::test]
     async fn connection_failure_cancels_only_its_owned_children() {
         let registry = NativeStreamRegistry::default();

@@ -4967,15 +4967,21 @@ fn local_http_ready(config: &Config) -> Result<bool> {
     if stream.write_all(request.as_bytes()).is_err() {
         return Ok(false);
     }
-    // Do not wait for a keep-alive connection to close. One bounded read is
-    // sufficient to classify the HTTP status line and avoids false watchdog
-    // failures when the local server legitimately keeps the socket open.
-    let mut response = [0_u8; 512];
-    let bytes_read = match stream.read(&mut response) {
-        Ok(value) if value > 0 => value,
-        _ => return Ok(false),
-    };
-    Ok(http_probe_status_ready(&response[..bytes_read]))
+    // Read only until the first status line is complete. TCP may split it over
+    // several packets, while keep-alive means waiting for EOF is incorrect.
+    let mut response = Vec::with_capacity(256);
+    let mut chunk = [0_u8; 128];
+    for _ in 0..4 {
+        let bytes_read = match stream.read(&mut chunk) {
+            Ok(value) if value > 0 => value,
+            _ => return Ok(false),
+        };
+        response.extend_from_slice(&chunk[..bytes_read]);
+        if response.contains(&b'\n') {
+            return Ok(http_probe_status_ready(&response));
+        }
+    }
+    Ok(false)
 }
 
 fn http_probe_status_ready(response: &[u8]) -> bool {

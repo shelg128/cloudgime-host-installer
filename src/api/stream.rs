@@ -8093,6 +8093,11 @@ pub async fn start_host(
                 ipc_sender.send(ServerIpcMessage::Stop),
             )
             .await;
+            let graceful_exit = scope.wait_owned_children_exit(Duration::from_secs(3)).await;
+            append_host_stream_trace(&format!(
+                "NATIVE_CHILD_GRACEFUL_STOP token={} exited={}",
+                dynamic_display_session_token, graceful_exit
+            ));
             if let Err(error) = scope.stop_owned_children().await {
                 warn!("[Native scope]: child exit unverified: {error}");
             }
