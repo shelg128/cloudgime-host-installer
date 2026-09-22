@@ -1,0 +1,86 @@
+using System.Diagnostics;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using System.Text.Json;
+
+namespace CloudgimeHostBootstrap;
+
+// Shared administrator boundary for files executed by the onboarding/finalization lane.
+internal static class UniversalMachineBoundary
+{
+    internal static string ProvisioningRoot => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "CloudGime", "provisioning");
+
+    internal static void RequireAdminConsole()
+    {
+        using var i = WindowsIdentity.GetCurrent();
+        if (!new WindowsPrincipal(i).IsInRole(WindowsBuiltInRole.Administrator)) throw new UnauthorizedAccessException("ADMIN_REQUIRED");
+        if (i.IsSystem || Process.GetCurrentProcess().SessionId <= 0 || WTSGetActiveConsoleSessionId() != (uint)Process.GetCurrentProcess().SessionId)
+            throw new InvalidOperationException("ACTIVE_OPERATOR_CONSOLE_REQUIRED");
+    }
+
+    internal static void RequireProtected(string path, bool directory = false)
+    {
+        var full = Path.GetFullPath(path);
+        var trusted = new HashSet<string>(StringComparer.Ordinal) { "S-1-5-18", "S-1-5-32-544", "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464" };
+        for (FileSystemInfo? item = directory ? new DirectoryInfo(full) : new FileInfo(full); item != null; item = item is DirectoryInfo d ? d.Parent : ((FileInfo)item).Directory)
+        {
+            if (!item.Exists || (item.Attributes & FileAttributes.ReparsePoint) != 0) throw new InvalidOperationException("UNSAFE_INSTALL_PATH");
+            FileSystemSecurity acl = item is DirectoryInfo dir ? dir.GetAccessControl() : ((FileInfo)item).GetAccessControl();
+            // Parent deletion/ACL replacement can invalidate a protected child.
+            var danger = FileSystemRights.DeleteSubdirectoriesAndFiles | FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership;
+            if (item.FullName.Equals(full, StringComparison.OrdinalIgnoreCase))
+            {
+                danger |= FileSystemRights.Write | FileSystemRights.Delete;
+                if (acl.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner || !trusted.Contains(owner.Value))
+                    throw new InvalidOperationException("UNTRUSTED_INSTALL_OWNER");
+            }
+            foreach (FileSystemAccessRule rule in acl.GetAccessRules(true, true, typeof(SecurityIdentifier)))
+                if (rule.AccessControlType == AccessControlType.Allow && (rule.PropagationFlags & PropagationFlags.InheritOnly) == 0
+                    && !trusted.Contains(rule.IdentityReference.Value) && (rule.FileSystemRights & danger) != 0)
+                    throw new InvalidOperationException("INSTALL_PATH_WRITABLE_BY_NONADMIN");
+        }
+    }
+
+    internal static void RequireNoRentalActivity()
+    {
+        // Install/upgrade may own and restart Host services, but never a live rental or Sentinel gate.
+        foreach (var name in new[] { "SentinelNodeBroker", "Sentinel Launcher", "SentinelHelper", "streamer" })
+            foreach (var p in Process.GetProcessesByName(name))
+            { using (p) { throw new InvalidOperationException("OPERATOR_MAINTENANCE_REQUIRED: running " + name); } }
+        var session = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SentinelLauncher", "state", "session.json");
+        if (File.Exists(session))
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllBytes(session));
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) throw new InvalidOperationException("LOCAL_SESSION_INVALID");
+            foreach (var p in doc.RootElement.EnumerateObject())
+                if (p.Value.ValueKind != JsonValueKind.Null && !(p.Value.ValueKind == JsonValueKind.String && p.Value.GetString() == ""))
+                    throw new InvalidOperationException("LOCAL_SESSION_OR_CLEANUP_PENDING");
+        }
+        // Encrypted journals cannot be guessed/replaced here. Only the Sentinel owner may retire them.
+        var journal = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "sentinel-gaming-launcher", "renter-operation.dpapi");
+        if (File.Exists(journal)) throw new InvalidOperationException("EXISTING_RENTER_JOURNAL: use Sentinel maintenance, not initial onboarding.");
+    }
+
+    internal static void RequireIdle(string bundleRoot)
+    {
+        RequireNoRentalActivity();
+        RequireProtected(bundleRoot, true);
+    }
+
+    internal static void Run(string file, IEnumerable<string> args, string workingDirectory, string? input = null)
+    {
+        var psi = new ProcessStartInfo(file) { UseShellExecute = false, CreateNoWindow = true,
+            WorkingDirectory = workingDirectory, RedirectStandardOutput = true, RedirectStandardError = true,
+            RedirectStandardInput = input != null };
+        foreach (var a in args) psi.ArgumentList.Add(a);
+        using var child = Process.Start(psi) ?? throw new InvalidOperationException("PROCESS_START_FAILED");
+        // Drain concurrently to avoid deadlock; discard output (could contain a credential).
+        var stdout = child.StandardOutput.BaseStream.CopyToAsync(Stream.Null);
+        var stderr = child.StandardError.BaseStream.CopyToAsync(Stream.Null);
+        if (input != null) { child.StandardInput.WriteLine(input); child.StandardInput.Close(); }
+        if (!child.WaitForExit(240000)) { child.Kill(true); throw new TimeoutException("FINALIZE_PROCESS_TIMEOUT"); }
+        if (!Task.WaitAll([stdout, stderr], 10000)) throw new TimeoutException("FINALIZE_PIPE_TIMEOUT");
+        if (child.ExitCode != 0) throw new InvalidOperationException("FINALIZE_PROCESS_FAILED: " + Path.GetFileName(file) + " exit=" + child.ExitCode);
+    }
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")] private static extern uint WTSGetActiveConsoleSessionId();
+}

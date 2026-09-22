@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::HashSet, fs, path::Path};
 
+#[path = "universal_transport_config.rs"]
+mod universal_transport_config;
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProvisionRequest<'a> {
@@ -904,41 +907,21 @@ fn keeper_tunnel_env_content(
 }
 
 fn write_keeper_tunnel_routes(bundle_root: &Path, manifest: &ProvisionResponse) -> Result<()> {
-    let host = manifest
-        .components
-        .iter()
-        .find(|c| c.component_type == "host_app")
+    let host = manifest.components.iter().find(|c| c.component_type == "host_app")
         .ok_or_else(|| anyhow!("host_app component missing"))?;
-    let activation = host
-        .application_activation_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
+    let activation = host.application_activation_id.as_deref().map(str::trim).filter(|v| !v.is_empty())
         .ok_or_else(|| anyhow!("host_app activation missing"))?;
-    let path = bundle_root
-        .join("keeper-tunnel")
-        .join("data")
-        .join("keeper-tunnel-status.json");
-    let mut value: Value = if path.exists() {
-        serde_json::from_slice(&fs::read(&path)?)?
-    } else {
-        serde_json::json!({"routes":[]})
-    };
-    let routes = value
-        .get_mut("routes")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| anyhow!("keeper routes missing"))?;
-    let route = routes
-        .iter_mut()
-        .find(|r| r.get("name").and_then(Value::as_str) == Some("moonlight"))
-        .ok_or_else(|| anyhow!("moonlight route missing"))?;
-    route["applicationActivationId"] = Value::String(activation.to_string());
-    route["applicationType"] = Value::String("CLOUDGIME_HOST".to_string());
-    let tmp = path.with_extension("json.next");
-    fs::write(&tmp, serde_json::to_vec_pretty(&value)?)?;
-    restrict_to_local_system_and_current_user(&tmp)?;
-    fs::rename(&tmp, &path)?;
-    Ok(())
+    let port = assignment_i32(&host.assignments, "HOST_HTTP", "port");
+    let config_path = bundle_root.join("moonlight").join("server").join("config.json");
+    let config: Value = serde_json::from_slice(&fs::read(&config_path)
+        .with_context(|| format!("read {}", config_path.display()))?)?;
+    let prefix = config.get("web_server").and_then(|v| v.get("url_path_prefix"))
+        .and_then(Value::as_str).ok_or_else(|| anyhow!("local stream prefix missing"))?;
+    let path = bundle_root.join("keeper-tunnel").join("data").join("keeper-tunnel-status.json");
+    let current: Value = if path.exists() { serde_json::from_slice(&fs::read(&path)?)? }
+        else { serde_json::json!({"routes":[]}) };
+    let value = universal_transport_config::configure_route(&current, activation, port, prefix)?;
+    write_restricted_json(&path, &value)
 }
 
 fn write_keeper_tunnel_env(bundle_root: &Path, manifest: &ProvisionResponse) -> Result<()> {
@@ -954,6 +937,8 @@ fn write_keeper_tunnel_env(bundle_root: &Path, manifest: &ProvisionResponse) -> 
         .join("keeper-tunnel")
         .join("data")
         .join("cloudrental.env");
+    let parent = path.parent().ok_or_else(|| anyhow!("keeper env path invalid"))?;
+    fs::create_dir_all(parent)?;
     let tmp = path.with_extension("env.next");
     fs::write(&tmp, env.as_bytes())?;
     restrict_to_local_system_and_current_user(&tmp)?;

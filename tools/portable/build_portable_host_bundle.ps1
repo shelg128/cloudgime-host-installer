@@ -160,6 +160,7 @@ $ManagedBundleSeedRoot = Join-Path $PSScriptRoot "managed-bundle-seed"
 $ManagedSharedPairInfoPath = Join-Path $ManagedBundleSeedRoot "shared_pair_info.json"
 $ManagedSunshineSharedRoot = Join-Path $ManagedBundleSeedRoot "sunshine-shared"
 $DriverSeedRoot = Join-Path $PSScriptRoot "..\..\payload-seed\drivers"
+$AutoPairScript = Join-Path $PSScriptRoot "auto-pair-host.ps1"
 
 if ($PcNumber -lt 1) {
     throw "PcNumber must be at least 1."
@@ -1910,6 +1911,8 @@ call "%~dp0open-host-control.cmd"
     Write-Utf8NoBom -Path (Join-Path $bundleRoot "open-host-control.bat") -Content $openHostControlCompat
 }
 Copy-Item $BundleProcessManagerExe (Join-Path $bundleRoot "bundle-process-manager.exe") -Force
+if (-not (Test-Path -LiteralPath $AutoPairScript)) { throw "Required pairing script missing: $AutoPairScript" }
+Copy-Item -LiteralPath $AutoPairScript -Destination (Join-Path $bundleRoot "auto-pair-host.ps1") -Force
 if (Test-Path $KeeperTunnelSourceDir) {
     Copy-Item -Path $KeeperTunnelSourceDir -Destination $bundleRoot -Recurse -Force
     $bundleKeeperExe = Join-Path $bundleRoot "keeper-tunnel\KeeperTunnelAgent.exe"

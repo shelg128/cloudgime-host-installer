@@ -7,4 +7,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <Compile Include="../HostControlBootstrap/UniversalBundleContract.cs" Link="UniversalBundleContract.cs" />
+  </ItemGroup>
 </Project>

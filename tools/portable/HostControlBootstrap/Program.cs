@@ -52,13 +52,15 @@ internal static class Program
     {
         try
         {
-            Log($"bootstrap start args={string.Join(" ", args.Select(QuoteArgument))}");
+            UniversalInstallPolicy.RejectCommandLineSecrets(args);
+            Log("bootstrap started (argument values omitted)");
             return Run(args);
         }
         catch (Exception ex)
         {
             Log($"bootstrap error: {ex}");
-            MessageBox.Show(ex.Message, DefaultProductName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            if (!args.Contains("--silent", StringComparer.OrdinalIgnoreCase))
+                MessageBox.Show(ex.Message, DefaultProductName, MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 1;
         }
     }
@@ -72,7 +74,10 @@ internal static class Program
                 || parsed.Command == "install-vdd-display"
                 || parsed.Command == "install-fallback-audio"
                 || parsed.Command == "install-gamepad"
-                || parsed.Command == "uninstall-gamepad")
+                || parsed.Command == "uninstall-gamepad"
+                || parsed.Command == "configure-autologon"
+                || parsed.Command == "disable-autologon"
+                || parsed.Command == "finalize-universal-node")
             && !IsAdministrator())
         {
             return RelaunchElevated(args);
@@ -80,6 +85,14 @@ internal static class Program
 
         return parsed.Command switch
         {
+            "configure-autologon" => SecureAutoLogon.ConfigureInteractive(),
+            "disable-autologon" => SecureAutoLogon.DisableOwned(),
+            "finalize-universal-node" => UniversalNodeFinalizer.Run(
+                NormalizeFullPath(parsed.GetValue("bundle-root") ?? throw new InvalidOperationException("BUNDLE_ROOT_REQUIRED")),
+                NormalizeFullPath(parsed.GetValue("sentinel-root") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Sentinel Launcher")),
+                parsed.HasFlag("enable-autologon")),
+            "validate-universal-bundle" => ValidateUniversalBundle(parsed),
+            "validate-universal-install" => ValidateUniversalInstall(parsed),
             "install" => Install(parsed),
             "repair-state" => RepairState(parsed),
             "run-installed-uninstall" => RunInstalledUninstall(parsed),
@@ -91,6 +104,23 @@ internal static class Program
         };
     }
 
+    private static int ValidateUniversalBundle(ParsedArguments args)
+    {
+        UniversalBundleContract.Validate(args.GetValue("bundle-root") ?? throw new InvalidOperationException("BUNDLE_ROOT_REQUIRED"));
+        return 0;
+    }
+
+    private static int ValidateUniversalInstall(ParsedArguments args)
+    {
+        var bundleRoot = NormalizeFullPath(args.GetValue("bundle-root") ?? throw new InvalidOperationException("BUNDLE_ROOT_REQUIRED"));
+        var dataRoot = NormalizeFullPath(args.GetValue("data-root") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Cloudgime", "Host"));
+        UniversalBundleContract.RequireInstallable(bundleRoot);
+        UniversalInstallPolicy.CheckReset(HasExistingNodeIdentity(dataRoot), args.HasFlag("reset-local-identity"), args.HasFlag("overwrite-data"));
+        ValidateExistingIdentity(dataRoot);
+        UniversalMachineBoundary.RequireNoRentalActivity();
+        return 0;
+    }
+
     private static int Install(ParsedArguments args)
     {
         var installRoot = NormalizeFullPath(args.GetValue("install-root")
@@ -100,12 +130,25 @@ internal static class Program
         var releaseRoot = NormalizeFullPath(args.GetValue("release-root")
             ?? AppContext.BaseDirectory);
         var bundleSourceRoot = ResolveBundleSourceRoot(args.GetValue("bundle-source-root"), releaseRoot);
+        // Validate before quarantine, identity seeding, process stops or OS changes.
+        var universal = args.HasFlag("require-universal") || UniversalBundleContract.IsUniversal(bundleSourceRoot);
+        if (universal)
+        {
+            UniversalBundleContract.RequireInstallable(bundleSourceRoot);
+            UniversalMachineBoundary.RequireNoRentalActivity();
+            UniversalBundleContract.RejectReparse(installRoot);
+            UniversalBundleContract.RejectReparse(dataRoot);
+            foreach (var name in new[] { "cloudgime-host-control.exe", "open-host-control.exe", "uninstaller-cloudgime.exe" })
+                UniversalBundleContract.RequireWindowsExecutable(Path.Combine(releaseRoot, name));
+        }
         var productName = args.GetValue("product-name") ?? DefaultProductName;
         var appProductName = args.GetValue("app-product-name") ?? DefaultAppProductName;
         var overwriteData = args.HasFlag("overwrite-data");
-        var resetLocalIdentity = args.HasFlag("reset-local-identity") || overwriteData;
+        var resetLocalIdentity = args.HasFlag("reset-local-identity");
+        UniversalInstallPolicy.CheckReset(HasExistingNodeIdentity(dataRoot), resetLocalIdentity, overwriteData);
         var launchAfterInstall = args.HasFlag("launch-after-install");
         Log($"install installRoot={installRoot} dataRoot={dataRoot} releaseRoot={releaseRoot} bundleSourceRoot={bundleSourceRoot} overwriteData={overwriteData} resetLocalIdentity={resetLocalIdentity} launchAfterInstall={launchAfterInstall}");
+        ValidateExistingIdentity(dataRoot);
         var activationSnapshot = resetLocalIdentity ? null : CaptureActivationStateSnapshot(dataRoot);
 
         var appExeSource = Path.Combine(releaseRoot, "cloudgime-host-control.exe");
@@ -129,26 +172,24 @@ internal static class Program
             throw new InvalidOperationException($"host-installer.exe not found in bundle source: {bundleSourceRoot}");
         }
 
-        if (Directory.Exists(installRoot))
-        {
-            Directory.Delete(installRoot, recursive: true);
-        }
-
         Directory.CreateDirectory(installRoot);
+        // Upgrade app files in place. A running Host Control executable cannot be
+        // renamed on Windows; preserve a rollback copy before each replacement.
+        BackupInstalledAppFiles(installRoot);
 
         var installedAppExe = Path.Combine(installRoot, "cloudgime-host-control.exe");
-        File.Copy(appExeSource, installedAppExe, overwrite: true);
+        CopyWithRollback(appExeSource, installedAppExe);
         if (File.Exists(launcherSource))
         {
-            File.Copy(launcherSource, Path.Combine(installRoot, "open-host-control.exe"), overwrite: true);
+            CopyWithRollback(launcherSource, Path.Combine(installRoot, "open-host-control.exe"));
         }
 
         var installedBootstrapExe = Path.Combine(installRoot, "cloudgime-host-bootstrap.exe");
-        File.Copy(bootstrapSource, installedBootstrapExe, overwrite: true);
+        CopyWithRollback(bootstrapSource, installedBootstrapExe);
         if (File.Exists(emergencyUninstallerSource))
         {
             var installedEmergencyUninstallerExe = Path.Combine(installRoot, "uninstaller-cloudgime.exe");
-            File.Copy(emergencyUninstallerSource, installedEmergencyUninstallerExe, overwrite: true);
+            CopyWithRollback(emergencyUninstallerSource, installedEmergencyUninstallerExe);
         }
 
         RemoveLegacyOpenHostControlShortcutScripts(installRoot);
@@ -159,7 +200,7 @@ internal static class Program
         if (Directory.Exists(dataRoot) && overwriteData)
         {
             PrepareExistingBundleForInstall(dataRoot);
-            Directory.Delete(dataRoot, recursive: true);
+            QuarantineExistingDirectory(dataRoot);
             freshBundleData = true;
         }
         else if (Directory.Exists(dataRoot))
@@ -179,7 +220,7 @@ internal static class Program
         RepairSunshineSharedIfMissing(dataRoot, releaseRoot);
         RepairPairSeedIfMissing(dataRoot, releaseRoot);
 
-        AddWindowsDefenderExclusions(installRoot, dataRoot);
+        // Do not weaken Defender policy as a side effect of installation.
 
         WriteInstallLayout(installRoot, dataRoot, productName);
         WriteUninstallRegistration(installRoot, dataRoot, installedAppExe, productName);
@@ -188,7 +229,7 @@ internal static class Program
         if (resetLocalIdentity || freshBundleData || refreshedExistingData || TestActivationStateRepairNeeded(dataRoot))
         {
             Log("install running finalize bundle");
-            FinalizeBundle(dataRoot, releaseRoot, resetLocalIdentity, args.GetValue("auto-logon-password"));
+            FinalizeBundle(dataRoot, releaseRoot, resetLocalIdentity);
             RestoreActivationSnapshotIfInstallerReset(dataRoot, activationSnapshot);
         }
         else
@@ -215,8 +256,9 @@ internal static class Program
         var installRoot = NormalizeFullPath(args.GetValue("install-root")
             ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), DefaultProductName));
         Log($"repair-state bundleRoot={bundleRoot} releaseRoot={releaseRoot}");
-        AddWindowsDefenderExclusions(installRoot, bundleRoot);
-        FinalizeBundle(bundleRoot, releaseRoot, args.HasFlag("reset-local-identity"), args.GetValue("auto-logon-password"));
+        UniversalInstallPolicy.CheckReset(HasExistingNodeIdentity(bundleRoot), args.HasFlag("reset-local-identity"), false);
+        ValidateExistingIdentity(bundleRoot);
+        FinalizeBundle(bundleRoot, releaseRoot, args.HasFlag("reset-local-identity"));
         Log("repair-state completed successfully");
         return 0;
     }
@@ -461,7 +503,7 @@ internal static class Program
         return false;
     }
 
-    private static void FinalizeBundle(string bundleRoot, string releaseRoot, bool resetLocalIdentity = false, string? autoLogonPassword = null)
+    private static void FinalizeBundle(string bundleRoot, string releaseRoot, bool resetLocalIdentity = false)
     {
         Log($"finalize bundleRoot={bundleRoot} releaseRoot={releaseRoot} resetLocalIdentity={resetLocalIdentity}");
         var hostInstaller = Path.Combine(bundleRoot, "host-installer.exe");
@@ -492,8 +534,8 @@ internal static class Program
         TryRunHostInstallerCommand(bundleRoot, "start-service", OptionalInstallerActionTimeout);
         RemoveLegacyRuntimeWindowsService();
 
-        ConfigureWindowsSystemTweaks();
-        ConfigureWindowsAutoLogon(autoLogonPassword);
+        if (!IsUniversalBundle(bundleRoot)) ConfigureWindowsSystemTweaks();
+        // Autologon is opt-in through configure-autologon, never an install side effect.
 
         Log("finalize completed");
     }
@@ -529,6 +571,7 @@ internal static class Program
             throw new InvalidOperationException($"devcon.exe not found for MTT VDD install: {devconPath}");
         }
 
+        EnsurePackageSignerTrusted(Path.Combine(driverRoot, "mttvdd.cat"), driverRoot);
         PrepareMttVddRuntimeConfiguration(settingsSourcePath);
         var existingStatus = RunCapturedAndLog(
             devconPath,
@@ -739,6 +782,58 @@ internal static class Program
                 || text.Contains("local_http_ready", StringComparison.Ordinal));
     }
 
+    private static void BackupInstalledAppFiles(string installRoot)
+    {
+        foreach (var name in new[] { "cloudgime-host-control.exe", "open-host-control.exe", "cloudgime-host-bootstrap.exe", "uninstaller-cloudgime.exe" })
+        {
+            var path = Path.Combine(installRoot, name);
+            if (File.Exists(path)) File.Copy(path, path + ".previous", true);
+        }
+    }
+
+    private static void CopyWithRollback(string source, string target)
+    {
+        var temp = target + ".next";
+        File.Copy(source, temp, true);
+        try { File.Move(temp, target, true); }
+        catch { try { File.Delete(temp); } catch { } throw; }
+    }
+
+    private static void QuarantineExistingDirectory(string path)
+    {
+        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException("REPARSE_INSTALL_PATH_REJECTED");
+        Directory.Move(path, path + ".previous-" + Guid.NewGuid().ToString("N"));
+    }
+
+    private static bool IsUniversalBundle(string bundleRoot)
+    {
+        var path = Path.Combine(bundleRoot, "cloudgime-host-bundle.json");
+        if (!File.Exists(path)) return false;
+        var manifest = JsonNode.Parse(File.ReadAllText(path))?.AsObject()
+            ?? throw new InvalidOperationException("Invalid bundle manifest.");
+        return UniversalInstallPolicy.IsUniversal(manifest);
+    }
+
+    private static void ValidateExistingIdentity(string bundleRoot)
+    {
+        var path = GetActivationStatePath(bundleRoot);
+        if (!File.Exists(path)) return;
+        var state = ReadJsonObject(path) ?? throw new InvalidOperationException("EXISTING_ACTIVATION_INVALID");
+        if (string.IsNullOrWhiteSpace(GetString(state, "MachineIdentity")) && !UniversalInstallPolicy.IsActivated(state)) return;
+        if (!IsValidMachineIdentity(GetString(state, "MachineIdentity")) || !IsValidInstallInstanceId(GetString(state, "InstallInstanceId")))
+            throw new InvalidOperationException("EXISTING_IDENTITY_INVALID: use explicit identity recovery, not reinstall.");
+    }
+
+    private static bool HasExistingNodeIdentity(string bundleRoot)
+    {
+        var provision = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "CloudGime", "provisioning");
+        // Presence is sufficient to forbid destructive reset, even if state is corrupt.
+        return File.Exists(GetActivationStatePath(bundleRoot))
+            || File.Exists(Path.Combine(provision, "manifest.json"))
+            || (Directory.Exists(provision) && Directory.EnumerateFiles(provision, "*.dpapi").Any());
+    }
+
     private static void PrepareExistingBundleForInstall(string bundleRoot)
     {
         if (!Directory.Exists(bundleRoot))
@@ -779,11 +874,12 @@ internal static class Program
         }
 
         StripLegacyBundleArtifacts(targetRoot);
-        ResetManagedPublicRouteSeed(targetRoot);
+        // Preserve the route issued by the control plane during upgrade.
     }
 
     private static bool ShouldPreserveExistingBundleFile(string relativePath)
     {
+        if (UniversalInstallPolicy.Preserve(relativePath)) return true;
         var normalized = relativePath.Replace('/', '\\');
         if (normalized.StartsWith(@"moonlight\server\sunshine-shared\", StringComparison.OrdinalIgnoreCase))
         {
@@ -882,8 +978,9 @@ internal static class Program
             var raw = File.ReadAllText(publicUrlPath).Trim();
             if (Uri.TryCreate(raw, UriKind.Absolute, out var publicUri))
             {
-                var baseUrl = publicUri.GetLeftPart(UriPartial.Authority);
-                WriteTextFile(publicUrlPath, $"{baseUrl}{pathPrefix}/" + Environment.NewLine);
+                // Do not strip the application-proxy route issued by the backend.
+                if (publicUri.AbsolutePath is "/" or "/moonlight/")
+                    WriteTextFile(publicUrlPath, $"{publicUri.GetLeftPart(UriPartial.Authority)}{pathPrefix}/" + Environment.NewLine);
             }
         }
 
@@ -918,6 +1015,19 @@ internal static class Program
         var sharedIdentityPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Cloudgime", "pc_identity.json");
         var pendingUninstallPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Cloudgime", "pending_uninstall.json");
 
+        if (File.Exists(activationPath))
+        {
+            var existing = ReadJsonObject(activationPath)
+                ?? throw new InvalidOperationException("EXISTING_ACTIVATION_INVALID: use explicit recovery; identity was not replaced.");
+            if (!forceFreshIdentity && (!string.IsNullOrEmpty(GetString(existing, "CredentialRef"))
+                || !string.IsNullOrEmpty(GetString(existing, "ActivationRecordId"))
+                || !string.IsNullOrEmpty(GetString(existing, "ApplicationActivationId"))))
+            {
+                if (!IsValidMachineIdentity(GetString(existing, "MachineIdentity")) || !IsValidInstallInstanceId(GetString(existing, "InstallInstanceId")))
+                    throw new InvalidOperationException("EXISTING_IDENTITY_INVALID: control-plane recovery required.");
+                return; // Includes revoked/suspended states: never silently re-enroll them.
+            }
+        }
         var state = ReadJsonObject(activationPath) ?? new JsonObject
         {
             ["SchemaVersion"] = 1,
@@ -955,7 +1065,7 @@ internal static class Program
         state["SchemaVersion"] = 1;
         sharedIdentity["schemaVersion"] = 1;
 
-        if (forceFreshIdentity || ShouldResetPreparedLocalState(state))
+        if (forceFreshIdentity)
         {
             Log(forceFreshIdentity
                 ? "seed-prepared-local-activation-state forcing fresh local identity"
@@ -1157,7 +1267,7 @@ internal static class Program
         var applicationActivationId = GetString(state, "ApplicationActivationId");
         var hostId = GetString(state, "HostId");
 
-        return !string.IsNullOrWhiteSpace(runtimeToken)
+        return (!string.IsNullOrWhiteSpace(runtimeToken) || !string.IsNullOrWhiteSpace(GetString(state, "CredentialRef")))
             && (!string.IsNullOrWhiteSpace(activationRecordId) || !string.IsNullOrWhiteSpace(applicationActivationId))
             && !string.IsNullOrWhiteSpace(hostId);
     }
@@ -1215,6 +1325,7 @@ internal static class Program
 
     private static void RepairSunshineSharedIfMissing(string bundleRoot, string releaseRoot)
     {
+        if (IsUniversalBundle(bundleRoot)) return;
         var managedRoot = Path.Combine(releaseRoot, "managed-sunshine-shared");
         if (!File.Exists(Path.Combine(managedRoot, "sunshine_state.json")))
         {
@@ -1244,6 +1355,7 @@ internal static class Program
 
     private static void RepairPairSeedIfMissing(string bundleRoot, string releaseRoot)
     {
+        if (IsUniversalBundle(bundleRoot)) return;
         var seedPath = Path.Combine(releaseRoot, "managed-shared_pair_info.json");
         if (!File.Exists(seedPath))
         {
@@ -1295,6 +1407,7 @@ internal static class Program
 
     private static void RepairCloudgimeRuntimePermissions(string bundleRoot)
     {
+        if (IsUniversalBundle(bundleRoot)) return; // Existing ACLs belong to provisioning / Sentinel broker.
         var cloudgimeRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Cloudgime");
         var serverRoot = Path.Combine(bundleRoot, "moonlight", "server");
 
@@ -1443,30 +1556,17 @@ internal static class Program
 
     private static void EnsurePackageSignerTrusted(string installerPath, string packageRoot)
     {
-        var candidates = new[]
-        {
-            Path.GetExtension(installerPath).Equals(".cat", StringComparison.OrdinalIgnoreCase) ? installerPath : null,
-            Directory.Exists(packageRoot)
-                ? Directory.GetFiles(packageRoot, "*.cat", SearchOption.AllDirectories).FirstOrDefault()
-                : null
-        }
-        .Where(static value => !string.IsNullOrWhiteSpace(value))
-        .Select(static value => value!)
-        .Distinct(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var catalogPath in candidates)
-        {
-            try
-            {
-                using var signer = new X509Certificate2(X509Certificate.CreateFromSignedFile(catalogPath));
-                AddCertificateIfMissing(StoreName.Root, signer);
-                AddCertificateIfMissing(StoreName.TrustedPublisher, signer);
-                return;
-            }
-            catch
-            {
-            }
-        }
+        var catalog = Path.GetExtension(installerPath).Equals(".cat", StringComparison.OrdinalIgnoreCase)
+            ? installerPath : Directory.GetFiles(packageRoot, "*.cat", SearchOption.TopDirectoryOnly).Single();
+        // Windows Authenticode validates file integrity, timestamp and trust chain;
+        // merely extracting the embedded certificate is not signature validation.
+        var script = "$ErrorActionPreference='Stop'; $s=Get-AuthenticodeSignature -LiteralPath '"
+            + EscapePowerShellSingleQuoted(catalog) + "'; if($s.Status -ne 'Valid'){exit 1}";
+        var result = StartProcessCaptured("powershell.exe", "-NoProfile -NonInteractive -EncodedCommand "
+            + Convert.ToBase64String(Encoding.Unicode.GetBytes(script)), packageRoot, TimeSpan.FromSeconds(45));
+        ThrowIfProcessFailed("Verify driver catalog signature", result);
+        using var signer = new X509Certificate2(X509Certificate.CreateFromSignedFile(catalog));
+        AddCertificateIfMissing(StoreName.TrustedPublisher, signer);
     }
 
     private static void AddCertificateIfMissing(StoreName storeName, X509Certificate2 certificate)
@@ -2577,8 +2677,8 @@ try {{ Start-ScheduledTask -TaskName $taskName }} catch {{ Write-Output ('displa
     }
 
     private static bool IsValidHostId(string value) => HostIdRegex.IsMatch(value ?? string.Empty);
-    private static bool IsValidMachineIdentity(string value) => MachineIdentityRegex.IsMatch(value ?? string.Empty);
-    private static bool IsValidInstallInstanceId(string value) => InstallInstanceRegex.IsMatch(value ?? string.Empty);
+    private static bool IsValidMachineIdentity(string value) => UniversalInstallPolicy.ValidIdentity(value, "cgm-", 32);
+    private static bool IsValidInstallInstanceId(string value) => UniversalInstallPolicy.ValidIdentity(value, "cgi-", 16);
 
     private static string Sha256Hex(string value)
     {
@@ -2889,28 +2989,6 @@ try {{ Start-ScheduledTask -TaskName $taskName }} catch {{ Write-Output ('displa
         }
     }
 
-    private static void AddWindowsDefenderExclusions(string installRoot, string dataRoot)
-    {
-        try
-        {
-            Log($"Adding Windows Defender exclusions for '{installRoot}' and '{dataRoot}'...");
-            
-            // Exclude the install root path
-            var installRootArgs = $"-NoProfile -ExecutionPolicy Bypass -Command \"Add-MpPreference -ExclusionPath '{installRoot}' -Force\"";
-            _ = StartProcessHidden("powershell.exe", installRootArgs, Environment.SystemDirectory, waitForExit: true);
-            
-            // Exclude the data root path
-            var dataRootArgs = $"-NoProfile -ExecutionPolicy Bypass -Command \"Add-MpPreference -ExclusionPath '{dataRoot}' -Force\"";
-            _ = StartProcessHidden("powershell.exe", dataRootArgs, Environment.SystemDirectory, waitForExit: true);
-
-            Log("Windows Defender exclusions added successfully.");
-        }
-        catch (Exception ex)
-        {
-            Log($"Failed to add Windows Defender exclusions: {ex.Message}");
-        }
-    }
-
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern bool LogonUser(
         string lpszUsername,
@@ -2941,16 +3019,7 @@ try {{ Start-ScheduledTask -TaskName $taskName }} catch {{ Write-Output ('displa
                 }
             }
 
-            // Disable Blank Password Logon Restriction over Network/Console
-            using (var baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64))
-            using (var key = baseKey.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Lsa", writable: true))
-            {
-                if (key != null)
-                {
-                    key.SetValue("LimitBlankPasswordUse", 0, RegistryValueKind.DWord);
-                    Log("registry LimitBlankPasswordUse=0");
-                }
-            }
+            // Keep Windows blank-password network logon protection unchanged.
 
             // Fast Shutdown Tweaks: WaitToKillServiceTimeout (String, value in ms)
             using (var baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64))
@@ -2978,68 +3047,6 @@ try {{ Start-ScheduledTask -TaskName $taskName }} catch {{ Write-Output ('displa
         catch (Exception ex)
         {
             Log($"failed to configure windows system tweaks: {ex}");
-        }
-    }
-
-    private static void ConfigureWindowsAutoLogon(string? passwordOverride = null)
-    {
-        try
-        {
-            Log("configuring windows auto-logon");
-            string domain;
-            string userName = GetInteractiveUserName(out domain);
-            if (string.IsNullOrWhiteSpace(userName) || userName.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase))
-            {
-                Log("auto-logon skipped: no valid interactive user found");
-                return;
-            }
-
-            string password = passwordOverride ?? string.Empty;
-            if (passwordOverride == null)
-            {
-                // Probe if blank password works
-                IntPtr token = IntPtr.Zero;
-                bool isBlank = false;
-                try
-                {
-                    isBlank = LogonUser(userName, domain, "", 2, 0, out token);
-                }
-                catch (Exception ex)
-                {
-                    Log($"logon user probe failed: {ex}");
-                }
-
-                if (isBlank)
-                {
-                    Log($"detected blank password for user {userName}");
-                    password = "";
-                    if (token != IntPtr.Zero)
-                    {
-                        CloseHandle(token);
-                    }
-                }
-                else
-                {
-                    Log($"user {userName} has password or logon probe failed; using provided/empty password");
-                }
-            }
-
-            using (var baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64))
-            using (var key = baseKey.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon", writable: true))
-            {
-                if (key != null)
-                {
-                    key.SetValue("AutoAdminLogon", "1", RegistryValueKind.String);
-                    key.SetValue("DefaultUserName", userName, RegistryValueKind.String);
-                    key.SetValue("DefaultDomainName", domain, RegistryValueKind.String);
-                    key.SetValue("DefaultPassword", password, RegistryValueKind.String);
-                    Log($"registry AutoAdminLogon=1 DefaultUserName={userName} DefaultDomainName={domain}");
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            Log($"failed to configure windows auto-logon: {ex}");
         }
     }
 

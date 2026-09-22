@@ -19,6 +19,20 @@ internal static class Program
             var parsed = ParsedArguments.Parse(args);
             switch (parsed.Command)
             {
+                case "validate-universal-bundle":
+                    CloudgimeHostBootstrap.UniversalBundleContract.Validate(parsed.GetValue("bundle-root") ?? throw new InvalidOperationException("BUNDLE_ROOT_REQUIRED"));
+                    Console.WriteLine("UNIVERSAL_BUNDLE_INTEGRITY_VALID_NOT_INSTALLED");
+                    break;
+                case "validate-installable-bundle":
+                    CloudgimeHostBootstrap.UniversalBundleContract.RequireInstallable(parsed.GetValue("bundle-root") ?? throw new InvalidOperationException("BUNDLE_ROOT_REQUIRED"));
+                    var appRoot = parsed.GetValue("app-root") ?? throw new InvalidOperationException("APP_ROOT_REQUIRED");
+                    foreach (var name in new[] { "cloudgime-host-control.exe", "open-host-control.exe", "uninstaller-cloudgime.exe", "cloudgime-host-bootstrap.exe" })
+                        CloudgimeHostBootstrap.UniversalBundleContract.RequireWindowsExecutable(Path.Combine(appRoot, name));
+                    Console.WriteLine("EXECUTABLE_PAYLOAD_VALIDATED_NOT_INSTALLED");
+                    break;
+                case "seal-universal-bundle":
+                    SealUniversalBundle(parsed);
+                    break;
                 case "publish-release":
                     PublishRelease(parsed);
                     break;
@@ -42,6 +56,29 @@ internal static class Program
             Console.Error.WriteLine(ex.Message);
             return 1;
         }
+    }
+
+    private static void SealUniversalBundle(ParsedArguments args)
+    {
+        var root = Path.GetFullPath(args.GetValue("bundle-root") ?? throw new InvalidOperationException("BUNDLE_ROOT_REQUIRED"));
+        var version = args.GetValue("release-version") ?? throw new InvalidOperationException("RELEASE_VERSION_REQUIRED");
+        var manifest = Path.Combine(root, CloudgimeHostBootstrap.UniversalBundleContract.ManifestName);
+        if (File.Exists(manifest)) throw new InvalidOperationException("MANIFEST_ALREADY_EXISTS: stage a fresh candidate; never reseal an installed bundle.");
+        var fixtureOnly = args.HasFlag("fixture-only");
+        var entries = new JsonArray();
+        foreach (var relative in CloudgimeHostBootstrap.UniversalBundleContract.Walk(root).Order(StringComparer.Ordinal))
+        {
+            CloudgimeHostBootstrap.UniversalBundleContract.RejectMachineState(relative);
+            var path = Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar));
+            using var file = File.OpenRead(path);
+            entries.Add(new JsonObject { ["path"] = relative, ["size"] = file.Length, ["sha256"] = Convert.ToHexString(SHA256.HashData(file)).ToLowerInvariant() });
+        }
+        var value = new JsonObject { ["schemaVersion"] = 1, ["bundleMode"] = "universal", ["pcIdentityAssignedAfterInstall"] = true,
+            ["releaseVersion"] = version, ["fixtureOnly"] = fixtureOnly, ["files"] = entries };
+        File.WriteAllText(manifest, value.ToJsonString(JsonOptions()), Utf8NoBom);
+        try { CloudgimeHostBootstrap.UniversalBundleContract.Validate(root); }
+        catch { File.Delete(manifest); throw; }
+        Console.WriteLine("UNIVERSAL_BUNDLE_SEALED_NOT_SIGNED_NOT_INSTALLED");
     }
 
     private static void PublishRelease(ParsedArguments args)
@@ -78,7 +115,7 @@ internal static class Program
         CopyFileWithRetry(emergencyUninstallerExe, Path.Combine(releaseRoot, "uninstaller-cloudgime.exe"));
         CopyOptionalFile(appInstallerPath, Path.Combine(releaseRoot, "cloudgime-host-control.msi"));
 
-        CopyManagedBundleSeed(portableRoot, releaseRoot);
+        if (!CloudgimeHostBootstrap.UniversalBundleContract.IsUniversal(bundleRoot)) CopyManagedBundleSeed(portableRoot, releaseRoot);
 
         if (!Directory.Exists(bundleRoot))
         {
@@ -162,7 +199,7 @@ internal static class Program
         EnsureFilePresent(bootstrapExe, Path.Combine(appPayload, "cloudgime-host-bootstrap.exe"), "Host bootstrap");
         EnsureFilePresent(emergencyUninstallerPath, Path.Combine(appPayload, "uninstaller-cloudgime.exe"), "Host emergency uninstaller");
 
-        CopyManagedBundleSeed(portableRoot, appPayload);
+        if (!CloudgimeHostBootstrap.UniversalBundleContract.IsUniversal(bundleRoot)) CopyManagedBundleSeed(portableRoot, appPayload);
         CopyDirectoryContents(bundleRoot, bundlePayload);
         OverlayLatestRuntimeStatic(repoRoot, bundlePayload);
         OverlayDriverSeed(repoRoot, bundlePayload);
@@ -206,6 +243,8 @@ internal static class Program
             throw new InvalidOperationException($"NSIS payload not found in {payloadRoot}. Run prepare-nsis-payload first.");
         }
 
+        if (CloudgimeHostBootstrap.UniversalBundleContract.IsUniversal(payloadBundle))
+            CloudgimeHostBootstrap.UniversalBundleContract.Validate(payloadBundle);
         Directory.CreateDirectory(outputDir);
         var makensisPath = ResolveMakensisPath();
         var outputDefine = ConvertToNsisDefinePath(installerRoot, outputDir);
