@@ -72,8 +72,8 @@ preflight_done:
     MessageBox MB_ICONSTOP "Universal package preflight failed; installed components were not changed."
     Abort
   ${EndIf}
-  ; Install mandatory Sentinel before Host. An existing Sentinel deployment is preserved.
-  IfFileExists "$PROGRAMFILES64\Sentinel Launcher\Sentinel Launcher.exe" sentinel_present
+  ; Install or upgrade mandatory Sentinel in deferred mode. The broker stays
+  ; stopped until Host installation/finalization succeeds and readiness is checked.
   IfFileExists "$PLUGINSDIR\bundle\sentinel\SentinelLauncherSetup.exe" 0 sentinel_missing
   ExecWait '"$PLUGINSDIR\bundle\sentinel\SentinelLauncherSetup.exe" /S /DEFERBROKERSTART' $1
   ${If} $1 != 0
