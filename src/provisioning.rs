@@ -965,7 +965,7 @@ fn write_restricted_json(path: &Path, value: &Value) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn write_dpapi_secret(path: &Path, plaintext: &[u8]) -> Result<()> {
+pub(crate) fn write_dpapi_secret(path: &Path, plaintext: &[u8]) -> Result<()> {
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::{
         Foundation::LocalFree,
@@ -1344,7 +1344,7 @@ mod credential_tests {
 }
 
 #[cfg(windows)]
-fn read_dpapi_secret(path: &Path) -> Result<Vec<u8>> {
+pub(crate) fn read_dpapi_secret(path: &Path) -> Result<Vec<u8>> {
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::{
         Foundation::LocalFree,

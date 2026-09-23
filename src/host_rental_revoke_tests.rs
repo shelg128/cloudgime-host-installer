@@ -355,7 +355,7 @@ async fn backend_command_after_restart_creates_only_exact_deny_tombstone() {
 }
 
 #[test]
-fn worker_is_opt_in_and_cannot_claim_cleanup_complete() {
+fn worker_is_opt_in_and_emits_only_authenticated_exact_bound_receipt() {
     let s = include_str!("host_rental_revoke.rs");
     let compact: String = s.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(compact.contains("if!enabled{returnRevokeWorker(None);}"));
@@ -371,8 +371,9 @@ fn worker_is_opt_in_and_cannot_claim_cleanup_complete() {
     ));
     assert!(s.contains("https_only(true)"));
     assert!(s.contains("redirect(reqwest::redirect::Policy::none())"));
-    assert!(!s.contains("/rental-cleanup-receipt"));
-    assert!(!s.contains("streamTerminated"));
+    assert!(s.contains("/rental-cleanup-receipt"));
+    assert!(s.contains("streamTerminated"));
+    assert!(s.contains("write_dpapi_secret"));
     assert!(!s.contains("taskkill"));
     assert!(!s.contains("PowerShell"));
 }
