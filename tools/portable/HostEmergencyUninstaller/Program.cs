@@ -42,7 +42,8 @@ internal static class Program
         catch (Exception ex)
         {
             Log($"fatal error: {ex}");
-            MessageBox.Show(ex.Message, ProductName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            if (!args.Contains("--silent", StringComparer.OrdinalIgnoreCase))
+                MessageBox.Show(ex.Message, ProductName, MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 1;
         }
     }
@@ -51,7 +52,8 @@ internal static class Program
     {
         var installRoot = ResolveInstallRoot(args.GetValue("install-root"));
         var bundleRoot = ResolveBundleRoot(args.GetValue("bundle-root"), installRoot);
-        var purgeSharedState = !args.HasFlag("keep-shared-state");
+        var universalManifest = ReadJsonObject(Path.Combine(bundleRoot, "cloudgime-host-bundle.json"));
+        var purgeSharedState = (string?)universalManifest?["bundleMode"] != "universal" && !args.HasFlag("keep-shared-state");
         var noConfirm = args.HasFlag("no-confirm") || args.HasFlag("silent");
         var commonPrograms = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu), "Programs");
         var userPrograms = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.StartMenu), "Programs");
@@ -75,6 +77,7 @@ internal static class Program
             }
         }
 
+        TryPrepareUniversalUninstall(installRoot, bundleRoot);
         TryRunHostInstallerCommand(bundleRoot, "stop-bundle");
         TryRunHostInstallerCommand(bundleRoot, "stop-service");
         TryRunHostInstallerCommand(bundleRoot, "uninstall-service");
@@ -119,6 +122,16 @@ internal static class Program
         }
 
         return 0;
+    }
+
+    private static void TryPrepareUniversalUninstall(string installRoot, string bundleRoot)
+    {
+        var manifest = ReadJsonObject(Path.Combine(bundleRoot, "cloudgime-host-bundle.json"));
+        if ((string?)manifest?["bundleMode"] != "universal") return;
+        var bootstrap = Path.Combine(installRoot, "cloudgime-host-bootstrap.exe");
+        if (!File.Exists(bootstrap)) throw new InvalidOperationException("UNIVERSAL_RECOVERY_BOOTSTRAP_MISSING");
+        var result = StartProcessCaptured(bootstrap, $"prepare-universal-uninstall --silent --bundle-root {QuoteArgument(bundleRoot)}", installRoot);
+        if (result.ExitCode != 0) throw new InvalidOperationException("UNIVERSAL_OPERATOR_RECOVERY_FAILED: uninstall was stopped before deleting Host files.");
     }
 
     private static string ResolveInstallRoot(string? configuredInstallRoot)

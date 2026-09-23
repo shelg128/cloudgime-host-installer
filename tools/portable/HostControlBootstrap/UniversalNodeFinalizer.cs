@@ -32,7 +32,7 @@ internal static class UniversalNodeFinalizer
             RunSc("failure", "SentinelNodeBroker", "reset=", "86400", "actions=", "restart/5000/restart/15000/restart/30000");
             RunSc("start", "SentinelNodeBroker");
             WaitServiceRunning();
-            Run(helper, ["--verify-interactive-rental-desktop"], sentinelRoot);
+            UniversalDesktopProbe.Verify(helper);
         }
         catch
         {

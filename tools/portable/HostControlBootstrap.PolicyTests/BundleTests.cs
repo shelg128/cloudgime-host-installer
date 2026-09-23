@@ -16,7 +16,7 @@ internal static class BundleTests
                 File.WriteAllText(p, "INERT_TEST_FIXTURE_NOT_EXECUTABLE");
             }
             File.WriteAllText(Path.Combine(root,"moonlight/server/config.json"),
-                "{\"web_server\":{\"bind_address\":\"127.0.0.1:18999\",\"url_path_prefix\":\"/stream\",\"default_user_id\":null,\"first_login_create_admin\":true}}");
+                "{\"webrtc\":{\"ice_servers\":[{\"urls\":[\"stun:stun.cloudflare.com:3478\"]}]},\"web_server\":{\"bind_address\":\"127.0.0.1:18999\",\"url_path_prefix\":\"/stream\",\"default_user_id\":null,\"first_login_create_admin\":true}}");
             File.WriteAllText(Path.Combine(root,"moonlight/server/data.json"), "{\"users\":{},\"hosts\":{}}");
             JsonObject Manifest()
             {
@@ -58,6 +58,8 @@ internal static class BundleTests
             Fails(()=>{var m=Manifest();m["files"]![0]!["path"]="provisioning/machine-identity.dpapi";Save(m);},"MACHINE_STATE_IN_PAYLOAD");
             var extra=Path.Combine(root,"unlisted.exe");Fails(()=>File.WriteAllText(extra,"unlisted"),"UNLISTED_PAYLOAD_FILES");File.Delete(extra);
             var config=Path.Combine(root,"moonlight/server/config.json");var neutral=File.ReadAllText(config);
+            Fails(()=>{File.WriteAllText(config,neutral.Replace("stun:stun.cloudflare.com:3478","turn:relay.invalid:3478"));Save(Manifest());},"NON_STUN_ICE_FORBIDDEN_DIRECT_ONLY");File.WriteAllText(config,neutral);
+            Fails(()=>{File.WriteAllText(config,neutral.Replace("\"urls\":", "\"credential\":\"fixture\",\"urls\":"));Save(Manifest());},"TURN_CREDENTIAL_FORBIDDEN_DIRECT_ONLY");File.WriteAllText(config,neutral);
             Fails(()=>{File.WriteAllText(config,neutral.Replace("127.0.0.1:18999","0.0.0.0:18999"));Save(Manifest());},"PAYLOAD_BOOTSTRAP_MUST_BIND_LOOPBACK");File.WriteAllText(config,neutral);
             Fails(()=>{File.WriteAllText(config,neutral.Replace("\"default_user_id\":null","\"default_user_id\":42"));Save(Manifest());},"PAYLOAD_USER_MUST_BE_UNASSIGNED");File.WriteAllText(config,neutral);
             Fails(()=>{File.WriteAllText(config,neutral.Replace("\"web_server\":", "\"password\":\"fixture-only\",\"web_server\":"));Save(Manifest());},"INLINE_CREDENTIAL_IN_PAYLOAD");File.WriteAllText(config,neutral);

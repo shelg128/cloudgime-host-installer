@@ -6,7 +6,7 @@ const RIGHT_CLICK_MAX_MOVE = 40
 
 let rightClickEnabled = false
 
-let timer: number
+let timer: ReturnType<typeof setTimeout>
 
 /// This might or might not disable all touch events and will likely simulate click / contextmenu events
 export function setTouchContextMenuEnabled(enabled: boolean) {

@@ -229,7 +229,7 @@ export class MediaSourceDecoder implements DataVideoRenderer {
 
             const [unit] = this.buffers.splice(0, 1)
 
-            this.sourceBuffer.appendBuffer(unit)
+            this.sourceBuffer.appendBuffer(new Uint8Array(unit))
 
             if (DEBUG_FILE) {
                 if (!this.debugBuffer) {

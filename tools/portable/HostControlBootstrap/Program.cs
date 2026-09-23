@@ -93,6 +93,8 @@ internal static class Program
                 parsed.HasFlag("enable-autologon")),
             "validate-universal-bundle" => ValidateUniversalBundle(parsed),
             "validate-universal-install" => ValidateUniversalInstall(parsed),
+            "prepare-universal-uninstall" => UniversalUninstallPreparation.Run(
+                NormalizeFullPath(parsed.GetValue("bundle-root") ?? throw new InvalidOperationException("BUNDLE_ROOT_REQUIRED"))),
             "install" => Install(parsed),
             "repair-state" => RepairState(parsed),
             "run-installed-uninstall" => RunInstalledUninstall(parsed),
@@ -290,6 +292,8 @@ internal static class Program
         Log($"run-installed-uninstall bundleRoot={bundleRoot} installRoot={installRoot} targetPid={targetPid}");
 
         WaitForProcessExit(targetPid, TimeSpan.FromSeconds(30));
+        var universalUninstall = UniversalBundleContract.IsUniversal(bundleRoot);
+        if (universalUninstall) UniversalUninstallPreparation.Run(bundleRoot);
         TryRunHostInstallerCommand(bundleRoot, "stop-bundle", OptionalInstallerActionTimeout);
         TryRunHostInstallerCommand(bundleRoot, "stop-service", OptionalInstallerActionTimeout);
         TryRunHostInstallerCommand(bundleRoot, "uninstall-service", OptionalInstallerActionTimeout);
@@ -308,7 +312,7 @@ internal static class Program
         TryDeleteRegistryTree(appInstallerRegistryPath);
         TryDeleteRegistryTree(uninstallRegistryKey);
         var commonCloudgimeRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Cloudgime");
-        TryDeleteFile(Path.Combine(commonCloudgimeRoot, "pc_identity.json"));
+        if (!universalUninstall) TryDeleteFile(Path.Combine(commonCloudgimeRoot, "pc_identity.json"));
         TryDeleteFile(Path.Combine(commonCloudgimeRoot, "pending_uninstall.json"));
         TryDeleteHostKeeperTunnelTask();
         TryDeleteDirectory(bundleRoot);

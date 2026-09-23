@@ -3,6 +3,7 @@ const path = require("path");
 
 const repoRoot = path.resolve(__dirname, "..");
 const sourceCandidates = [
+    ...(process.env.CLOUDGIME_NATIVE_BRIDGE_SOURCE ? [path.resolve(process.env.CLOUDGIME_NATIVE_BRIDGE_SOURCE)] : []),
     path.join(
         repoRoot,
         "..",

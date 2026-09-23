@@ -25,6 +25,19 @@ foreach($relative in @('PUBLIC_URL.txt','moonlight\server\host_activation_state.
 # Reset web runtime to first-run loopback state; never preserve a builder's user/pairing.
 $configPath=Join-Path $OutputBundleRoot 'moonlight\server\config.json';$config=Get-Content $configPath -Raw|ConvertFrom-Json
 $web=$config.web_server
+# MVP transport is Direct P2P only. Keep STUN discovery but remove every TURN/relay credential.
+$stunServers=@()
+$webrtcProperty=$config.PSObject.Properties['webrtc']
+if($null-ne$webrtcProperty -and $null-ne$webrtcProperty.Value.PSObject.Properties['ice_servers']){
+ foreach($server in @($config.webrtc.ice_servers)){
+  $urls=@(@($server.urls)|Where-Object{([string]$_)-match '^stun:'})
+  if($urls.Count){$stunServers+=[pscustomobject]@{urls=$urls}}
+ }
+}
+if(-not$stunServers.Count){$stunServers=@([pscustomobject]@{urls=@('stun:stun.cloudflare.com:3478','stun:stun.l.google.com:19302')})}
+if($null-eq$webrtcProperty){$config|Add-Member -NotePropertyName webrtc -NotePropertyValue ([pscustomobject]@{})}
+$config.webrtc|Add-Member -NotePropertyName ice_servers -NotePropertyValue $stunServers -Force
+$config.webrtc|Add-Member -NotePropertyName network_types -NotePropertyValue @('udp4') -Force
 foreach($entry in @(
     @('bind_address','127.0.0.1:18081'),
     @('url_path_prefix','/stream'),
@@ -35,7 +48,7 @@ foreach($entry in @(
     @('rental_access_revocation_enabled',$true)
 )){ $web | Add-Member -NotePropertyName $entry[0] -NotePropertyValue $entry[1] -Force }
 [IO.File]::WriteAllText($configPath,($config|ConvertTo-Json -Depth 50),[Text.UTF8Encoding]::new($false))
-[IO.File]::WriteAllText((Join-Path $OutputBundleRoot 'moonlight\server\data.json'),'{"users":{},"hosts":{}}',[Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText((Join-Path $OutputBundleRoot 'moonlight\server\data.json'),'{"version":"2","users":{},"hosts":{}}',[Text.UTF8Encoding]::new($false))
 $pairSource=Join-Path $PSScriptRoot 'auto-pair-host.ps1';if(-not(Test-Path $pairSource)){throw 'PAIRING_SCRIPT_MISSING'};Copy-Item $pairSource (Join-Path $OutputBundleRoot 'auto-pair-host.ps1')
 New-Item -ItemType Directory (Join-Path $OutputBundleRoot 'sentinel') -Force|Out-Null;Copy-Item $SentinelInstallerPath (Join-Path $OutputBundleRoot 'sentinel\SentinelLauncherSetup.exe')
 # Seal last. The manifest itself is intentionally not listed in files.

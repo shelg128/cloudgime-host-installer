@@ -132,7 +132,7 @@ export class MicSidecarClient {
     private microphoneLevelContext: AudioContext | null = null
     private microphoneLevelSource: MediaStreamAudioSourceNode | null = null
     private microphoneLevelAnalyser: AnalyserNode | null = null
-    private microphoneLevelData: Uint8Array | null = null
+    private microphoneLevelData: Uint8Array<ArrayBuffer> | null = null
     private lastOutboundSnapshot: { timestampMs: number, bytesSent: number | null } | null = null
     private lastOutboundStats: TransportMicrophoneOutboundStats = { ...DEFAULT_OUTBOUND }
     private lastRouteDiagnostics: TransportMicrophoneRouteDiagnostics | null = null

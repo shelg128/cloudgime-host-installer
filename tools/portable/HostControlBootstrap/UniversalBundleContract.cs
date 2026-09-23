@@ -121,6 +121,17 @@ internal static class UniversalBundleContract
             throw new InvalidDataException("LOCAL_PREFIX_INVALID");
         foreach (var key in new[] { "users", "hosts" })
             if (data[key] is not JsonObject o || o.Count != 0) throw new InvalidDataException("PAYLOAD_PAIRING_STATE_NOT_EMPTY");
+        var ice = config["webrtc"]?["ice_servers"]?.AsArray() ?? throw new InvalidDataException("ICE_SERVERS_REQUIRED");
+        foreach (var server in ice)
+        {
+            if (server is not JsonObject item || item["urls"] is not JsonArray urls || urls.Count == 0)
+                throw new InvalidDataException("ICE_SERVER_INVALID");
+            if (item["username"] is not null || item["credential"] is not null)
+                throw new InvalidDataException("TURN_CREDENTIAL_FORBIDDEN_DIRECT_ONLY");
+            foreach (var url in urls.Select(v => v?.GetValue<string>() ?? string.Empty))
+                if (!url.StartsWith("stun:", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("NON_STUN_ICE_FORBIDDEN_DIRECT_ONLY");
+        }
         RejectInlineCredentials(config);
         RejectInlineCredentials(data);
     }

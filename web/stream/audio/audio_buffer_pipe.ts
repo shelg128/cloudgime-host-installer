@@ -100,7 +100,7 @@ export class AudioBufferPipe implements PcmAudioPlayer {
         for (let channel = 0; channel < this.channels; channel++) {
             const channelPcm = unit.channelData[channel]
 
-            buffer.copyToChannel(channelPcm, channel)
+            buffer.copyToChannel(new Float32Array(channelPcm), channel)
         }
 
         const source = context.createBufferSource()

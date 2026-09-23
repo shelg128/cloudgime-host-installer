@@ -55,6 +55,8 @@ tools/portable/**/release/
 tools/portable/**/installer/output/
 tools/portable/**/installer/payload/
 tools/portable/_publish/
+tools/portable/**/_publish/
+web/api_bindings.js
 generated/
 test-results/
 tmp/
