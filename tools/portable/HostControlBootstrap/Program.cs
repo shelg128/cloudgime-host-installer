@@ -77,7 +77,8 @@ internal static class Program
                 || parsed.Command == "uninstall-gamepad"
                 || parsed.Command == "configure-autologon"
                 || parsed.Command == "disable-autologon"
-                || parsed.Command == "finalize-universal-node")
+                || parsed.Command == "finalize-universal-node"
+                || parsed.Command == "verify-rental-idle")
             && !IsAdministrator())
         {
             return RelaunchElevated(args);
@@ -92,6 +93,7 @@ internal static class Program
                 NormalizeFullPath(parsed.GetValue("sentinel-root") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Sentinel Launcher")),
                 parsed.HasFlag("enable-autologon")),
             "validate-universal-bundle" => ValidateUniversalBundle(parsed),
+            "verify-rental-idle" => VerifyRentalIdle(),
             "validate-universal-install" => ValidateUniversalInstall(parsed),
             "prepare-universal-uninstall" => UniversalUninstallPreparation.Run(
                 NormalizeFullPath(parsed.GetValue("bundle-root") ?? throw new InvalidOperationException("BUNDLE_ROOT_REQUIRED"))),
@@ -104,6 +106,13 @@ internal static class Program
             "uninstall-gamepad" => UninstallGamepad(parsed),
             _ => throw new InvalidOperationException($"Unknown command '{parsed.Command}'.")
         };
+    }
+
+    private static int VerifyRentalIdle()
+    {
+        UniversalMachineBoundary.RequireAdminConsole();
+        UniversalMachineBoundary.RequireNoRentalActivity(checkProcesses: false);
+        return 0;
     }
 
     private static int ValidateUniversalBundle(ParsedArguments args)
@@ -173,6 +182,9 @@ internal static class Program
         {
             throw new InvalidOperationException($"host-installer.exe not found in bundle source: {bundleSourceRoot}");
         }
+
+        if (universal && Directory.Exists(dataRoot) && HasExistingNodeIdentity(dataRoot))
+            return UpgradeUniversalFiles(bundleSourceRoot, releaseRoot, installRoot, dataRoot);
 
         Directory.CreateDirectory(installRoot);
         // Upgrade app files in place. A running Host Control executable cannot be
@@ -248,6 +260,54 @@ internal static class Program
 
         Log("install completed successfully");
         return 0;
+    }
+
+    private static int UpgradeUniversalFiles(string sourceRoot, string releaseRoot, string installRoot, string dataRoot)
+    {
+        UniversalMachineBoundary.RequireProtected(dataRoot, true);
+        UniversalMachineBoundary.RequireProtected(installRoot, true);
+        var recovery = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "CloudGime", "UniversalUpgradeRecovery");
+        UniversalBundleContract.RejectReparse(recovery);
+        Directory.CreateDirectory(recovery);
+        var security = new System.Security.AccessControl.DirectorySecurity();
+        security.SetAccessRuleProtection(true, false);
+        var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        security.SetOwner(admins);
+        foreach (var sid in new[] { admins, new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null) })
+            security.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(sid, System.Security.AccessControl.FileSystemRights.FullControl,
+                System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
+                System.Security.AccessControl.PropagationFlags.None, System.Security.AccessControl.AccessControlType.Allow));
+        new DirectoryInfo(recovery).SetAccessControl(security);
+        UniversalMachineBoundary.RequireProtected(recovery, true);
+        var transaction = new UniversalFileTransaction(recovery);
+        try
+        {
+            RunHostInstaller(dataRoot, "stop-bundle", OptionalInstallerActionTimeout);
+            RunHostInstaller(dataRoot, "stop-service", OptionalInstallerActionTimeout);
+            StopProcessesWithinRoots(new[] { dataRoot, installRoot }, TimeSpan.FromSeconds(20));
+            foreach (var relative in UniversalBundleContract.Walk(sourceRoot))
+            {
+                if (ShouldPreserveExistingBundleFile(relative)) continue;
+                transaction.Replace(Path.Combine(sourceRoot, relative), Path.Combine(dataRoot, relative));
+            }
+            foreach (var name in new[] { "cloudgime-host-control.exe", "open-host-control.exe", "uninstaller-cloudgime.exe" })
+                transaction.Replace(Path.Combine(releaseRoot, name), Path.Combine(installRoot, name));
+            transaction.Replace(Environment.ProcessPath!, Path.Combine(installRoot, "cloudgime-host-bootstrap.exe"));
+            // Upgrade reuses existing SCM/tasks/driver configuration; do not run fresh-install finalization.
+            RunHostInstaller(dataRoot, "start-service", OptionalInstallerActionTimeout);
+            transaction.Commit();
+            Log("universal file upgrade committed; runtime readiness requires live verification; backup=" + transaction.RecoveryRoot);
+            return 0;
+        }
+        catch
+        {
+            TryRunHostInstallerCommand(dataRoot, "stop-bundle", OptionalInstallerActionTimeout);
+            TryRunHostInstallerCommand(dataRoot, "stop-service", OptionalInstallerActionTimeout);
+            StopProcessesWithinRoots(new[] { dataRoot }, TimeSpan.FromSeconds(20));
+            transaction.Rollback();
+            TryRunHostInstallerCommand(dataRoot, "start-service", OptionalInstallerActionTimeout);
+            throw;
+        }
     }
 
     private static int RepairState(ParsedArguments args)

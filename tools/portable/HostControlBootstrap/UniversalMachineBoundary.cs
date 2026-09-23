@@ -43,10 +43,10 @@ internal static class UniversalMachineBoundary
         }
     }
 
-    internal static void RequireNoRentalActivity()
+    internal static void RequireNoRentalActivity(bool checkProcesses = true)
     {
         // Install/upgrade may own and restart Host services, but never a live rental or Sentinel gate.
-        foreach (var name in new[] { "SentinelNodeBroker", "Sentinel Launcher", "SentinelHelper", "streamer" })
+        foreach (var name in checkProcesses ? new[] { "SentinelNodeBroker", "Sentinel Launcher", "SentinelHelper", "streamer" } : Array.Empty<string>())
             foreach (var p in Process.GetProcessesByName(name))
             { using (p) { throw new InvalidOperationException("OPERATOR_MAINTENANCE_REQUIRED: running " + name); } }
         // A different administrator must not accidentally inspect their own empty profile.

@@ -36,7 +36,8 @@ Throws(() => AutoLogonTransaction.Configure(rollbackFailure,"admin","PC","S-1-5-
 Require(rollbackFailure.Value.Enabled == "0", "ROLLBACK_FAILURE_NOT_DISABLED");
 var bundleTests = BundleTests.Run();
 var journalTests = IdleJournalTests.Run();
-Console.WriteLine($"UNIVERSAL_INSTALL_POLICY_TESTS_OK; BUNDLE_ASSERTIONS={bundleTests}; IDLE_JOURNAL_ASSERTIONS={journalTests}");
+var fileTests = FileTransactionTests.Run();
+Console.WriteLine($"UNIVERSAL_INSTALL_POLICY_TESTS_OK; BUNDLE_ASSERTIONS={bundleTests}; IDLE_JOURNAL_ASSERTIONS={journalTests}; FILE_TRANSACTION_ASSERTIONS={fileTests}");
 
 sealed class FakeStore(AutoLogonSnapshot value) : IAutoLogonStore
 {
