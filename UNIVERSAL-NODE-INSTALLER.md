@@ -1,5 +1,18 @@
 # Universal Node v1.2 — internal candidate and verified upgrade
 
+## Update 23 September 2026 — post-upgrade rental and replay verified
+
+Read `05 LAPORAN/20260923-POST-V6-RENTAL-E2E-DAN-REPLAY-FIX.md` and `06 TEST/post-v6-rental-20260923` in the workspace for the newest evidence.
+
+A fresh MASTER login resolved the former authorization blocker; the password was not stored. The v6 rental fixture proved Direct WebRTC UDP 1280x720, pre-login BILLING_NOT_CHARGED, login-started billing, Full Desktop with the same timer (575 -> 555 seconds), expiry settlement, disconnected WebRTC/ICE, closed WebSocket, frozen frames/video time, relock, and exact-bound operator cleanup without Windows reboot.
+
+A separate direct-Host probe exposed a cancellation cookie revocation defect. Host `570e4cf` + backend `59b347a` now revoke exact claim-bound roots before claim release; 117 Host and 29 backend tests passed. Live tests proved one-use launch replay 409 before cancellation, both distinct same-claim device cookies 200 simultaneously, machine-only revocation rejecting renters, and both devices' old cookies/launch tokens rejected after cancellation. The post-cancel Host 404 responses explicitly identify missing stream/launch tickets; they are not generic proxy 404s.
+
+Installer v7 (1.2.1) now contains the fix: SHA-256 `45F9DBE2EE34309A7E0AA3B0566E0AF71440C359E489C299A1C0EA596326D197`, 693144096 bytes, at `02 HASIL BUILD DAN INSTALLER/UNIVERSAL NODE 20260923/candidate-v7/CloudgimeHostSetup.exe`. It remains unsigned/internal. Full v6 installer upgrade was tested; the patched Host/backend components were live-tested; the complete v7 installer executable has NOT yet been installed as a whole.
+
+PC-02 is back in MAINTENANCE with no claim, open rental, reservation or cleanup debt, Host READY and Sentinel gate enforced. A managed Host-service restart (no Windows reboot) was needed after the two-device cancellation test to clear a lingering `starting` readiness phase. Do not claim fully autonomous turnover from the operator cleanup or readiness recovery.
+
+
 ## Source and build contract
 
 This is a linked worktree of the existing Host repository, not another canonical repository. The original dirty Host worktree is preserved and has NOT been merged or overwritten. The Universal release branch includes the tested runtime chain through `9cde566`, installer changes through `b5d4fd2`, and the passing web TypeScript compatibility fixes.
@@ -54,10 +67,10 @@ Evidence: `06 TEST/universal-node-20260923/pc02-v6-verified.json`, `v4-recovery-
 
 ## Unverified / do not overclaim
 
-- No post-v6 claim -> stream -> billed login -> Full Desktop -> cutoff E2E run. The attempt to authorize that test stopped at MASTER login HTTP 401 before granting fixture credit or opening maintenance. Stored server MASTER password does not match the single ACTIVE MASTER; known local cached MASTER tokens are absent. Do not reset credentials or bypass auth.
-- Previous 22 September billing/desktop/cutoff evidence applies to the previous runtime pilot, not automatically to v6.
+- Historical v6 gate: post-upgrade rental E2E was initially blocked by MASTER login; this was resolved and the bounded rental/expiry/operator-reset run passed as described above.
+- The original 22 September pilot remains historical; the new 23 September v6 billing/desktop/cutoff evidence is independent.
 - Clean install/activation/finalizer on disposable Windows, second installation retry, uninstall, full cold-boot recovery/autologon and native Windows/Android clients remain pending.
-- Conclusive old-token replay rejection remains pending.
+- Conclusive consumed-token and cancelled-claim cookie/launch replay rejection was verified after the fix, including two devices. Expired-session replay through the closed proxy was not independently verified and its generic 404 is not counted.
 - Autologon is opt-in via a local password dialog, LSA secret storage. It was not configured on PC-02. Do not enable it on the source/admin PC.
 - File transaction unit tests and observed controlled rollback do not prove cross-component atomicity, arbitrary power-loss recovery, or automatic recovery across every crash point.
 - The Helper pipe probe from SSH timed out; gate evidence comes from fresh backend-authoritative heartbeat, not that failed pipe probe.
@@ -66,4 +79,4 @@ Evidence: `06 TEST/universal-node-20260923/pc02-v6-verified.json`, `v4-recovery-
 
 ## Next authorized work
 
-Obtain a fresh valid MASTER login (no password in chat), run a bounded rental fixture with guaranteed stop/maintenance restoration, then clean-install/cold-boot/native/replay gates. Do not rerun the old pilot script against its pre-migration config hash: v6 intentionally removed TURN. Use the existing committed verification record and create a new explicitly scoped baseline for any additional maintenance.
+MASTER authorization is no longer blocked. Remaining gates: full v7 installer, disposable clean install/finalizer/uninstall, cold-boot secure autologon, native Windows/Android clients, dependency/signature review, and autonomous cleanup/readiness. Do not rerun the old pilot against its pre-migration config hash: v6 intentionally removed TURN. Create a new explicitly scoped baseline for any further maintenance. Passwords and runtime credentials must never be embedded in tests or logs.
