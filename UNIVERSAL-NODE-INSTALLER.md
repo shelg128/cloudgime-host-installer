@@ -1,4 +1,18 @@
-# Universal Node v1.2 — internal candidate and verified upgrade
+# Universal Node — automatic managed-rental cleanup verified
+
+## Latest: 23 September 2026 automatic turnover
+
+See workspace `05 LAPORAN/20260923-AUTOMATIC-CLEANUP-PC02-LIVE.md` and `06 TEST/automatic-cleanup-20260923/FINAL-STATUS.json` for the current outcome. Older operator-reset descriptions below are historical.
+
+Host `c45b2ee` and Sentinel/backend `d43c97f` (tests `8d9b18e`) were deployed to PC-02 and completed three separate rental generations automatically: 23.715s, 11.578s and 33.434s from cleanup request to claim release. The last two exercised normal installed Chrome with a session-specific profile, 10/11 owned processes, Downloads/profile marker files, expiry, frozen/disconnected Direct streaming, deleted session directory, empty local state and renewed AVAILABLE status. Clipboard was explicitly set and then observed empty on the third generation. No operator cleanup/reset or Windows reboot was used for those turnovers. All three used the same valid test account with distinct bindings/paths; a second account failed authentication before claim creation and is not cross-account E2E evidence.
+
+This verifies **managed rental scope only**, not arbitrary processes/files started from the shared Windows desktop, Steam/Discord credentials in default profiles, forensic erasure, or every crash/power-loss recovery. A lost Job Object must remain fail-closed. Runtime retry occurred and recovered; do not claim zero retries. TickCount64 in the PowerShell runner was null, so no-reboot proof is from OS event/process continuity instead, not its boolean alone.
+
+Installer v8 / 1.3.0 includes the live-tested components: `02 HASIL BUILD DAN INSTALLER/UNIVERSAL NODE 20260923/candidate-v8/CloudgimeHostSetup.exe`, 693175370 bytes, SHA-256 `2DD068294BECDBD2442AD4F186819A966692EFF2962BA3008592AA1AAD9DA545`. Internal unsigned candidate; the full v8 executable has not been installed end-to-end, and clean install/cold boot/native clients remain separate gates. The later cosmetic retry text commit `d5e0860` is source-only, NOT included in that installer or the running PC-02 build.
+
+Final PC-02 state: MAINTENANCE, no current renter/claim/reservation/pending cleanup, Host READY and Sentinel gate enforced. Source/admin Sentinel remains Stopped/Disabled. Test credits revoked and completed tasks removed; deployment backups retained.
+
+## Historical v1.2 evidence
 
 ## Update 23 September 2026 — post-upgrade rental and replay verified
 
