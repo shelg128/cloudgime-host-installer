@@ -35,7 +35,8 @@ var rollbackFailure = new FakeStore(before) { FailAt = 3, AdditionalFailAt = 5 }
 Throws(() => AutoLogonTransaction.Configure(rollbackFailure,"admin","PC","S-1-5-21-1-2-3-1001","secret"), "AUTOLOGON_ROLLBACK_FAILED");
 Require(rollbackFailure.Value.Enabled == "0", "ROLLBACK_FAILURE_NOT_DISABLED");
 var bundleTests = BundleTests.Run();
-Console.WriteLine($"UNIVERSAL_INSTALL_POLICY_TESTS_OK; BUNDLE_ASSERTIONS={bundleTests}");
+var journalTests = IdleJournalTests.Run();
+Console.WriteLine($"UNIVERSAL_INSTALL_POLICY_TESTS_OK; BUNDLE_ASSERTIONS={bundleTests}; IDLE_JOURNAL_ASSERTIONS={journalTests}");
 
 sealed class FakeStore(AutoLogonSnapshot value) : IAutoLogonStore
 {

@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace CloudgimeHostBootstrap;
@@ -47,6 +49,16 @@ internal static class UniversalMachineBoundary
         foreach (var name in new[] { "SentinelNodeBroker", "Sentinel Launcher", "SentinelHelper", "streamer" })
             foreach (var p in Process.GetProcessesByName(name))
             { using (p) { throw new InvalidOperationException("OPERATOR_MAINTENANCE_REQUIRED: running " + name); } }
+        // A different administrator must not accidentally inspect their own empty profile.
+        var pin = Path.Combine(ProvisioningRoot, "shared-gaming-desktop.identity.json");
+        if (File.Exists(pin))
+        {
+            RequireProtected(pin);
+            using var policy = JsonDocument.Parse(File.ReadAllBytes(pin));
+            using var current = WindowsIdentity.GetCurrent();
+            if (current.User?.Value != policy.RootElement.GetProperty("desktopUserSid").GetString())
+                throw new InvalidOperationException("PINNED_DESKTOP_OPERATOR_REQUIRED");
+        }
         var session = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SentinelLauncher", "state", "session.json");
         if (File.Exists(session))
         {
@@ -57,8 +69,29 @@ internal static class UniversalMachineBoundary
                     throw new InvalidOperationException("LOCAL_SESSION_OR_CLEANUP_PENDING");
         }
         // Encrypted journals cannot be guessed/replaced here. Only the Sentinel owner may retire them.
-        var journal = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "sentinel-gaming-launcher", "renter-operation.dpapi");
-        if (File.Exists(journal)) throw new InvalidOperationException("EXISTING_RENTER_JOURNAL: use Sentinel maintenance, not initial onboarding.");
+        var userData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "sentinel-gaming-launcher");
+        var journal = Path.Combine(userData, "renter-operation.dpapi");
+        if (File.Exists(journal) && !IsIdleElectronJournal(journal, Path.Combine(userData, "Local State")))
+            throw new InvalidOperationException("EXISTING_RENTER_JOURNAL: use Sentinel maintenance, not installation.");
+    }
+
+    private static bool IsIdleElectronJournal(string journalPath, string localStatePath)
+    {
+        try
+        {
+            UniversalBundleContract.RejectReparse(journalPath);
+            UniversalBundleContract.RejectReparse(localStatePath);
+            if (new FileInfo(journalPath).Length > 64 * 1024 || new FileInfo(localStatePath).Length > 4 * 1024 * 1024) return false;
+            var journal = File.ReadAllBytes(journalPath);
+            using var state = JsonDocument.Parse(File.ReadAllBytes(localStatePath));
+            var wrapped = Convert.FromBase64String(state.RootElement.GetProperty("os_crypt").GetProperty("encrypted_key").GetString()!);
+            if (wrapped.Length <= 5 || !wrapped.AsSpan(0, 5).SequenceEqual("DPAPI"u8)) return false;
+            var encryptedKey = wrapped.AsSpan(5).ToArray();
+            var key = ProtectedData.Unprotect(encryptedKey, null, DataProtectionScope.CurrentUser);
+            try { return ElectronIdleJournal.IsIdle(journal, key); }
+            finally { CryptographicOperations.ZeroMemory(key); CryptographicOperations.ZeroMemory(encryptedKey); }
+        }
+        catch { return false; }
     }
 
     internal static void RequireIdle(string bundleRoot)
