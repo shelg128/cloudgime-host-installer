@@ -262,6 +262,35 @@ internal static class Program
         return 0;
     }
 
+    private static void StopUniversalHostService(string bundleRoot)
+    {
+        var name = "CloudgimeHost-" + new DirectoryInfo(bundleRoot).Name;
+        if (!Regex.IsMatch(name, "^[A-Za-z0-9_-]+$")) throw new InvalidOperationException("INVALID_HOST_SERVICE_NAME");
+        string? State()
+        {
+            using var query = new ManagementObjectSearcher($"SELECT State,PathName FROM Win32_Service WHERE Name='{name}'");
+            foreach (ManagementObject service in query.Get())
+            {
+                var image = (string?)service["PathName"] ?? string.Empty;
+                var expectedImage = Path.Combine(bundleRoot, "moonlight", "system", "cloudgime-runtime-agent.exe");
+                if (!image.StartsWith("\"" + expectedImage + "\" ", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("HOST_SERVICE_BINDING_MISMATCH");
+                return (string?)service["State"];
+            }
+            throw new InvalidOperationException("EXISTING_HOST_SERVICE_MISSING");
+        }
+        if (State() == "Stopped") return;
+        try { RunHostInstaller(bundleRoot, "stop-service", TimeSpan.FromSeconds(60)); }
+        catch (InvalidOperationException) when (State() == "Stopped") { return; }
+        var deadline = DateTime.UtcNow.AddSeconds(60);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (State() == "Stopped") return;
+            Thread.Sleep(250);
+        }
+        throw new TimeoutException("HOST_SERVICE_STOP_TIMEOUT");
+    }
+
     private static int UpgradeUniversalFiles(string sourceRoot, string releaseRoot, string installRoot, string dataRoot)
     {
         UniversalMachineBoundary.RequireProtected(dataRoot, true);
@@ -283,7 +312,7 @@ internal static class Program
         try
         {
             RunHostInstaller(dataRoot, "stop-bundle", OptionalInstallerActionTimeout);
-            RunHostInstaller(dataRoot, "stop-service", OptionalInstallerActionTimeout);
+            StopUniversalHostService(dataRoot);
             StopProcessesWithinRoots(new[] { dataRoot, installRoot }, TimeSpan.FromSeconds(20));
             foreach (var relative in UniversalBundleContract.Walk(sourceRoot))
             {
