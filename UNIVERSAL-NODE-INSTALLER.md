@@ -1,5 +1,17 @@
 # Universal Node — automatic managed-rental cleanup verified
 
+## Latest: 24 September 2026 portable renter apps
+
+See workspace `05 LAPORAN/20260924-PORTABLE-APP-RENTAL-CLEANUP.md` and `06 TEST/renter-portable-20260923/FINAL-STATUS.json`.
+
+Steam/Discord remain manual by owner. Renter Chrome profile, Downloads, clipboard and exact session folder are cleanup-managed. User apps are supported only as bounded portable ZIP or explicit `asInvoker` EXE from rental Downloads; MSI/driver/setup/admin/unknown-manifest executables are rejected. This is managed storage/process cleanup, not arbitrary native-code filesystem/registry isolation.
+
+Live PC-02 session `bdd1bbab-f120-4d7a-8178-e9fe01ec790e` imported ZIP fixture to `Apps`, ran EXE SHA-256 `9831A9AB4E049525BE383A0228844F6A7DA768049C35B12EA12FB7DB915B1F` as a rental Job Object process, created an in-app marker, then cleanup `6e0cd6ea-ecfc-4ea4-a105-1cac9bc61541` completed in 21.782s with HOST+SENTINEL receipts. Apps/Downloads/session folder/process vanished; an outside control file retained hash `3B76AD108FF0C97400C7C71A22FA1B11BC1735E16330269A925364BAFA843A95`; Windows boot identity stayed `2026-09-22T05:42:07.8300400Z`.
+
+An initial attempt exposed an image-handle cleanup deadlock and required exact-bound operator recovery; it is not counted as automatic success. Fix `4cf2235` then passed on a fresh session. Portable source commits: `a5679fe`, `cc3ecf1`, `0291aa7`; latest tray-order source `603cffb` is newer than the installed live-test package unless separately deployed.
+
+Internal latest v10/1.4.1 candidate: `02 HASIL BUILD DAN INSTALLER/UNIVERSAL NODE 20260923/candidate-v10/CloudgimeHostSetup.exe`, 693183422 bytes, SHA-256 `DE265111370C321583D1BBA09080CEB484B9664D8CAACC8E399D75C57BFF1FEA`, unsigned, full v10 installer not executed as a whole. It packages Sentinel `879f814`; browser/Downloads/portable cleanup components were live-tested separately.
+
 ## Latest: 23 September 2026 automatic turnover
 
 See workspace `05 LAPORAN/20260923-AUTOMATIC-CLEANUP-PC02-LIVE.md` and `06 TEST/automatic-cleanup-20260923/FINAL-STATUS.json` for the current outcome. Older operator-reset descriptions below are historical.
