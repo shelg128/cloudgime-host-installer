@@ -31,6 +31,7 @@ VIAddVersionKey "ProductName" "${PRODUCT_NAME}"
 VIAddVersionKey "ProductVersion" "${PRODUCT_VERSION}"
 VIAddVersionKey "FileDescription" "${PRODUCT_NAME} Universal Node candidate"
 VIAddVersionKey "FileVersion" "${PRODUCT_VERSION}"
+VIAddVersionKey "LegalCopyright" "CloudGime"
 InstallDir "$PROGRAMFILES64\Cloudgime Host"
 RequestExecutionLevel admin
 ShowInstDetails hide
@@ -74,7 +75,7 @@ preflight_done:
   ; Install mandatory Sentinel before Host. An existing Sentinel deployment is preserved.
   IfFileExists "$PROGRAMFILES64\Sentinel Launcher\Sentinel Launcher.exe" sentinel_present
   IfFileExists "$PLUGINSDIR\bundle\sentinel\SentinelLauncherSetup.exe" 0 sentinel_missing
-  ExecWait '"$PLUGINSDIR\bundle\sentinel\SentinelLauncherSetup.exe" /S' $1
+  ExecWait '"$PLUGINSDIR\bundle\sentinel\SentinelLauncherSetup.exe" /S /DEFERBROKERSTART' $1
   ${If} $1 != 0
     SetErrorLevel 1
     IfSilent +2
