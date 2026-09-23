@@ -28,6 +28,7 @@ use crate::app::{
     user::{Admin, AuthenticatedUser, Role, User, UserId},
 };
 
+mod claim_revoke;
 pub mod auth;
 pub mod host;
 pub mod password;

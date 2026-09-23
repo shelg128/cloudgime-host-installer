@@ -94,6 +94,7 @@ fn independently_authenticated_route(method: &str, route: &str) -> bool {
         && matches!(
             route,
             "/android-native/launch-token-from-tunnel"
+                | "/android-native/revoke-unstarted-claim"
                 | "/android-native/consume-launch"
                 | "/android-native/bootstrap-web-session"
                 | "/android-native/bootstrap-web-session-from-native-session"

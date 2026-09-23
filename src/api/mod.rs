@@ -49,6 +49,7 @@ use common::api_bindings::{
     PostWakeUpRequest, UndetailedHost,
 };
 
+mod claim_revoke;
 pub mod admin;
 pub mod android_native;
 pub mod auth;
@@ -494,6 +495,7 @@ pub fn api_service() -> impl HttpServiceFactory {
     web::scope("/api")
         .wrap(from_fn(auth::rental_cookie_middleware))
         .service(services![
+            claim_revoke::post_revoke_unstarted_claim,
             post_android_native_launch_token_from_tunnel,
             post_android_native_consume_launch,
             post_android_native_shared_session_consume_invite,

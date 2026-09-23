@@ -72,7 +72,7 @@ fn native_control_credential(req: &HttpRequest, body: Option<&str>) -> Result<St
 
 // A loopback address is a transport detail, not backend authentication. Validate
 // the Host runtime bearer before any default-user lookup, pairing or token issue.
-fn authorize_host_tunnel(
+pub(super) fn authorize_host_tunnel(
     req: &HttpRequest,
     load_runtime_credential: impl FnOnce() -> Result<String, AppError>,
 ) -> Result<(), AppError> {
@@ -105,7 +105,7 @@ fn authorize_host_tunnel(
     Ok(())
 }
 
-fn installed_host_runtime_credential() -> Result<String, AppError> {
+pub(super) fn installed_host_runtime_credential() -> Result<String, AppError> {
     // provisioning::read_component_credential resolves the SAME protected store
     // used by installer/supervisor. Do not fall back to activation/token hints or
     // an empty default credential if an unprovisioned server starts.
