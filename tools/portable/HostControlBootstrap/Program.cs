@@ -319,6 +319,11 @@ internal static class Program
                 if (ShouldPreserveExistingBundleFile(relative)) continue;
                 transaction.Replace(Path.Combine(sourceRoot, relative), Path.Combine(dataRoot, relative));
             }
+            var configPath = Path.Combine(dataRoot, "moonlight", "server", "config.json");
+            var config = ReadJsonObject(configPath) ?? throw new InvalidDataException("INSTALLED_WEBRTC_CONFIG_INVALID");
+            var directConfig = Path.Combine(transaction.RecoveryRoot, "direct-only-config.json");
+            File.WriteAllText(directConfig, UniversalTransportPolicy.DirectOnly(config).ToJsonString(), Utf8NoBom);
+            transaction.Replace(directConfig, configPath);
             foreach (var name in new[] { "cloudgime-host-control.exe", "open-host-control.exe", "uninstaller-cloudgime.exe" })
                 transaction.Replace(Path.Combine(releaseRoot, name), Path.Combine(installRoot, name));
             transaction.Replace(Environment.ProcessPath!, Path.Combine(installRoot, "cloudgime-host-bootstrap.exe"));

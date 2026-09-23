@@ -37,7 +37,8 @@ Require(rollbackFailure.Value.Enabled == "0", "ROLLBACK_FAILURE_NOT_DISABLED");
 var bundleTests = BundleTests.Run();
 var journalTests = IdleJournalTests.Run();
 var fileTests = FileTransactionTests.Run();
-Console.WriteLine($"UNIVERSAL_INSTALL_POLICY_TESTS_OK; BUNDLE_ASSERTIONS={bundleTests}; IDLE_JOURNAL_ASSERTIONS={journalTests}; FILE_TRANSACTION_ASSERTIONS={fileTests}");
+var transportTests = TransportPolicyTests.Run();
+Console.WriteLine($"UNIVERSAL_INSTALL_POLICY_TESTS_OK; BUNDLE_ASSERTIONS={bundleTests}; IDLE_JOURNAL_ASSERTIONS={journalTests}; FILE_TRANSACTION_ASSERTIONS={fileTests}; TRANSPORT_ASSERTIONS={transportTests}");
 
 sealed class FakeStore(AutoLogonSnapshot value) : IAutoLogonStore
 {
