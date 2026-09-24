@@ -1,6 +1,13 @@
 # Universal Node — automatic managed-rental cleanup verified
 
-## Latest: 24 September 2026 portable renter apps
+## Latest: 24 September 2026 Standard User full upgrade and automatic cleanup
+
+See workspace `05 LAPORAN/20260924-STANDARD-USER-E2E-PREBILLING-RECOVERY.md` and `05 LAPORAN/20260924-UNIVERSAL-V11-FULL-UPGRADE-PC02.md`.
+
+Universal fixes `bc205e6`, `b9323a0`, and `e707c61` close prebilling-abort debt, stale cleanup outbox reconciliation, and exact orphan SUBST recovery in the renter logon namespace. Live Standard User session `202dab43-fbc1-4ad6-a590-1c909a90cd4e` proved Direct P2P UDP 1280x720, Sentinel login, billing, portable app execution, expiry, HOST+SENTINEL cleanup receipts, folder/process/state removal, automatic claim release in 11.05 seconds, and no reboot.
+
+Candidate-v11 / 1.4.2 contains Host SYSTEM source `ec3e3ee`, installer preflight source `ad893b7`, and Sentinel `e707c61`: `02 HASIL BUILD DAN INSTALLER/UNIVERSAL NODE 20260923/candidate-v11/CloudgimeHostSetup.exe`, 693206843 bytes, SHA-256 `8F4B088DF518E49081CFEB19AD9453C97E42DE259C6CB3C7C1F55A92AD6D9C64`, unsigned. Full silent upgrade passed on PC-02 while preserving eight identity/credential hashes, renter SID/enabled state, autologon identity, plaintext-password absence, service/task baseline, SSH, and boot timestamp. Post-upgrade Direct P2P video and fresh Host/Sentinel readiness passed; no billing was started in that post-upgrade probe. Clean install and post-upgrade cold boot remain separate gates.
+
 
 See workspace `05 LAPORAN/20260924-PORTABLE-APP-RENTAL-CLEANUP.md` and `06 TEST/renter-portable-20260923/FINAL-STATUS.json`.
 
