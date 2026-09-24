@@ -871,8 +871,10 @@ fn run_service_main() -> Result<()> {
         }
     }
     if activation_allows_runtime(&paths, &startup_activation) {
-        if let Err(err) = ensure_user_session_daemon_running(&paths)
-            .and_then(|_| request_user_daemon_operation(&paths, DaemonCommandKind::StartBundle))
+        // Keep Node authority and web control under LocalSystem. Display/capture
+        // helpers are independently relayed into the pinned interactive session.
+        if let Err(err) = ensure_daemon_running(&paths)
+            .and_then(|_| request_daemon_operation(&paths, DaemonCommandKind::StartBundle))
         {
             append_supervisor_log(&paths, &format!("service startup failed: {err:#}"))?;
             startup_done.store(true, Ordering::SeqCst);
@@ -953,7 +955,7 @@ fn run_service_main() -> Result<()> {
         ServiceControlAccept::empty(),
     )?;
     append_supervisor_log(&paths, "service status STOP_PENDING")?;
-    let _ = request_user_daemon_operation(&paths, DaemonCommandKind::StopBundle);
+    let _ = request_daemon_operation(&paths, DaemonCommandKind::StopBundle);
     update_service_status(
         &status_handle,
         WindowsServiceState::Stopped,
@@ -997,8 +999,8 @@ fn service_watchdog_tick(
                 paths,
                 "service_watchdog confirmed daemon missing -> start_bundle",
             )?;
-            ensure_user_session_daemon_running(paths)?;
-            request_user_daemon_operation(paths, DaemonCommandKind::StartBundle)?;
+            ensure_daemon_running(paths)?;
+            request_daemon_operation(paths, DaemonCommandKind::StartBundle)?;
             *last_watchdog_recovery_at = Some(Instant::now());
             observation.clear();
         }

@@ -1,0 +1,8 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs');
+const supervisor=fs.readFileSync('src/bin/host_supervisor.rs','utf8');
+const stream=fs.readFileSync('src/api/stream.rs','utf8');
+function between(source,a,b,from=0){const x=source.indexOf(a,from),y=source.indexOf(b,x+a.length);assert.ok(x>=0&&y>x,`${a}->${b}`);return source.slice(x,y)}
+test('service startup keeps daemon and web authority under LocalSystem',()=>{const fn=between(supervisor,'fn run_service_main() -> Result<()> {','#[cfg(windows)]\r\nfn service_watchdog_tick');const activation=between(fn,'if activation_allows_runtime','} else {');assert.match(activation,/ensure_daemon_running\(&paths\)/);assert.match(activation,/request_daemon_operation\(&paths, DaemonCommandKind::StartBundle\)/);assert.doesNotMatch(activation,/ensure_user_session_daemon_running/);assert.doesNotMatch(activation,/request_user_daemon_operation/)});
+test('watchdog missing-daemon branch uses machine daemon',()=>{const fn=between(supervisor,'fn service_watchdog_tick(', 'fn watchdog_recovery_allowed');const branch=between(fn,'if !daemon_is_running(paths) {','let mut state = read_state(paths)');assert.match(branch,/ensure_daemon_running\(paths\)/);assert.match(branch,/request_daemon_operation\(paths, DaemonCommandKind::StartBundle\)/);assert.doesNotMatch(branch,/request_user_daemon_operation/)});
+test('display helpers still relay into active interactive session',()=>{assert.match(stream,/run_helper_in_active_user_session_blocking/);assert.match(stream,/WTSQueryUserToken/);assert.match(stream,/CreateProcessAsUserW/)});
