@@ -25,6 +25,9 @@ internal static class UniversalNodeFinalizer
         // or guess whether an active/settling rental is safe to modify.
         try
         {
+            // Universal account/ACL preparation is intentionally non-activating:
+            // existing operator stays logged in; new role accounts remain disabled.
+            Run(helper, ["--provision-universal-windows-roles"], sentinelRoot);
             Run(helper, ["--pin-shared-gaming-desktop"], sentinelRoot);
             Run(helper, ["--install-runtime-broker-deferred", sentinelRoot], sentinelRoot);
             Run(powershell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", pairing, "-BundleRoot", bundleRoot], bundleRoot);
