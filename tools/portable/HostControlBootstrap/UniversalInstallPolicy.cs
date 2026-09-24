@@ -14,6 +14,14 @@ internal static class UniversalInstallPolicy
             throw new InvalidOperationException("EXISTING_NODE_IDENTITY: reinstall/repair must preserve Node identity. Decommission through the control plane before fresh installation.");
     }
 
+    internal static bool AcceptActiveDesktop(string? sharedSid,string? activeSid,string? renterSid,string? operatorSid)
+    {
+        if(string.IsNullOrWhiteSpace(sharedSid)||sharedSid!=activeSid)return false;
+        if(renterSid is null&&operatorSid is null)return true;
+        return !string.IsNullOrWhiteSpace(renterSid)&&!string.IsNullOrWhiteSpace(operatorSid)
+            && renterSid!=operatorSid&&(sharedSid==renterSid||sharedSid==operatorSid);
+    }
+
     internal static bool IsActivated(JsonObject? state)
     {
         if (state is null || !string.Equals((string?)state["ActivationState"], "activated", StringComparison.OrdinalIgnoreCase)) return false;

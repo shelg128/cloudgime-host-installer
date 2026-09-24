@@ -111,7 +111,9 @@ internal static class Program
 
     private static int VerifyRentalIdle()
     {
-        UniversalMachineBoundary.RequireAdminConsole();
+        // This read-only maintenance probe supports an elevated operator over
+        // SSH as well as the local console. RequireNoRentalActivity checks the
+        // administrator and delegates profile inspection to the pinned desktop.
         UniversalMachineBoundary.RequireNoRentalActivity(checkProcesses: false);
         return 0;
     }

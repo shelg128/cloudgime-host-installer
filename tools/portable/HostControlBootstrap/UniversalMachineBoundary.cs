@@ -45,6 +45,8 @@ internal static class UniversalMachineBoundary
 
     internal static void RequireNoRentalActivity(bool checkProcesses = true)
     {
+        using var caller=WindowsIdentity.GetCurrent();
+        if(!caller.IsSystem&&!new WindowsPrincipal(caller).IsInRole(WindowsBuiltInRole.Administrator))throw new UnauthorizedAccessException("ADMIN_REQUIRED");
         // Install/upgrade may own and restart Host services, but never a live rental or Sentinel gate.
         foreach (var name in checkProcesses ? new[] { "SentinelNodeBroker", "Sentinel Launcher", "SentinelHelper", "streamer" } : Array.Empty<string>())
             foreach (var p in Process.GetProcessesByName(name))
@@ -55,21 +57,18 @@ internal static class UniversalMachineBoundary
         {
             RequireProtected(pin);
             using var policy = JsonDocument.Parse(File.ReadAllBytes(pin));
-            var operatorSid = policy.RootElement.GetProperty("desktopUserSid").GetString();
-            var accepted = new HashSet<string>(StringComparer.Ordinal) { operatorSid ?? string.Empty };
+            var sharedSid = policy.RootElement.GetProperty("desktopUserSid").GetString();
+            string? renterSid = null, recordedOperator = null;
             var dedicated = Path.Combine(ProvisioningRoot, "rental-desktop.identity.json");
             if (File.Exists(dedicated))
             {
                 RequireProtected(dedicated);
                 using var renter = JsonDocument.Parse(File.ReadAllBytes(dedicated));
-                var renterSid = renter.RootElement.GetProperty("rentalUserSid").GetString();
-                var recordedOperator = renter.RootElement.GetProperty("operatorUserSid").GetString();
-                if (recordedOperator != operatorSid || string.IsNullOrWhiteSpace(renterSid))
-                    throw new InvalidOperationException("DESKTOP_POLICY_BINDING_INVALID");
-                accepted.Add(renterSid);
+                renterSid = renter.RootElement.GetProperty("rentalUserSid").GetString();
+                recordedOperator = renter.RootElement.GetProperty("operatorUserSid").GetString();
             }
             var activeSid = ActiveConsoleUserSid();
-            if (!accepted.Contains(activeSid))
+            if (!UniversalInstallPolicy.AcceptActiveDesktop(sharedSid,activeSid,renterSid,recordedOperator))
                 throw new InvalidOperationException("PINNED_DESKTOP_CONSOLE_REQUIRED");
             VerifyActiveDesktopIdle(activeSid);
         }
@@ -91,18 +90,17 @@ internal static class UniversalMachineBoundary
         var pin = Path.Combine(ProvisioningRoot, "shared-gaming-desktop.identity.json");
         RequireProtected(pin);
         using var shared = JsonDocument.Parse(File.ReadAllBytes(pin));
-        var accepted = new HashSet<string>(StringComparer.Ordinal)
-            { shared.RootElement.GetProperty("desktopUserSid").GetString() ?? string.Empty };
+        var sharedSid = shared.RootElement.GetProperty("desktopUserSid").GetString();
+        string? renterSid = null, recordedOperator = null;
         var dedicated = Path.Combine(ProvisioningRoot, "rental-desktop.identity.json");
         if (File.Exists(dedicated))
         {
             RequireProtected(dedicated);
             using var renter = JsonDocument.Parse(File.ReadAllBytes(dedicated));
-            if (renter.RootElement.GetProperty("operatorUserSid").GetString() != accepted.First())
-                throw new InvalidOperationException("DESKTOP_POLICY_BINDING_INVALID");
-            accepted.Add(renter.RootElement.GetProperty("rentalUserSid").GetString() ?? string.Empty);
+            renterSid = renter.RootElement.GetProperty("rentalUserSid").GetString();
+            recordedOperator = renter.RootElement.GetProperty("operatorUserSid").GetString();
         }
-        if (!accepted.Contains(current.User.Value))
+        if (!UniversalInstallPolicy.AcceptActiveDesktop(sharedSid,current.User.Value,renterSid,recordedOperator))
             throw new InvalidOperationException("ACTIVE_DESKTOP_AGENT_SID_INVALID");
         RequireCurrentProfileIdle();
         return 0;
@@ -151,15 +149,23 @@ internal static class UniversalMachineBoundary
     }
     private static void VerifyActiveDesktopIdle(string activeSid)
     {
-        var executable=Environment.ProcessPath??throw new InvalidOperationException("BOOTSTRAP_PATH_REQUIRED");RequireProtected(executable);
-        var task="CloudGime-UpgradeIdleProbe-"+Guid.NewGuid().ToString("N");
-        var script="""
+        var source=Environment.ProcessPath??throw new InvalidOperationException("BOOTSTRAP_PATH_REQUIRED");
+        var stage=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),"CloudGime","UpgradeIdleProbe",Guid.NewGuid().ToString("N"));
+        var executable=Path.Combine(stage,"cloudgime-host-bootstrap.exe");var task="CloudGime-UpgradeIdleProbe-"+Guid.NewGuid().ToString("N");
+        try
+        {
+            var admins=new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid,null);var system=new SecurityIdentifier(WellKnownSidType.LocalSystemSid,null);var users=new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid,null);
+            var acl=new DirectorySecurity();acl.SetAccessRuleProtection(true,false);acl.SetOwner(admins);
+            foreach(var sid in new[]{admins,system})acl.AddAccessRule(new FileSystemAccessRule(sid,FileSystemRights.FullControl,InheritanceFlags.ContainerInherit|InheritanceFlags.ObjectInherit,PropagationFlags.None,AccessControlType.Allow));
+            acl.AddAccessRule(new FileSystemAccessRule(users,FileSystemRights.ReadAndExecute,InheritanceFlags.ContainerInherit|InheritanceFlags.ObjectInherit,PropagationFlags.None,AccessControlType.Allow));
+            new DirectoryInfo(stage).Create(acl);File.Copy(source,executable,false);RequireProtected(stage,true);RequireProtected(executable);
+            var script="""
 $ErrorActionPreference='Stop';$name='__TASK__'
 try{$a=New-ScheduledTaskAction -Execute '__EXECUTABLE__' -Argument 'verify-active-desktop-idle --silent';$p=New-ScheduledTaskPrincipal -UserId '__SID__' -LogonType Interactive -RunLevel Limited;Register-ScheduledTask $name -Action $a -Principal $p -Settings (New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds 45))|Out-Null;Start-ScheduledTask $name;$end=[DateTime]::UtcNow.AddSeconds(60);do{$s=Get-ScheduledTask $name;$i=Get-ScheduledTaskInfo $name;if($i.LastRunTime.Year-gt2000-and$s.State-ne'Running'-and$i.LastTaskResult-notin@(267009,267011)){if($i.LastTaskResult-ne0){throw 'ACTIVE_DESKTOP_IDLE_REJECTED'};exit 0};Start-Sleep -Milliseconds 250}while([DateTime]::UtcNow-lt$end);throw 'ACTIVE_DESKTOP_IDLE_TIMEOUT'}finally{Stop-ScheduledTask $name -ErrorAction SilentlyContinue;Unregister-ScheduledTask $name -Confirm:$false -ErrorAction SilentlyContinue}
-""".Replace("__TASK__",task,StringComparison.Ordinal)
-    .Replace("__EXECUTABLE__",executable.Replace("'","''",StringComparison.Ordinal),StringComparison.Ordinal)
-    .Replace("__SID__",activeSid,StringComparison.Ordinal);
-        Run(Path.Combine(Environment.SystemDirectory,"WindowsPowerShell","v1.0","powershell.exe"),["-NoLogo","-NoProfile","-NonInteractive","-EncodedCommand",Convert.ToBase64String(Encoding.Unicode.GetBytes(script))],Path.GetDirectoryName(executable)!);
+""".Replace("__TASK__",task,StringComparison.Ordinal).Replace("__EXECUTABLE__",executable.Replace("'","''",StringComparison.Ordinal),StringComparison.Ordinal).Replace("__SID__",activeSid,StringComparison.Ordinal);
+            Run(Path.Combine(Environment.SystemDirectory,"WindowsPowerShell","v1.0","powershell.exe"),["-NoLogo","-NoProfile","-NonInteractive","-EncodedCommand",Convert.ToBase64String(Encoding.Unicode.GetBytes(script))],stage);
+        }
+        finally{try{if(Directory.Exists(stage))Directory.Delete(stage,true);}catch{}}
     }
     private static string ActiveConsoleUserSid()
     {

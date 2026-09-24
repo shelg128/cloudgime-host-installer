@@ -10,6 +10,12 @@ Throws(() => UniversalInstallPolicy.CheckReset(true, true, false), "EXISTING_NOD
 Throws(() => UniversalInstallPolicy.CheckReset(true, false, true), "EXISTING_NODE_IDENTITY");
 UniversalInstallPolicy.CheckReset(true, false, false);
 UniversalInstallPolicy.CheckReset(false, true, true);
+Require(UniversalInstallPolicy.AcceptActiveDesktop("operator","operator",null,null),"LEGACY_OPERATOR_DESKTOP_REJECTED");
+Require(UniversalInstallPolicy.AcceptActiveDesktop("renter","renter","renter","operator"),"DEDICATED_RENTER_DESKTOP_REJECTED");
+Require(UniversalInstallPolicy.AcceptActiveDesktop("operator","operator","renter","operator"),"SHARED_OPERATOR_DESKTOP_REJECTED");
+Require(!UniversalInstallPolicy.AcceptActiveDesktop("operator","renter","renter","operator"),"ACTIVE_SID_MISMATCH_ACCEPTED");
+Require(!UniversalInstallPolicy.AcceptActiveDesktop("other","other","renter","operator"),"UNBOUND_DESKTOP_ACCEPTED");
+Require(!UniversalInstallPolicy.AcceptActiveDesktop("renter","renter","renter","renter"),"SAME_ROLE_SID_ACCEPTED");
 Require(UniversalInstallPolicy.Preserve("provisioning/host_app.credential.dpapi"), "PROVISIONING_NOT_PRESERVED");
 Require(UniversalInstallPolicy.Preserve("keeper-tunnel/data/cloudrental.env"), "TUNNEL_NOT_PRESERVED");
 UniversalBundleContract.RequireWindowsExecutable(Environment.ProcessPath ?? throw new InvalidOperationException("TEST_EXE_MISSING"));
