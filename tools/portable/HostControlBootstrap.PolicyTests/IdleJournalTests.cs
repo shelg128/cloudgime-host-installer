@@ -27,7 +27,12 @@ internal static class IdleJournalTests
             corrupt[0]=(byte)'x';Check(!ElectronIdleJournal.IsIdle(corrupt,key),"FORMAT_ACCEPTED");
             Check(!ElectronIdleJournal.IsIdle(idle,new byte[32]),"WRONG_KEY_ACCEPTED");
             Check(!ElectronIdleJournal.IsIdle([],key),"EMPTY_ACCEPTED");
-            return 12;
+            var done=Encrypt("{\"stage\":\"DONE\",\"command\":{\"operationId\":\"fixture\"}}");
+            Check(ElectronIdleJournal.IsCleanupDone(done,key),"VALID_DONE_REJECTED");
+            foreach(var stage in new[]{"STARTED","LOCAL_PROOF","RECEIPT_ACCEPTED","LOCAL_IDLE"})
+                Check(!ElectronIdleJournal.IsCleanupDone(Encrypt("{\"stage\":\""+stage+"\"}"),key),"UNFINISHED_CLEANUP_ACCEPTED");
+            var badDone=(byte[])done.Clone();badDone[^1]^=1;Check(!ElectronIdleJournal.IsCleanupDone(badDone,key),"CORRUPT_DONE_ACCEPTED");
+            return 18;
         }
         finally {CryptographicOperations.ZeroMemory(key);}
     }

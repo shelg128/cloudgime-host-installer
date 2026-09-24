@@ -55,10 +55,61 @@ internal static class UniversalMachineBoundary
         {
             RequireProtected(pin);
             using var policy = JsonDocument.Parse(File.ReadAllBytes(pin));
-            using var current = WindowsIdentity.GetCurrent();
-            if (current.User?.Value != policy.RootElement.GetProperty("desktopUserSid").GetString())
-                throw new InvalidOperationException("PINNED_DESKTOP_OPERATOR_REQUIRED");
+            var operatorSid = policy.RootElement.GetProperty("desktopUserSid").GetString();
+            var accepted = new HashSet<string>(StringComparer.Ordinal) { operatorSid ?? string.Empty };
+            var dedicated = Path.Combine(ProvisioningRoot, "rental-desktop.identity.json");
+            if (File.Exists(dedicated))
+            {
+                RequireProtected(dedicated);
+                using var renter = JsonDocument.Parse(File.ReadAllBytes(dedicated));
+                var renterSid = renter.RootElement.GetProperty("rentalUserSid").GetString();
+                var recordedOperator = renter.RootElement.GetProperty("operatorUserSid").GetString();
+                if (recordedOperator != operatorSid || string.IsNullOrWhiteSpace(renterSid))
+                    throw new InvalidOperationException("DESKTOP_POLICY_BINDING_INVALID");
+                accepted.Add(renterSid);
+            }
+            var activeSid = ActiveConsoleUserSid();
+            if (!accepted.Contains(activeSid))
+                throw new InvalidOperationException("PINNED_DESKTOP_CONSOLE_REQUIRED");
+            VerifyActiveDesktopIdle(activeSid);
         }
+        else
+        {
+            // Legacy installs without a machine desktop pin may inspect only the
+            // current caller profile. Provisioned Nodes always use the two-token path.
+            RequireCurrentProfileIdle();
+        }
+    }
+
+    internal static int RequireActiveDesktopIdleAgent()
+    {
+        using var current = WindowsIdentity.GetCurrent();
+        var active = WTSGetActiveConsoleSessionId();
+        if (current.IsSystem || current.User is null || Process.GetCurrentProcess().SessionId <= 0
+            || active == uint.MaxValue || active != (uint)Process.GetCurrentProcess().SessionId)
+            throw new InvalidOperationException("ACTIVE_DESKTOP_AGENT_REQUIRED");
+        var pin = Path.Combine(ProvisioningRoot, "shared-gaming-desktop.identity.json");
+        RequireProtected(pin);
+        using var shared = JsonDocument.Parse(File.ReadAllBytes(pin));
+        var accepted = new HashSet<string>(StringComparer.Ordinal)
+            { shared.RootElement.GetProperty("desktopUserSid").GetString() ?? string.Empty };
+        var dedicated = Path.Combine(ProvisioningRoot, "rental-desktop.identity.json");
+        if (File.Exists(dedicated))
+        {
+            RequireProtected(dedicated);
+            using var renter = JsonDocument.Parse(File.ReadAllBytes(dedicated));
+            if (renter.RootElement.GetProperty("operatorUserSid").GetString() != accepted.First())
+                throw new InvalidOperationException("DESKTOP_POLICY_BINDING_INVALID");
+            accepted.Add(renter.RootElement.GetProperty("rentalUserSid").GetString() ?? string.Empty);
+        }
+        if (!accepted.Contains(current.User.Value))
+            throw new InvalidOperationException("ACTIVE_DESKTOP_AGENT_SID_INVALID");
+        RequireCurrentProfileIdle();
+        return 0;
+    }
+
+    private static void RequireCurrentProfileIdle()
+    {
         var session = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SentinelLauncher", "state", "session.json");
         if (File.Exists(session))
         {
@@ -68,30 +119,61 @@ internal static class UniversalMachineBoundary
                 if (p.Value.ValueKind != JsonValueKind.Null && !(p.Value.ValueKind == JsonValueKind.String && p.Value.GetString() == ""))
                     throw new InvalidOperationException("LOCAL_SESSION_OR_CLEANUP_PENDING");
         }
-        // Encrypted journals cannot be guessed/replaced here. Only the Sentinel owner may retire them.
         var userData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "sentinel-gaming-launcher");
+        var localState = Path.Combine(userData, "Local State");
         var journal = Path.Combine(userData, "renter-operation.dpapi");
-        if (File.Exists(journal) && !IsIdleElectronJournal(journal, Path.Combine(userData, "Local State")))
+        if (File.Exists(journal) && !IsIdleElectronJournal(journal, localState))
             throw new InvalidOperationException("EXISTING_RENTER_JOURNAL: use Sentinel maintenance, not installation.");
+        var cleanup = Path.Combine(userData, "cleanup-operation.dpapi");
+        if (File.Exists(cleanup) && !IsDoneElectronCleanup(cleanup, localState))
+            throw new InvalidOperationException("EXISTING_CLEANUP_OUTBOX: use Sentinel maintenance, not installation.");
     }
 
+    private static bool IsDoneElectronCleanup(string outboxPath, string localStatePath)
+    {
+        try { var (encrypted,key)=ReadElectronState(outboxPath,localStatePath,128*1024);try{return ElectronIdleJournal.IsCleanupDone(encrypted,key);}finally{CryptographicOperations.ZeroMemory(encrypted);CryptographicOperations.ZeroMemory(key);} }
+        catch{return false;}
+    }
     private static bool IsIdleElectronJournal(string journalPath, string localStatePath)
     {
-        try
+        try { var (encrypted,key)=ReadElectronState(journalPath,localStatePath,64*1024);try{return ElectronIdleJournal.IsIdle(encrypted,key);}finally{CryptographicOperations.ZeroMemory(encrypted);CryptographicOperations.ZeroMemory(key);} }
+        catch{return false;}
+    }
+    private static (byte[] Encrypted,byte[] Key) ReadElectronState(string encryptedPath,string localStatePath,int maxBytes)
+    {
+        UniversalBundleContract.RejectReparse(encryptedPath);UniversalBundleContract.RejectReparse(localStatePath);
+        if(new FileInfo(encryptedPath).Length>maxBytes||new FileInfo(localStatePath).Length>4*1024*1024)throw new InvalidDataException("ELECTRON_STATE_SIZE_INVALID");
+        var encrypted=File.ReadAllBytes(encryptedPath);using var state=JsonDocument.Parse(File.ReadAllBytes(localStatePath));
+        var wrapped=Convert.FromBase64String(state.RootElement.GetProperty("os_crypt").GetProperty("encrypted_key").GetString()!);
+        if(wrapped.Length<=5||!wrapped.AsSpan(0,5).SequenceEqual("DPAPI"u8))throw new InvalidDataException("ELECTRON_KEY_INVALID");
+        var protectedKey=wrapped.AsSpan(5).ToArray();try{return(encrypted,ProtectedData.Unprotect(protectedKey,null,DataProtectionScope.CurrentUser));}
+        finally{CryptographicOperations.ZeroMemory(protectedKey);CryptographicOperations.ZeroMemory(wrapped);}
+    }
+    private static void VerifyActiveDesktopIdle(string activeSid)
+    {
+        var executable=Environment.ProcessPath??throw new InvalidOperationException("BOOTSTRAP_PATH_REQUIRED");RequireProtected(executable);
+        var task="CloudGime-UpgradeIdleProbe-"+Guid.NewGuid().ToString("N");
+        var script="""
+$ErrorActionPreference='Stop';$name='__TASK__'
+try{$a=New-ScheduledTaskAction -Execute '__EXECUTABLE__' -Argument 'verify-active-desktop-idle --silent';$p=New-ScheduledTaskPrincipal -UserId '__SID__' -LogonType Interactive -RunLevel Limited;Register-ScheduledTask $name -Action $a -Principal $p -Settings (New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds 45))|Out-Null;Start-ScheduledTask $name;$end=[DateTime]::UtcNow.AddSeconds(60);do{$s=Get-ScheduledTask $name;$i=Get-ScheduledTaskInfo $name;if($i.LastRunTime.Year-gt2000-and$s.State-ne'Running'-and$i.LastTaskResult-notin@(267009,267011)){if($i.LastTaskResult-ne0){throw 'ACTIVE_DESKTOP_IDLE_REJECTED'};exit 0};Start-Sleep -Milliseconds 250}while([DateTime]::UtcNow-lt$end);throw 'ACTIVE_DESKTOP_IDLE_TIMEOUT'}finally{Stop-ScheduledTask $name -ErrorAction SilentlyContinue;Unregister-ScheduledTask $name -Confirm:$false -ErrorAction SilentlyContinue}
+""".Replace("__TASK__",task,StringComparison.Ordinal)
+    .Replace("__EXECUTABLE__",executable.Replace("'","''",StringComparison.Ordinal),StringComparison.Ordinal)
+    .Replace("__SID__",activeSid,StringComparison.Ordinal);
+        Run(Path.Combine(Environment.SystemDirectory,"WindowsPowerShell","v1.0","powershell.exe"),["-NoLogo","-NoProfile","-NonInteractive","-EncodedCommand",Convert.ToBase64String(Encoding.Unicode.GetBytes(script))],Path.GetDirectoryName(executable)!);
+    }
+    private static string ActiveConsoleUserSid()
+    {
+        var active=WTSGetActiveConsoleSessionId();if(active==uint.MaxValue||active==0)throw new InvalidOperationException("ACTIVE_CONSOLE_REQUIRED");
+        string Query(int info)
         {
-            UniversalBundleContract.RejectReparse(journalPath);
-            UniversalBundleContract.RejectReparse(localStatePath);
-            if (new FileInfo(journalPath).Length > 64 * 1024 || new FileInfo(localStatePath).Length > 4 * 1024 * 1024) return false;
-            var journal = File.ReadAllBytes(journalPath);
-            using var state = JsonDocument.Parse(File.ReadAllBytes(localStatePath));
-            var wrapped = Convert.FromBase64String(state.RootElement.GetProperty("os_crypt").GetProperty("encrypted_key").GetString()!);
-            if (wrapped.Length <= 5 || !wrapped.AsSpan(0, 5).SequenceEqual("DPAPI"u8)) return false;
-            var encryptedKey = wrapped.AsSpan(5).ToArray();
-            var key = ProtectedData.Unprotect(encryptedKey, null, DataProtectionScope.CurrentUser);
-            try { return ElectronIdleJournal.IsIdle(journal, key); }
-            finally { CryptographicOperations.ZeroMemory(key); CryptographicOperations.ZeroMemory(encryptedKey); }
+            if(!WTSQuerySessionInformationW(IntPtr.Zero,active,info,out var buffer,out var bytes)||buffer==IntPtr.Zero)
+                throw new InvalidOperationException("ACTIVE_CONSOLE_QUERY_FAILED");
+            try{return System.Runtime.InteropServices.Marshal.PtrToStringUni(buffer)??string.Empty;}finally{WTSFreeMemory(buffer);}
         }
-        catch { return false; }
+        var user=Query(5);var domain=Query(7);if(string.IsNullOrWhiteSpace(user)||string.IsNullOrWhiteSpace(domain))throw new InvalidOperationException("ACTIVE_CONSOLE_ACCOUNT_MISSING");
+        var sid=((SecurityIdentifier)new NTAccount(domain,user).Translate(typeof(SecurityIdentifier))).Value;
+        if(WTSGetActiveConsoleSessionId()!=active)throw new InvalidOperationException("ACTIVE_CONSOLE_CHANGED");
+        return sid;
     }
 
     internal static void RequireIdle(string bundleRoot)
@@ -115,5 +197,9 @@ internal static class UniversalMachineBoundary
         if (!Task.WaitAll([stdout, stderr], 10000)) throw new TimeoutException("FINALIZE_PIPE_TIMEOUT");
         if (child.ExitCode != 0) throw new InvalidOperationException("FINALIZE_PROCESS_FAILED: " + Path.GetFileName(file) + " exit=" + child.ExitCode);
     }
+    [System.Runtime.InteropServices.DllImport("wtsapi32.dll",CharSet=System.Runtime.InteropServices.CharSet.Unicode,ExactSpelling=true,SetLastError=true)]
+    [return:System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool WTSQuerySessionInformationW(IntPtr server,uint sessionId,int info,out IntPtr buffer,out uint bytes);
+    [System.Runtime.InteropServices.DllImport("wtsapi32.dll")] private static extern void WTSFreeMemory(IntPtr buffer);
     [System.Runtime.InteropServices.DllImport("kernel32.dll")] private static extern uint WTSGetActiveConsoleSessionId();
 }

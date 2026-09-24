@@ -93,6 +93,7 @@ internal static class Program
                 NormalizeFullPath(parsed.GetValue("sentinel-root") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Sentinel Launcher")),
                 parsed.HasFlag("enable-autologon")),
             "validate-universal-bundle" => ValidateUniversalBundle(parsed),
+            "verify-active-desktop-idle" => UniversalMachineBoundary.RequireActiveDesktopIdleAgent(),
             "verify-rental-idle" => VerifyRentalIdle(),
             "validate-universal-install" => ValidateUniversalInstall(parsed),
             "prepare-universal-uninstall" => UniversalUninstallPreparation.Run(
