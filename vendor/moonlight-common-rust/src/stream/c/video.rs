@@ -29,6 +29,9 @@ use crate::stream::{
     },
 };
 
+#[path = "presentation_time.rs"]
+mod presentation_time;
+
 static GLOBAL_VIDEO_DECODER: Mutex<Option<Box<dyn VideoDecoder + Send + 'static>>> =
     Mutex::new(None);
 
@@ -135,7 +138,9 @@ unsafe fn convert_decode_unit<'a>(
                 (raw.frameHostProcessingLatency / 10) as u64,
             ))
         },
-        timestamp: Duration::from_nanos((raw.presentationTimeUs as u64 * 1_000_000_000) / 90_000),
+        // Limelight.h defines presentationTimeUs as microseconds, NOT RTP ticks.
+        // RTP 90 kHz conversion happens once later, at the WebRTC packetizer.
+        timestamp: presentation_time::from_microseconds(raw.presentationTimeUs),
         color_space: ColorSpace::from_u8(raw.colorspace).expect("valid Colorspace"),
         hdr_active: raw.hdrActive,
         buffers,
