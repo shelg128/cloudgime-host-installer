@@ -4,7 +4,11 @@ version.workspace = true
 edition = "2024"
 license.workspace = true
 
+[features]
+cloudgime-datagram-redundancy-qa = ["webrtc-util/cloudgime-datagram-redundancy-qa"]
+
 [dependencies]
+webrtc-util = { version = "=0.17.1", default-features = false }
 moonlight-common = { workspace = true }
 common = { workspace = true }
 

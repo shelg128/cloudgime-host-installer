@@ -3446,6 +3446,7 @@ dependencies = [
  "tracing-log",
  "tracing-subscriber",
  "webrtc",
+ "webrtc-util",
  "windows",
  "windows-sys 0.61.2",
 ]

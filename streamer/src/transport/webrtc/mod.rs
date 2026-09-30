@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod datagram_redundancy_tests;
+
 use std::{
     collections::VecDeque,
     future::ready,
