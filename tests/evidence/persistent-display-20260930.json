@@ -1,0 +1,102 @@
+{
+  "codeCommit": "7ca4b41",
+  "at": "2026-09-30T04:30:11.383Z",
+  "scope": "Physical Android RMX5367 / Windows managed MTT VDD",
+  "visualContent": "PASS",
+  "run": "capture-resize-1790741698797",
+  "registrationCatalogStable": true,
+  "stages": [
+    {
+      "name": "portrait-full-native-frame",
+      "status": "PASS",
+      "decoded": [
+        720,
+        1570
+      ],
+      "viewport": [
+        720,
+        1570
+      ],
+      "scale": [
+        1,
+        1
+      ]
+    },
+    {
+      "name": "landscape-reuses-registration",
+      "status": "PASS",
+      "decoded": [
+        1570,
+        720
+      ],
+      "viewport": [
+        1570,
+        720
+      ],
+      "scale": [
+        1,
+        1
+      ]
+    },
+    {
+      "name": "portrait-return-reuses-display",
+      "status": "PASS",
+      "decoded": [
+        720,
+        1570
+      ],
+      "viewport": [
+        720,
+        1570
+      ],
+      "scale": [
+        1,
+        1
+      ]
+    }
+  ],
+  "edges": {
+    "profile-first-portrait": {
+      "width": 720,
+      "height": 1570,
+      "coverage": {
+        "left": 1,
+        "right": 0.8752515090543259,
+        "bottom": 1,
+        "top": 1
+      },
+      "pass": true,
+      "scope": "four colored desktop edges at 8px from screen boundary, partial controller overlay allowed"
+    },
+    "profile-landscape": {
+      "width": 1570,
+      "height": 720,
+      "coverage": {
+        "left": 1,
+        "right": 0.794392523364486,
+        "bottom": 0.9637826961770624,
+        "top": 1
+      },
+      "pass": true,
+      "scope": "four colored desktop edges at 8px from screen boundary, partial controller overlay allowed"
+    },
+    "profile-return-portrait": {
+      "width": 720,
+      "height": 1570,
+      "coverage": {
+        "left": 1,
+        "right": 0.8752515090543259,
+        "bottom": 1,
+        "top": 1
+      },
+      "pass": true,
+      "scope": "four colored desktop edges at 8px from screen boundary, partial controller overlay allowed"
+    }
+  },
+  "limitations": [
+    "Only this physical phone/GPU validated",
+    "Pacing not accepted",
+    "Production native-stop not deployed",
+    "Fresh install/cold boot not tested"
+  ]
+}

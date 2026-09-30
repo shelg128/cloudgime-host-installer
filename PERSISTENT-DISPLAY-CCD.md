@@ -16,7 +16,8 @@ The helper remains in the interactive standard-user session. The SYSTEM broker r
 - Ten new CCD planning/ABI/isolation tests PASS.
 - Three new packaging identity tests PASS.
 - Web-server, streamer and helper built successfully from this branch.
-- **Physical Android edge-to-edge content test is pending: phone locked.** Never count mode metadata, a desktop probe or successful compilation as visual acceptance. The earlier images containing landscape content inside portrait frames remain FAIL.
+- **Physical Android edge-to-edge content PASS:** `capture-resize-1790741698797`, source commit `7ca4b41`: actual desktop, decoded frame and viewport agree at 720x1570 -> 1570x720 -> 720x1570. All four colored desktop edges reach the viewport boundary. Screenshot pixel checks and direct visual review both pass; controller/menu overlays are intentional overlays, not empty padding. StarDeskServer PID 4044 stayed running throughout; no pause/reconfiguration was used.
+- The earlier images containing landscape content inside portrait frames remain FAIL; this new run supersedes their unresolved screen-content status, not their historical results.
 - Third-party remote apps have not been disabled or reconfigured.
 - Other existing acceptance results were not rerun. Full release remains blocked by the previously open pacing gate and production native-stop rollout.
 
@@ -26,5 +27,7 @@ The helper remains in the interactive standard-user session. The SYSTEM broker r
 ## Integration boundaries
 The release branch retains its pre-stream input-drop handling, ordered upstream shutdown, rental cleanup receipts and claim-cancel support. Primary-worktree unrelated changes are not imported wholesale.
 
-## Next targeted validation
-Unlock the authorized physical phone; use the candidate artifacts from this branch. Test only: actual desktop target at all four viewport edges in portrait, landscape and portrait return, with StarDeskServer active; no stretching/cropping and no black/white bars. Compare live desktop geometry as well as decoded dimensions and screenshot pixels. Record same rental/cleanup as setup/safety evidence, not as a rerun of the full regression suite. Do not promote a public installer before these gates pass.
+## Retained pilot and remaining work
+The exact visually tested candidate is retained on PC-02 in maintenance, with backup and hash verification. Deployment is a pilot of this universal source, not a PC-specific fix and not a public release. Helper SHA256 `d32d6d3520039c5d11404e1b85d90623a82dc00f037af376d140fa9de0061323`, web-server `8b4d66bc2faa85ecc6428dad1882c74256724b25b47565cbc410f353cb55b8ea`, streamer `af431737df7b84bf8b5994d49fcf17b35e9d9d47d5667650f75a2a51b4f97a2c`.
+
+Do not rerun the passed portrait/landscape/profile cases unless affected source changes. Residual FPS/jitter, public native-stop deployment and a full installer/cold-boot run remain separate open acceptance items. Edge-to-edge capture does not guarantee every game supports arbitrary aspect ratios or prevent an administrator application from intentionally replacing display topology. No claim of all GPUs/phones validated.
