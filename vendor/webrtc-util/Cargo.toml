@@ -28,6 +28,7 @@ license = "MIT/Apache-2.0"
 repository = "https://github.com/webrtc-rs/webrtc/tree/master/util"
 
 [features]
+cloudgime-scoped-direct-recovery = []
 # Diagnostic-only, off by default; no silent route changes.
 cloudgime-datagram-redundancy-qa = []
 buffer = []

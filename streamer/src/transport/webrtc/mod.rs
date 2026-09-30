@@ -77,6 +77,9 @@ use crate::{
 
 mod audio;
 mod sender;
+mod scoped_video_recovery;
+#[cfg(all(test,feature="cloudgime-scoped-direct-recovery"))]
+mod scoped_recovery_tests;
 mod video;
 
 const LOCAL_OFFER_DEBOUNCE_DELAY: Duration = Duration::from_millis(80);
@@ -172,6 +175,7 @@ fn should_allow_candidate_ip(ip: IpAddr, include_loopback_candidates: bool) -> b
 
 struct WebRtcInner {
     peer: Arc<RTCPeerConnection>,
+    recovery: Option<Arc<scoped_video_recovery::Recovery>>,
     event_sender: Sender<TransportEvent>,
     general_channel: Arc<RTCDataChannel>,
     client_general_channel: Mutex<Option<Arc<RTCDataChannel>>>,
@@ -190,6 +194,7 @@ struct WebRtcInner {
 
 pub async fn new(
     config: &WebRtcConfig,
+    recovery_grant: Option<&common::direct_recovery::DirectRecoveryGrant>,
     video_frame_queue_size: usize,
     audio_sample_queue_size: usize,
 ) -> Result<(WebRTCTransportSender, WebRTCTransportEvents), anyhow::Error> {
@@ -285,9 +290,11 @@ pub async fn new(
 
     let general_channel = peer.create_data_channel("general", None).await?;
 
+    let recovery=recovery_grant.and_then(|g| scoped_video_recovery::Recovery::new(Arc::downgrade(&peer),g));
     let runtime = Handle::current();
     let this_owned = Arc::new(WebRtcInner {
         peer: peer.clone(),
+        recovery: recovery.clone(),
         event_sender,
         general_channel: general_channel.clone(),
         client_general_channel: Mutex::new(None),
@@ -299,6 +306,7 @@ pub async fn new(
             runtime.clone(),
             Arc::downgrade(&peer),
             video_frame_queue_size,
+            recovery,
         )),
         audio: Mutex::new(WebRtcAudio::new(
             runtime,
@@ -467,8 +475,10 @@ impl WebRtcInner {
         debug!("[WebRTC] ICE connection state changed to {:?}", state);
     }
     async fn on_peer_connection_state_change(self: Arc<Self>, state: RTCPeerConnectionState) {
+        if state != RTCPeerConnectionState::Connected {if let Some(r)=&self.recovery{r.budget.suspend();}}
         #[allow(clippy::collapsible_if)]
         if matches!(state, RTCPeerConnectionState::Closed) {
+            if let Some(r)=&self.recovery {r.budget.revoke();}
             if let Err(err) = self.event_sender.send(TransportEvent::Closed).await {
                 warn!("Failed to send peer closed event to stream: {err:?}");
                 self.request_terminate().await;
@@ -1162,6 +1172,8 @@ pub struct WebRTCTransportSender {
     inner: Arc<WebRtcInner>,
 }
 
+impl Drop for WebRTCTransportSender{fn drop(&mut self){if let Some(r)=&self.inner.recovery{r.budget.revoke();}}}
+
 #[async_trait]
 impl TransportSender for WebRTCTransportSender {
     async fn setup_video(&self, setup: VideoSetup) -> i32 {
@@ -1211,6 +1223,7 @@ impl TransportSender for WebRTCTransportSender {
     }
 
     async fn close(&self) -> Result<(), TransportError> {
+        if let Some(r)=&self.inner.recovery {r.budget.revoke();}
         self.inner
             .peer
             .close()

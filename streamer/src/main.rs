@@ -572,6 +572,10 @@ mod video;
 
 #[tokio::main]
 async fn main() {
+    if std::env::args().nth(1).as_deref()==Some("--direct-recovery-contract") {
+        println!("{{\"schema\":1,\"contract\":\"cg-scoped-direct-recovery-v1\",\"component\":\"streamer\",\"scoped\":{},\"negotiatedVideo\":true,\"bandwidthBudget\":true,\"qaUnscoped\":{}}}",cfg!(feature="cloudgime-scoped-direct-recovery"),cfg!(feature="cloudgime-datagram-redundancy-qa"));
+        return;
+    }
     init_rustls_crypto_provider();
     restore_windows_cursor_defaults();
 
@@ -2510,6 +2514,7 @@ impl StreamConnection {
 
                         let (sender, events) = match webrtc::new(
                             &self.config.webrtc,
+                            self.config.direct_recovery.as_ref(),
                             self.video_frame_queue_size,
                             self.audio_sample_queue_size,
                         )

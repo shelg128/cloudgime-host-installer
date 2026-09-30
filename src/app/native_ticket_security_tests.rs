@@ -1,6 +1,8 @@
 use super::*;
 #[path = "claim_revoke_tests.rs"]
 mod claim_revoke_tests;
+#[path = "recovery_ticket_tests.rs"]
+mod recovery_ticket_tests;
 
 async fn fixture() -> (App, PathBuf) {
     let root = std::env::temp_dir().join(format!("cg-native-auth-test-{}", Uuid::new_v4()));

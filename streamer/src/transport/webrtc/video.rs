@@ -80,11 +80,11 @@ pub struct WebRtcVideo {
 }
 
 impl WebRtcVideo {
-    pub fn new(runtime: Handle, peer: Weak<RTCPeerConnection>, frame_queue_size: usize) -> Self {
+    pub fn new(runtime: Handle, peer: Weak<RTCPeerConnection>, frame_queue_size: usize, recovery:Option<Arc<super::scoped_video_recovery::Recovery>>) -> Self {
         Self {
             clock_rate: 0,
             needs_idr: Default::default(),
-            sender: TrackLocalSender::new("video", runtime, peer, frame_queue_size),
+            sender: TrackLocalSender::new("video", runtime, peer, frame_queue_size).with_recovery(recovery),
             active_format: None,
             codec: None,
             supported_video_formats: SupportedVideoFormats::empty(),

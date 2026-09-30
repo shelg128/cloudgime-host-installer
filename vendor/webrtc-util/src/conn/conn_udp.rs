@@ -1,5 +1,8 @@
-use tokio::net::UdpSocket;
 #[cfg(feature = "cloudgime-datagram-redundancy-qa")]
+compile_error!("Unscoped QA datagram duplication is prohibited on the scoped recovery branch; use archived experiment bc18bf7 for evidence only.");
+
+use tokio::net::UdpSocket;
+#[cfg(all(feature = "cloudgime-datagram-redundancy-qa", not(feature = "cloudgime-scoped-direct-recovery")))]
 #[path = "protected_datagram.rs"]
 mod protected_datagram;
 
@@ -25,13 +28,22 @@ impl Conn for UdpSocket {
 
     async fn send_to(&self, buf: &[u8], target: SocketAddr) -> Result<usize> {
         let sent = self.send_to(buf, target).await?;
-        #[cfg(feature = "cloudgime-datagram-redundancy-qa")]
+        #[cfg(all(feature = "cloudgime-datagram-redundancy-qa", not(feature = "cloudgime-scoped-direct-recovery")))]
         if sent == buf.len() && protected_datagram::eligible(buf) {
             // Exact protected bytes, never invoke SRTP encryption twice. No
             // retry/wait if the socket is not currently writable.
             let copied = self.try_send_to(buf, target).is_ok_and(|n| n == buf.len());
             static STATS: std::sync::OnceLock<protected_datagram::Stats> = std::sync::OnceLock::new();
             if let Some(line) = STATS.get_or_init(Default::default).record(sent, copied) { log::info!("{line}"); }
+        }
+        #[cfg(feature = "cloudgime-scoped-direct-recovery")]
+        if sent == buf.len() {
+            if let Ok(local) = self.local_addr() {
+            if let Some((budget, cost)) = super::scoped_recovery::permit(buf, target, local.port()) {
+                let copied = self.try_send_to(buf, target).is_ok_and(|n| n == buf.len());
+                budget.result(cost, copied);
+            }
+            }
         }
         Ok(sent)
     }

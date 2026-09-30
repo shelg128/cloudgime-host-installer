@@ -249,6 +249,7 @@ pub struct AndroidNativeLaunchTokenRecord {
 
 #[derive(Debug, Clone)]
 pub struct AndroidNativeStreamTicketRecord {
+    pub selected_route: Option<common::direct_recovery::SelectedStreamRoute>,
     pub stream_ticket: String,
     pub authority_expires_at_unix_ms: Option<u64>,
     pub token_id: String,
@@ -975,10 +976,17 @@ impl App {
         Ok((record, stream_ticket))
     }
 
-    pub async fn issue_android_native_stream_ticket(
-        &self,
-        launch_record: &AndroidNativeLaunchTokenRecord,
-    ) -> Result<AndroidNativeStreamTicketRecord, AppError> {
+    pub async fn issue_android_native_stream_ticket(&self, launch_record:&AndroidNativeLaunchTokenRecord)->Result<AndroidNativeStreamTicketRecord,AppError>{
+        self.issue_android_native_stream_ticket_with_route(launch_record,None).await
+    }
+    pub async fn consume_android_native_launch_for_route(&self,launch_token:&str,route:Option<&str>)->Result<(AndroidNativeLaunchTokenRecord,AndroidNativeStreamTicketRecord),AppError>{
+        let selected_route=common::direct_recovery::SelectedStreamRoute::parse(route);
+        if route.is_some()&&selected_route.is_none(){return Err(AppError::BadRequest)}
+        let record=self.consume_android_native_launch_token(launch_token).await?;
+        let ticket=self.issue_android_native_stream_ticket_with_route(&record,selected_route).await?;
+        Ok((record,ticket))
+    }
+    async fn issue_android_native_stream_ticket_with_route(&self,launch_record:&AndroidNativeLaunchTokenRecord,selected_route:Option<common::direct_recovery::SelectedStreamRoute>)->Result<AndroidNativeStreamTicketRecord,AppError>{
         const STREAM_TICKET_TTL_MS: u64 = 8 * 60 * 60 * 1000;
 
         let now = unix_time_ms_now();
@@ -987,6 +995,7 @@ impl App {
             .map_or(now + STREAM_TICKET_TTL_MS, |cap| cap.min(now + STREAM_TICKET_TTL_MS));
         if expires_at_unix_ms <= now { return Err(AppError::AndroidNativeStreamTicketExpired); }
         let record = AndroidNativeStreamTicketRecord {
+            selected_route,
             stream_ticket: stream_ticket.clone(),
             authority_expires_at_unix_ms: launch_record.stream_authority_expires_at_unix_ms,
             token_id: launch_record.token_id.clone(),
@@ -1250,6 +1259,7 @@ impl App {
         const STREAM_TICKET_TTL_MS: u64 = 8 * 60 * 60 * 1000;
         let refreshed_ticket = format!("mlnatstream_{}", Uuid::new_v4().to_simple());
         let refreshed_record = AndroidNativeStreamTicketRecord {
+            selected_route: source.selected_route,
             stream_ticket: refreshed_ticket.clone(),
             authority_expires_at_unix_ms: source.authority_expires_at_unix_ms,
             token_id: source.token_id,

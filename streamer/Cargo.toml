@@ -5,6 +5,8 @@ edition = "2024"
 license.workspace = true
 
 [features]
+default = ["cloudgime-scoped-direct-recovery"]
+cloudgime-scoped-direct-recovery = ["webrtc-util/cloudgime-scoped-direct-recovery"]
 cloudgime-datagram-redundancy-qa = ["webrtc-util/cloudgime-datagram-redundancy-qa"]
 
 [dependencies]

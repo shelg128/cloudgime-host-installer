@@ -25,6 +25,8 @@ use crate::{
 pub struct StreamerConfig {
     pub webrtc: WebRtcConfig,
     pub log_level: LevelFilter,
+    #[serde(default)]
+    pub direct_recovery: Option<crate::direct_recovery::DirectRecoveryGrant>,
 }
 
 #[allow(clippy::large_enum_variant)]

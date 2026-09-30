@@ -1,0 +1,23 @@
+#[path = "../../../../vendor/webrtc-util/src/conn/scoped_recovery.rs"]
+mod budget_unit_tests;
+use std::{sync::{Arc,atomic::{AtomicBool,Ordering}},time::Duration};
+use tokio::{net::UdpSocket,time::timeout};
+use webrtc::util::Conn;
+use webrtc_util::conn::scoped_recovery::{within,CopyScope,CopyBudget};
+fn packet()->Vec<u8>{let mut p=vec![0x55;100];p[0]=0x80;p[1]=120;p[2..4].copy_from_slice(&9u16.to_be_bytes());p[8..12].copy_from_slice(&12345u32.to_be_bytes());p}
+#[tokio::test]
+async fn scoped_socket_copy_requires_exact_write_and_unbind_revokes(){
+ let tx=UdpSocket::bind("127.0.0.1:0").await.unwrap();let rx=UdpSocket::bind("127.0.0.1:0").await.unwrap();let target=rx.local_addr().unwrap();let port=tx.local_addr().unwrap().port();let data=packet();let mut buffer=[0u8;1500];
+ Conn::send_to(&tx,&data,target).await.unwrap();let(n,_)=rx.recv_from(&mut buffer).await.unwrap();assert_eq!(&buffer[..n],data.as_slice());assert!(timeout(Duration::from_millis(20),rx.recv_from(&mut buffer)).await.is_err());
+ let budget=CopyBudget::new(Duration::from_secs(20),2000,1200).unwrap();budget.activate(Duration::from_secs(15));tokio::time::sleep(Duration::from_millis(20)).await;
+ let scope=CopyScope::new(target,port,12345,120,9,budget.clone()).unwrap();within(scope,Conn::send_to(&tx,&data,target)).await.unwrap();for _ in 0..2{let(n,_)=timeout(Duration::from_secs(1),rx.recv_from(&mut buffer)).await.unwrap().unwrap();assert_eq!(&buffer[..n],data.as_slice());}assert!(timeout(Duration::from_millis(20),rx.recv_from(&mut buffer)).await.is_err());assert_eq!(budget.snapshot().copies,1);
+ let live=Arc::new(AtomicBool::new(true));let scope=CopyScope::with_binding(target,port,12345,120,9,budget.clone(),live.clone()).unwrap();live.store(false,Ordering::Release);within(scope,Conn::send_to(&tx,&data,target)).await.unwrap();rx.recv_from(&mut buffer).await.unwrap();assert!(timeout(Duration::from_millis(20),rx.recv_from(&mut buffer)).await.is_err());assert_eq!(budget.snapshot().copies,1);
+ budget.revoke();let scope=CopyScope::new(target,port,12345,120,9,budget.clone()).unwrap();within(scope,Conn::send_to(&tx,&data,target)).await.unwrap();rx.recv_from(&mut buffer).await.unwrap();assert!(timeout(Duration::from_millis(20),rx.recv_from(&mut buffer)).await.is_err());
+}
+#[tokio::test]
+async fn separate_peer_budgets_and_cancelled_context_do_not_leak(){
+ let target="127.0.0.1:12345".parse().unwrap();let one=CopyBudget::new(Duration::from_secs(20),2000,1200).unwrap();let two=CopyBudget::new(Duration::from_secs(20),2000,1200).unwrap();one.activate(Duration::from_secs(15));tokio::time::sleep(Duration::from_millis(20)).await;
+ let data=packet();within(CopyScope::new(target,99,12345,120,9,one.clone()).unwrap(),async{assert!(webrtc_util::conn::scoped_recovery::permit(&data,target,99).is_some());}).await;
+ within(CopyScope::new(target,99,12345,120,9,two).unwrap(),async{assert!(webrtc_util::conn::scoped_recovery::permit(&data,target,99).is_none());}).await;
+ let scope=CopyScope::new(target,99,12345,120,9,one).unwrap();assert!(timeout(Duration::from_millis(2),within(scope,std::future::pending::<()>())).await.is_err());assert!(webrtc_util::conn::scoped_recovery::permit(&data,target,99).is_none());
+}

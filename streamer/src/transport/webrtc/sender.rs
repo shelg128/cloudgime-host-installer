@@ -42,6 +42,7 @@ use sender_queue::{FrameQueue, SenderWorkers, next_frame};
 #[path = "nack_probe.rs"]
 mod nack_probe;
 use nack_probe::NackProbe;
+use super::scoped_video_recovery::{Recovery,RecoveryTrack};
 
 const PLAYOUT_DELAY_URI: &str = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay";
 const VIDEO_PACKET_PACING_BATCH: usize = 8;
@@ -96,6 +97,7 @@ where
     track_sender: Option<Arc<webrtc::rtp_transceiver::rtp_sender::RTCRtpSender>>,
     sequence_number: Arc<Mutex<u16>>,
     nack_probe: Arc<Mutex<NackProbe>>,
+    recovery: Option<Arc<Recovery>>,
 }
 
 impl<Track> TrackLocalSender<Track>
@@ -117,8 +119,11 @@ where
             track_sender: None,
             sequence_number: Arc::new(Mutex::new(0)),
             nack_probe: Arc::new(Mutex::new(NackProbe::default())),
+            recovery: None,
         }
     }
+
+    pub fn with_recovery(mut self,recovery:Option<Arc<Recovery>>)->Self{self.recovery=recovery;self}
 
     pub async fn create_track(
         &mut self,
@@ -135,6 +140,7 @@ where
         self.queue.clear(true).await;
         track.set_sequence_counter(self.sequence_number.clone());
         track.set_nack_probe(self.nack_probe.clone());
+        track.set_recovery(self.recovery.clone());
         let track = Arc::new(track);
 
         let rtp_track = track.clone().track();
@@ -193,6 +199,7 @@ where
         // Before these packets are returned they are processed by interceptors. For things
         // like NACK this needs to be called.
         let nack_probe = self.nack_probe.clone();
+        let recovery = self.recovery.clone();
         let label = self.label;
         self.workers.push(self.runtime.spawn(async move {
             let mut rtcp_buf = vec![0u8; 1500];
@@ -207,6 +214,7 @@ where
                 }
                 if label == "video" && last_probe.elapsed() >= Duration::from_secs(5) {
                     let w = nack_probe.lock().await.take_window();
+                    if let Some(r) = &recovery {r.loss_window(w.sent.iter().sum(),w.first_nacks.iter().sum());}
                     info!("[Stream]: loss_bins sent={:?} first={:?} repeat={} unknown={} age_ms={}",w.sent,w.first_nacks,w.repeats,w.unknown,w.max_age_ms);
                     last_probe = Instant::now();
                 }
@@ -319,6 +327,7 @@ pub trait TrackLike: Send + Sync + 'static {
     // numbers on replacement. Static-sample tracks own their own packetizer.
     fn set_sequence_counter(&mut self, _counter: Arc<Mutex<u16>>) {}
     fn set_nack_probe(&mut self, _probe: Arc<Mutex<NackProbe>>) {}
+    fn set_recovery(&mut self,_recovery:Option<Arc<Recovery>>) {}
 
     fn write_with_extensions(
         &self,
@@ -354,6 +363,7 @@ pub struct SequencedTrackLocalStaticRTP {
     sequence_number: Arc<Mutex<u16>>,
     all_paused_logged: AtomicBool,
     nack_probe: Option<Arc<Mutex<NackProbe>>>,
+    recovery_track: Option<Arc<RecoveryTrack>>,
 }
 
 impl From<TrackLocalStaticRTP> for SequencedTrackLocalStaticRTP {
@@ -363,6 +373,7 @@ impl From<TrackLocalStaticRTP> for SequencedTrackLocalStaticRTP {
             sequence_number: Arc::new(Mutex::new(0)),
             all_paused_logged: AtomicBool::new(false),
             nack_probe: None,
+            recovery_track: None,
         }
     }
 }
@@ -380,6 +391,7 @@ impl TrackLike for SequencedTrackLocalStaticRTP {
         self.sequence_number = counter;
     }
     fn set_nack_probe(&mut self, probe: Arc<Mutex<NackProbe>>) { self.nack_probe = Some(probe); }
+    fn set_recovery(&mut self,recovery:Option<Arc<Recovery>>){if recovery.is_some(){self.recovery_track=Some(Arc::new(RecoveryTrack::new(self.track.clone(),recovery)));}}
 
     async fn write_with_extensions(
         &self,
@@ -420,9 +432,11 @@ impl TrackLike for SequencedTrackLocalStaticRTP {
             probe.lock().await.sent(sample.header.sequence_number, sample.payload.len(), Instant::now());
         }
 
+        let permission=if let Some(track)=&self.recovery_track {track.permission(sample.header.sequence_number).await}else{None};
+        let send=async {let send=self.track.write_rtp_with_extensions(&sample,extensions);if let Some(scope)=permission{webrtc_util::conn::scoped_recovery::within(scope,send).await}else{send.await}};
         let bytes_written = match tokio::time::timeout(
             RTP_WRITE_TIMEOUT,
-            self.track.write_rtp_with_extensions(&sample, extensions),
+            send,
         )
         .await
         {
@@ -446,7 +460,7 @@ impl TrackLike for SequencedTrackLocalStaticRTP {
     }
 
     fn track(self: Arc<Self>) -> Arc<dyn TrackLocal + Send + Sync + 'static> {
-        self.track.clone()
+        if let Some(track)=&self.recovery_track {track.clone()} else {self.track.clone()}
     }
 }
 

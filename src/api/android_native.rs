@@ -1552,7 +1552,7 @@ pub async fn post_android_native_consume_launch(
     Json(request): Json<PostAndroidNativeConsumeLaunchRequest>,
 ) -> Result<Json<PostAndroidNativeConsumeLaunchResponse>, AppError> {
     let (record, stream_ticket) = app
-        .consume_android_native_launch_token_with_stream_ticket(&request.launch_token)
+        .consume_android_native_launch_for_route(&request.launch_token,request.connection_route.as_deref())
         .await?;
     let transport_policy = build_transport_policy(
         &app,

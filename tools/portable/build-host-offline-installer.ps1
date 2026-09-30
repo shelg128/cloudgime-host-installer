@@ -336,6 +336,8 @@ if (-not [string]::IsNullOrWhiteSpace($KeeperTunnelProject)) {
 }
 
 Write-Host "[BUILD] Menyiapkan payload NSIS host..." -ForegroundColor Cyan
+& node (Join-Path $portableRoot 'verify-recovery-runtime.mjs') (Join-Path $BundleRoot 'moonlight\web-server.exe') (Join-Path $BundleRoot 'moonlight\streamer.exe') (Join-Path $BundleRoot 'moonlight\direct-recovery-contract.json')
+if ($LASTEXITCODE -ne 0) { throw 'Recovery runtime identity gate failed; rebuild both Host and streamer.' }
 & node (Join-Path $portableRoot 'verify-display-runtime.mjs') verify (Join-Path $BundleRoot 'moonlight\server\display-prepare-helper.exe') (Join-Path $portableRoot 'DisplayPrepareHelper')
 if ($LASTEXITCODE -ne 0) { throw 'Display runtime identity gate failed; rebuild the bundle.' }
 Invoke-Checked $preparePayloadCmd $prepareArgs

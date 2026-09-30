@@ -1455,6 +1455,8 @@ $streamerSourceExe = Resolve-MoonlightBuildBinaryPath `
     -BinaryName "streamer.exe"
 Write-Host "[BUILD] Bundling streamer from: $streamerSourceExe" -ForegroundColor DarkCyan
 Copy-Item $streamerSourceExe (Join-Path $moonlightBundle "streamer.exe") -Force
+& node (Join-Path $PSScriptRoot 'verify-recovery-runtime.mjs') (Join-Path $moonlightBundle 'web-server.exe') (Join-Path $moonlightBundle 'streamer.exe') (Join-Path $moonlightBundle 'direct-recovery-contract.json')
+if ($LASTEXITCODE -ne 0) { throw 'Recovery runtime pair is incompatible or unscoped QA; refusing bundle.' }
 $micSidecarSourceExe = Resolve-MoonlightBuildBinaryPath `
     -RepoRoot $RepoRoot `
     -MoonlightRoot $MoonlightSourceRoot `

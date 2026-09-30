@@ -6238,6 +6238,7 @@ pub async fn start_host(
         ipc_sender
             .send(ServerIpcMessage::Init {
                 config: StreamerConfig {
+                    direct_recovery: android_native_stream_ticket_record.as_ref().and_then(|r| common::direct_recovery::DirectRecoveryGrant::for_ticket(r.selected_route,r.expires_at_unix_ms,std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(u64::MAX,|d|d.as_millis() as u64))),
                     webrtc: web_app.config().webrtc.clone(),
                     log_level: web_app.config().log.level_filter,
                 },
@@ -8789,6 +8790,7 @@ pub async fn start_host_mic(
         ipc_sender
             .send(MicSidecarServerIpcMessage::Init {
                 config: StreamerConfig {
+                    direct_recovery: None,
                     webrtc: web_app.config().webrtc.clone(),
                     log_level: web_app.config().log.level_filter,
                 },

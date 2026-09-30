@@ -1,6 +1,7 @@
 pub mod conn_bridge;
 pub mod conn_disconnected_packet;
 pub mod conn_pipe;
+pub mod scoped_recovery;
 pub mod conn_udp;
 pub mod conn_udp_listener;
 
