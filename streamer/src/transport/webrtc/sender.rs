@@ -39,6 +39,9 @@ use webrtc::{
 #[path = "sender_queue.rs"]
 mod sender_queue;
 use sender_queue::{FrameQueue, SenderWorkers, next_frame};
+#[path = "nack_probe.rs"]
+mod nack_probe;
+use nack_probe::NackProbe;
 
 const PLAYOUT_DELAY_URI: &str = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay";
 const VIDEO_PACKET_PACING_BATCH: usize = 8;
@@ -92,6 +95,7 @@ where
     workers: SenderWorkers,
     track_sender: Option<Arc<webrtc::rtp_transceiver::rtp_sender::RTCRtpSender>>,
     sequence_number: Arc<Mutex<u16>>,
+    nack_probe: Arc<Mutex<NackProbe>>,
 }
 
 impl<Track> TrackLocalSender<Track>
@@ -112,6 +116,7 @@ where
             workers: SenderWorkers::default(),
             track_sender: None,
             sequence_number: Arc::new(Mutex::new(0)),
+            nack_probe: Arc::new(Mutex::new(NackProbe::default())),
         }
     }
 
@@ -129,6 +134,7 @@ where
         self.workers.stop().await;
         self.queue.clear(true).await;
         track.set_sequence_counter(self.sequence_number.clone());
+        track.set_nack_probe(self.nack_probe.clone());
         let track = Arc::new(track);
 
         let rtp_track = track.clone().track();
@@ -186,11 +192,23 @@ where
         // Read incoming RTCP packets
         // Before these packets are returned they are processed by interceptors. For things
         // like NACK this needs to be called.
+        let nack_probe = self.nack_probe.clone();
+        let label = self.label;
         self.workers.push(self.runtime.spawn(async move {
             let mut rtcp_buf = vec![0u8; 1500];
+            let mut last_probe = Instant::now();
             while let Ok((packets, _)) = track_sender.read(&mut rtcp_buf).await {
                 for packet in packets {
+                    if let Some(nack) = packet.as_any().downcast_ref::<webrtc::rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack>() {
+                        let mut probe = nack_probe.lock().await;
+                        for pair in &nack.nacks { for seq in *pair { probe.nack(seq, Instant::now()); } }
+                    }
                     on_packet(packet);
+                }
+                if label == "video" && last_probe.elapsed() >= Duration::from_secs(5) {
+                    let w = nack_probe.lock().await.take_window();
+                    info!("[Stream]: loss_bins sent={:?} first={:?} repeat={} unknown={} age_ms={}",w.sent,w.first_nacks,w.repeats,w.unknown,w.max_age_ms);
+                    last_probe = Instant::now();
                 }
             }
         }));
@@ -300,6 +318,7 @@ pub trait TrackLike: Send + Sync + 'static {
     // Raw-RTP tracks reuse the established SSRC and must not rewind sequence
     // numbers on replacement. Static-sample tracks own their own packetizer.
     fn set_sequence_counter(&mut self, _counter: Arc<Mutex<u16>>) {}
+    fn set_nack_probe(&mut self, _probe: Arc<Mutex<NackProbe>>) {}
 
     fn write_with_extensions(
         &self,
@@ -334,6 +353,7 @@ pub struct SequencedTrackLocalStaticRTP {
     track: Arc<TrackLocalStaticRTP>,
     sequence_number: Arc<Mutex<u16>>,
     all_paused_logged: AtomicBool,
+    nack_probe: Option<Arc<Mutex<NackProbe>>>,
 }
 
 impl From<TrackLocalStaticRTP> for SequencedTrackLocalStaticRTP {
@@ -342,6 +362,7 @@ impl From<TrackLocalStaticRTP> for SequencedTrackLocalStaticRTP {
             track: Arc::new(value),
             sequence_number: Arc::new(Mutex::new(0)),
             all_paused_logged: AtomicBool::new(false),
+            nack_probe: None,
         }
     }
 }
@@ -358,6 +379,7 @@ impl TrackLike for SequencedTrackLocalStaticRTP {
     fn set_sequence_counter(&mut self, counter: Arc<Mutex<u16>>) {
         self.sequence_number = counter;
     }
+    fn set_nack_probe(&mut self, probe: Arc<Mutex<NackProbe>>) { self.nack_probe = Some(probe); }
 
     async fn write_with_extensions(
         &self,
@@ -394,6 +416,9 @@ impl TrackLike for SequencedTrackLocalStaticRTP {
 
         let mut sequence_number = self.sequence_number.lock().await;
         sample.header.sequence_number = advance_rtp_sequence(&mut sequence_number);
+        if let Some(probe) = &self.nack_probe {
+            probe.lock().await.sent(sample.header.sequence_number, sample.payload.len(), Instant::now());
+        }
 
         let bytes_written = match tokio::time::timeout(
             RTP_WRITE_TIMEOUT,
