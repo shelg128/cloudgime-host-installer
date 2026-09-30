@@ -1415,7 +1415,10 @@ if (Test-Path $DisplayPrepareHelperProject) {
         -p:PublishSingleFile=true `
         -p:EnableCompressionInSingleFile=true `
         -o $DisplayPrepareHelperPublishRoot | Out-Host
-}
+    if ($LASTEXITCODE -ne 0) { throw "Display helper build failed; refusing stale binary." }
+    & node (Join-Path $PSScriptRoot 'verify-display-runtime.mjs') record $DisplayPrepareHelperExe (Split-Path $DisplayPrepareHelperProject)
+    if ($LASTEXITCODE -ne 0) { throw "Display helper contract verification failed." }
+} else { throw "Display helper source is required for every Host bundle." }
 if (Test-Path $HostKeepAwakeAgentProject) {
     dotnet publish $HostKeepAwakeAgentProject `
         -c Release `
@@ -1477,6 +1480,7 @@ Copy-DirectoryContents -Source (Join-Path $MoonlightSourceRoot "static") -Destin
 [System.IO.Directory]::CreateDirectory((Join-Path $moonlightBundle "server")) | Out-Null
 if (Test-Path $DisplayPrepareHelperExe) {
     Copy-Item $DisplayPrepareHelperExe (Join-Path $moonlightBundle "server\\display-prepare-helper.exe") -Force
+    Copy-Item ($DisplayPrepareHelperExe + '.display-contract.json') (Join-Path $moonlightBundle 'server\display-prepare-helper.exe.display-contract.json') -Force
 }
 
 Remove-Item (Join-Path $moonlightSystemBundle "launch-runtime-agent-hidden.vbs") -Force -ErrorAction SilentlyContinue

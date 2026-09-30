@@ -3690,28 +3690,9 @@ fn describe_mic_sidecar_server_message(message: &MicSidecarServerMessage) -> Str
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct DynamicDisplayAppliedMode {
-    width: u32,
-    height: u32,
-    frequency: u32,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct DynamicDisplayResult {
-    ok: bool,
-    changed: bool,
-    restored: bool,
-    skipped: bool,
-    reason: String,
-    applied: Option<DynamicDisplayAppliedMode>,
-    sunshine_capture_changed: bool,
-    sunshine_capture_target_changed: bool,
-    sunshine_capture_display: Option<String>,
-    sunshine_capture_config_path: Option<String>,
-}
+#[path = "display_helper_contract.rs"]
+mod display_helper_contract;
+use display_helper_contract::{DynamicDisplayResult, parse_display_helper_result};
 
 async fn force_kill_child(child: &Arc<Mutex<Child>>, label: &str) {
     let mut child = child.lock().await;
@@ -4495,6 +4476,34 @@ pub(super) async fn run_display_helper_command(
     timeout_duration: Duration,
     helper_action: Option<&str>,
 ) -> Result<HelperCommandOutput, String> {
+    // Mutations from the SYSTEM service use a private, per-child state broker.
+    // Do not retry privileged mutations in a different desktop after broker failure.
+    if helper_should_prefer_active_user_session()
+        && matches!(helper_action, Some("prepare" | "resize" | "restore" | "project-display"))
+    {
+        let session = enumerate_interactive_user_session_candidates()
+            .into_iter().find(|id| *id != 0)
+            .ok_or_else(|| "no interactive user session for display broker".to_string())?;
+        let mut command = Command::new(helper_path);
+        command.arg("--broker").arg(session.to_string()).args(helper_arguments)
+            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        command.kill_on_drop(true);
+        apply_background_spawn_flags(&mut command);
+        let output = timeout(timeout_duration.max(Duration::from_secs(100)), command.output()).await
+            .map_err(|_| "display state broker timed out".to_string())?
+            .map_err(|_| "display state broker launch failed".to_string())?;
+        let reason = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok()
+            .and_then(|v| v.get("reason").and_then(|s| s.as_str()).map(str::to_owned))
+            .filter(|s| s.len() <= 120 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or_else(|| "unclassified".to_string());
+        append_host_stream_trace(&format!("DISPLAY_BROKER_RESULT action={} session={} exit_code={} reason={}",
+            helper_action.unwrap_or("unknown"), session, output.status.code().unwrap_or(1), reason));
+        return Ok(HelperCommandOutput {
+            stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            exit_code: output.status.code().unwrap_or(1),
+        });
+    }
     if helper_should_prefer_active_user_session() {
         let helper_action = helper_action.unwrap_or("command");
         append_host_stream_trace(&format!(
@@ -4641,57 +4650,7 @@ async fn run_display_prepare_helper(arguments: &[String]) -> Result<DynamicDispl
     )
     .await?;
 
-    let stdout = output.stdout;
-    let stderr = output.stderr;
-
-    if !stdout.is_empty()
-        && let Ok(result) = serde_json::from_str::<DynamicDisplayResult>(&stdout)
-    {
-        if result.ok {
-            return Ok(result);
-        }
-
-        return Err(if !result.reason.trim().is_empty() {
-            result.reason.clone()
-        } else if !stderr.is_empty() {
-            stderr
-        } else {
-            format!(
-                "display prepare helper exited with status {}",
-                output.exit_code
-            )
-        });
-    }
-
-    if output.exit_code != 0 {
-        return Err(if stderr.is_empty() {
-            format!(
-                "display prepare helper exited with status {}",
-                output.exit_code
-            )
-        } else {
-            format!(
-                "display prepare helper exited with status {}: {stderr}",
-                output.exit_code
-            )
-        });
-    }
-
-    let result = serde_json::from_str::<DynamicDisplayResult>(&stdout).map_err(|err| {
-        format!(
-            "failed to parse display prepare helper output: {err}; stdout={stdout}; stderr={stderr}"
-        )
-    })?;
-
-    if !result.ok {
-        return Err(if result.reason.is_empty() {
-            "display prepare helper reported failure".to_string()
-        } else {
-            result.reason.clone()
-        });
-    }
-
-    Ok(result)
+    parse_display_helper_result(&helper_action, output.exit_code, &output.stdout)
 }
 
 #[cfg(not(windows))]
@@ -8094,10 +8053,7 @@ pub async fn start_host(
             )
             .await;
             let graceful_exit = scope.wait_owned_children_exit(Duration::from_secs(3)).await;
-            append_host_stream_trace(&format!(
-                "NATIVE_CHILD_GRACEFUL_STOP token={} exited={}",
-                dynamic_display_session_token, graceful_exit
-            ));
+            append_host_stream_trace(&format!("NATIVE_CHILD_GRACEFUL_STOP token={} exited={}", dynamic_display_session_token, graceful_exit));
             if let Err(error) = scope.stop_owned_children().await {
                 warn!("[Native scope]: child exit unverified: {error}");
             }

@@ -336,6 +336,8 @@ if (-not [string]::IsNullOrWhiteSpace($KeeperTunnelProject)) {
 }
 
 Write-Host "[BUILD] Menyiapkan payload NSIS host..." -ForegroundColor Cyan
+& node (Join-Path $portableRoot 'verify-display-runtime.mjs') verify (Join-Path $BundleRoot 'moonlight\server\display-prepare-helper.exe') (Join-Path $portableRoot 'DisplayPrepareHelper')
+if ($LASTEXITCODE -ne 0) { throw 'Display runtime identity gate failed; rebuild the bundle.' }
 Invoke-Checked $preparePayloadCmd $prepareArgs
 
 Write-Host "[BUILD] Membuat installer offline host..." -ForegroundColor Cyan

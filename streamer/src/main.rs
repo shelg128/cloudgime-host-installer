@@ -2608,93 +2608,52 @@ impl StreamConnection {
         height: u32,
         fps: u32,
     ) -> Result<(), anyhow::Error> {
-        let current_setup = {
-            let setup = self.stream_setup.lock().await;
-            setup.video
-        };
-
-        let Some(current_setup) = current_setup else {
-            anyhow::bail!("missing current video setup");
-        };
-
-        let next_setup = VideoSetup {
-            format: current_setup.format,
-            width: width.max(1),
-            height: height.max(1),
-            redraw_rate: fps.max(1),
-        };
-
-        if current_setup.format as u32 == next_setup.format as u32
-            && current_setup.width == next_setup.width
-            && current_setup.height == next_setup.height
-            && current_setup.redraw_rate == next_setup.redraw_rate
-        {
+        // Sunshine fixes encoder dimensions during RTSP negotiation. Changing only
+        // transport metadata and requesting an IDR cannot resize the encoded video.
+        // Share this lock with bitrate/start so a concurrent restart cannot replay
+        // settings captured before this resize.
+        let _reconfigure_guard = self.live_clarity_update_lock.lock().await;
+        let current = self.active_stream_settings.lock().await.clone()
+            .ok_or_else(|| anyhow::anyhow!("missing active stream settings"))?;
+        let mut next = current.clone();
+        next.width = width.max(1);
+        next.height = height.max(1);
+        next.fps = fps.max(1);
+        if (current.width, current.height, current.fps) == (next.width, next.height, next.fps) {
             return Ok(());
         }
-
-        let result = {
-            let mut sender = self.transport_sender.lock().await;
-            let Some(sender) = sender.as_mut() else {
-                anyhow::bail!("missing active transport sender");
-            };
-
-            sender.setup_video(next_setup).await
-        };
-
-        if result != 0 {
-            anyhow::bail!("transport setup_video returned {result}");
-        }
-
-        {
-            let mut setup = self.stream_setup.lock().await;
-            setup.video = Some(next_setup);
-        }
-
-        {
-            let mut mouse_state = self.mouse_cursor_state.lock().await;
-            mouse_state.set_stream_size(next_setup.width, next_setup.height);
-        }
-
-        {
-            let mut active_settings = self.active_stream_settings.lock().await;
-            if let Some(settings) = active_settings.as_mut() {
-                settings.width = next_setup.width;
-                settings.height = next_setup.height;
-                settings.fps = next_setup.redraw_rate;
+        info!("[Stream]: renegotiating upstream encoder for runtime resize {}x{}@{}", next.width, next.height, next.fps);
+        if let Err(error) = self.start_stream_locked(next).await {
+            // Roll back only this upstream connection; the selected WebRTC route,
+            // rental identity and billing remain unchanged.
+            if let Err(restore_error) = self.start_stream_locked(current).await {
+                error!("[Stream]: resize rollback failed: {restore_error}");
             }
+            return Err(error);
         }
-
-        self.moonlight.request_idr_frame();
-        debug!(
-            "Requested IDR frame after runtime resize to {}x{}@{}",
-            next_setup.width, next_setup.height, next_setup.redraw_rate
-        );
-
-        {
-            let mut pending = self.pending_video_flow_ready.lock().await;
-            *pending = Some(PendingVideoFlowReady {
-                phase: VideoFlowPhase::RuntimeResize,
-                width: next_setup.width,
-                height: next_setup.height,
-                fps: next_setup.redraw_rate,
-                frames_remaining: 2,
-            });
-        }
-
+        // Negotiation callbacks, not requested defaults, own stream_setup.
+        let applied = self.stream_setup.lock().await.video
+            .ok_or_else(|| anyhow::anyhow!("missing negotiated resize video setup"))?;
         self.try_send_packet(
             OutboundPacket::General {
                 message: GeneralServerMessage::VideoReconfigured {
-                    format: next_setup.format as u32,
-                    width: next_setup.width,
-                    height: next_setup.height,
-                    fps: next_setup.redraw_rate,
+                    format: applied.format as u32,
+                    width: applied.width,
+                    height: applied.height,
+                    fps: applied.redraw_rate,
                 },
             },
             "runtime video reconfigured",
             false,
-        )
-        .await;
-
+        ).await;
+        let mut pending = self.pending_video_flow_ready.lock().await;
+        *pending = Some(PendingVideoFlowReady {
+            phase: VideoFlowPhase::RuntimeResize,
+            width: applied.width,
+            height: applied.height,
+            fps: applied.redraw_rate,
+            frames_remaining: 2,
+        });
         Ok(())
     }
 
@@ -2891,7 +2850,7 @@ impl StreamConnection {
                 info!(
                     "[Stream]: live RTSP bitrate update unavailable, falling back to internal upstream restart apply"
                 );
-                match self.start_stream(next_settings.clone()).await {
+                match self.start_stream_locked(next_settings.clone()).await {
                     Ok(()) => {
                         self.send_clarity_update_result(
                             true,
@@ -2909,7 +2868,7 @@ impl StreamConnection {
                         warn!(
                             "[Stream]: internal upstream restart apply failed after live RTSP rejection: {err}"
                         );
-                        match self.start_stream(current_settings.clone()).await {
+                        match self.start_stream_locked(current_settings.clone()).await {
                             Ok(()) => {
                                 warn!(
                                     "[Stream]: restored previous upstream settings after failed restart apply"
@@ -2957,6 +2916,11 @@ impl StreamConnection {
 
     // Start Moonlight Stream
     async fn start_stream(self: &Arc<Self>, settings: StreamSettings) -> Result<(), anyhow::Error> {
+        let _reconfigure_guard = self.live_clarity_update_lock.lock().await;
+        self.start_stream_locked(settings).await
+    }
+
+    async fn start_stream_locked(self: &Arc<Self>, settings: StreamSettings) -> Result<(), anyhow::Error> {
         let hide_cursor = should_hide_host_cursor(settings.host_mouse_emulation);
         self.set_host_cursor_hidden_for_stream(hide_cursor, "start_stream")
             .await;
