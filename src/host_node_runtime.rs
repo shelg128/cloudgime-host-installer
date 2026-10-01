@@ -72,6 +72,8 @@ pub(super) fn allows(state: &HostActivationStateRecord) -> bool {
         verified_allows(v, state, v.at.elapsed())))
 }
 
+pub(super) fn invalidate_erased_cache() { invalidate(); }
+
 pub(super) fn failed_state() -> HostActivationStateRecord {
     invalidate();
     HostActivationStateRecord { universal_node: true, activation_state: "node_binding_unavailable".into(), ..Default::default() }

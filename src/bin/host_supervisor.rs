@@ -3400,21 +3400,34 @@ fn read_state(paths: &BundlePaths) -> Option<SupervisorState> {
     serde_json::from_str::<SupervisorState>(strip_utf8_bom(&raw)).ok()
 }
 
+#[path = "../node_erased_cache.rs"]
+mod node_erased_cache;
+
 fn read_activation_state(paths: &BundlePaths) -> HostActivationStateRecord {
     static NODE_SELECTED: AtomicBool = AtomicBool::new(false);
     let node_selected = provisioning::universal_manifest_exists(&paths.bundle_root)
         || NODE_SELECTED.load(Ordering::SeqCst);
     if node_selected {
         NODE_SELECTED.store(true, Ordering::SeqCst);
-        let raw = match fs::read_to_string(&paths.activation_state_path) {
-            Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => "{}".into(),
+        let raw = match (|| -> std::io::Result<Vec<u8>> {
+            let file=fs::File::open(&paths.activation_state_path)?;
+            let mut raw=Vec::new();
+            file.take(node_erased_cache::MAX_CACHE_BYTES as u64 + 1).read_to_end(&mut raw)?;
+            Ok(raw)
+        })() {
+            Ok(raw) if raw.len() <= node_erased_cache::MAX_CACHE_BYTES => raw,
+            Ok(_) => return host_node_runtime::failed_state(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(_) => return host_node_runtime::failed_state(),
         };
-        let Ok(mut state) = serde_json::from_str::<HostActivationStateRecord>(strip_utf8_bom(&raw))
-        else {
+        let Ok(parsed) = node_erased_cache::parse::<HostActivationStateRecord>(&raw) else {
             return host_node_runtime::failed_state();
         };
+        // Invalid non-erased content must never bypass conflicting identity.
+        // Erased cache has no usable identity; hydrate still verifies manifest,
+        // DPAPI identity and component credential, then requires server status.
+        if parsed.erased { host_node_runtime::invalidate_erased_cache(); }
+        let mut state = parsed.state;
         state.universal_node = true;
         if host_node_runtime::hydrate(paths, &mut state).is_err() {
             return host_node_runtime::failed_state();

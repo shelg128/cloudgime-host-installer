@@ -493,14 +493,15 @@ pub fn read_universal_host_binding(bundle_root: &Path) -> Result<UniversalHostBi
     Ok(binding)
 }
 
+#[path = "durable_metadata_cache.rs"]
+mod durable_metadata_cache;
+
 pub fn write_host_runtime_cache(path: &Path, value: &Value) -> Result<()> {
-    // Restrict before the rename: an interactive renter must never see a
-    // partially-written trusted cache or mutate it during recovery.
-    let temp = path.with_extension(format!("{}.next", uuid::Uuid::new_v4()));
-    fs::write(&temp, serde_json::to_vec_pretty(value)?)?;
-    restrict_to_local_system_and_current_user(&temp)?;
-    fs::rename(&temp, path).context("NODE_CACHE_REPLACE_FAILED")?;
-    Ok(())
+    let bytes=serde_json::to_vec_pretty(value)?;
+    durable_metadata_cache::replace(path,&bytes,|temp|{
+        restrict_to_local_system_and_current_user(temp)
+            .map_err(|_|std::io::Error::other("NODE_CACHE_ACL_FAILED"))
+    }).context("NODE_CACHE_DURABLE_REPLACE_FAILED")
 }
 
 pub fn load_or_create_machine_identity(bundle_root: &Path) -> Result<MachineIdentityState> {
