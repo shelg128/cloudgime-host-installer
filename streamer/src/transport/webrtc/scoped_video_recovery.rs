@@ -12,7 +12,10 @@ pub(super) struct Recovery {peer:Weak<RTCPeerConnection>,pub budget:Arc<CopyBudg
 impl Recovery {
  pub fn new(peer:Weak<RTCPeerConnection>,grant:&DirectRecoveryGrant)->Option<Arc<Self>>{
   let now=SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_millis()as u64;if !grant.valid_at(now){return None}
-  let budget=CopyBudget::new(Duration::from_millis(grant.authority_expires_at_unix_ms-now),grant.max_extra_kbps,grant.max_extra_packets_per_second)?;
+  let lifetime=Duration::from_millis(grant.authority_expires_at_unix_ms-now);
+  let budget=if cfg!(feature="cloudgime-recovery-share-qa"){
+   CopyBudget::new_with_share(lifetime,grant.max_extra_kbps,grant.max_extra_packets_per_second,25)?
+  }else{CopyBudget::new(lifetime,grant.max_extra_kbps,grant.max_extra_packets_per_second)?};
   Some(Arc::new(Self{peer,budget,policy:std::sync::Mutex::new(LossPolicy::default())}))
  }
  pub fn loss_window(&self,sent:u64,first_nacks:u64){
@@ -22,6 +25,8 @@ impl Recovery {
   match decision {Decision::Renew=>self.budget.activate(Duration::from_secs(15)),Decision::Suspend=>self.budget.suspend(),Decision::Idle=>{}}
   let s=self.budget.snapshot();
   log::info!("CG_RECOVERY copies={} bytes={} limited={} blocked={}",s.copies,s.extra_bytes,s.limited,s.blocked);
+  #[cfg(feature="cloudgime-recovery-share-qa")]
+  log::info!("CG_RSH o={} b={} c={} e={} p=25",s.originals,s.original_bytes,s.copies,s.extra_bytes);
   log::info!("CG_RECOVERY_LOSS sent={sent} nacks={first_nacks} action={decision:?}");
  }
  pub fn suspend(&self){if let Ok(mut p)=self.policy.lock(){p.reset();}self.budget.suspend();}

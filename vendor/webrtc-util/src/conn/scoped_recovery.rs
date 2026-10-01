@@ -2,26 +2,38 @@
 //! endpoint registry; retransmissions/control tasks do not inherit this context.
 use std::{future::Future,net::SocketAddr,sync::{Arc,Mutex,atomic::{AtomicBool,AtomicU64,Ordering}},time::{Duration,Instant}};
 
+#[path="recovery_share.rs"]
+mod recovery_share;
+use recovery_share::ShareBudget;
+
 #[derive(Debug,Default,Clone,Copy)]
 pub struct Snapshot {pub originals:u64,pub original_bytes:u64,pub copies:u64,pub extra_bytes:u64,pub limited:u64,pub blocked:u64}
-struct Bucket {last:Instant,bytes:f64,packets:f64,until:Instant,backoff:Instant,stats:Snapshot}
+struct Bucket {share:Option<ShareBudget>,last:Instant,bytes:f64,packets:f64,until:Instant,backoff:Instant,stats:Snapshot}
 pub struct CopyBudget {deadline:Instant,byte_rate:f64,packet_rate:f64,burst_bytes:f64,burst_packets:f64,enabled:AtomicBool,generation:AtomicU64,state:Mutex<Bucket>}
 impl CopyBudget {
  pub fn new(lifetime:Duration,kbps:u32,pps:u32)->Option<Arc<Self>>{
   if lifetime.is_zero()||!(1..=8000).contains(&kbps)||!(1..=2000).contains(&pps){return None}
   let now=Instant::now();let bytes=kbps as f64*125.;let packets=pps as f64;
-  Some(Arc::new(Self{deadline:now.checked_add(lifetime)?,byte_rate:bytes,packet_rate:packets,burst_bytes:(bytes*0.1).clamp(1400.,32000.),burst_packets:(packets*0.1).clamp(1.,32.),enabled:AtomicBool::new(true),generation:AtomicU64::new(1),state:Mutex::new(Bucket{last:now,bytes:0.,packets:0.,until:now,backoff:now,stats:Snapshot::default()})}))
+  Some(Arc::new(Self{deadline:now.checked_add(lifetime)?,byte_rate:bytes,packet_rate:packets,burst_bytes:(bytes*0.1).clamp(1400.,32000.),burst_packets:(packets*0.1).clamp(1.,32.),enabled:AtomicBool::new(true),generation:AtomicU64::new(1),state:Mutex::new(Bucket{share:None,last:now,bytes:0.,packets:0.,until:now,backoff:now,stats:Snapshot::default()})}))
+ }
+ pub fn new_with_share(lifetime:Duration,kbps:u32,pps:u32,percent:u8)->Option<Arc<Self>>{
+  let share=ShareBudget::new(percent)?;let budget=Self::new(lifetime,kbps,pps)?;
+  budget.state.lock().ok()?.share=Some(share);Some(budget)
  }
  pub fn activate(&self,for_time:Duration){if !self.enabled.load(Ordering::Acquire){return}let now=Instant::now();if let Ok(mut s)=self.state.lock(){s.until=now+for_time.min(Duration::from_secs(20));}}
- pub fn suspend(&self){if let Ok(mut s)=self.state.lock(){s.until=Instant::now();s.bytes=0.;s.packets=0.;self.generation.fetch_add(1,Ordering::AcqRel);}}
+ pub fn suspend(&self){if let Ok(mut s)=self.state.lock(){s.until=Instant::now();s.bytes=0.;s.packets=0.;if let Some(share)=&mut s.share{share.reset();}self.generation.fetch_add(1,Ordering::AcqRel);}}
  pub fn revoke(&self){self.enabled.store(false,Ordering::Release);self.suspend();}
  pub fn snapshot(&self)->Snapshot{self.state.lock().map(|s|s.stats).unwrap_or_default()}
  fn reserve(&self,wire_bytes:usize)->bool{self.reserve_generation(wire_bytes,self.generation.load(Ordering::Acquire))}
  fn reserve_generation(&self,wire_bytes:usize,generation:u64)->bool{let now=Instant::now();if !self.enabled.load(Ordering::Acquire)||now>=self.deadline{return false}let Ok(mut s)=self.state.lock()else{return false};if !self.enabled.load(Ordering::Acquire)||self.generation.load(Ordering::Acquire)!=generation{return false}s.stats.originals+=1;s.stats.original_bytes+=wire_bytes as u64;
   let elapsed=now.duration_since(s.last).as_secs_f64();s.last=now;s.bytes=(s.bytes+elapsed*self.byte_rate).min(self.burst_bytes);s.packets=(s.packets+elapsed*self.packet_rate).min(self.burst_packets);
-  if now>=s.until||now<s.backoff{return false}if s.bytes<wire_bytes as f64||s.packets<1.{s.stats.limited+=1;return false}s.bytes-=wire_bytes as f64;s.packets-=1.;true
+  if now>=s.until||now<s.backoff{if let Some(share)=&mut s.share{share.reset();}return false}
+  if let Some(share)=&mut s.share{share.original(wire_bytes);if !share.allows(wire_bytes){s.stats.limited+=1;return false}}
+  if s.bytes<wire_bytes as f64||s.packets<1.{s.stats.limited+=1;return false}
+  if let Some(share)=&mut s.share{share.debit(wire_bytes);}
+  s.bytes-=wire_bytes as f64;s.packets-=1.;true
  }
- pub fn result(&self,wire_bytes:usize,ok:bool){if let Ok(mut s)=self.state.lock(){if ok{s.stats.copies+=1;s.stats.extra_bytes+=wire_bytes as u64}else{s.stats.blocked+=1;s.backoff=Instant::now()+Duration::from_secs(1)}}}
+ pub fn result(&self,wire_bytes:usize,ok:bool){if let Ok(mut s)=self.state.lock(){if ok{s.stats.copies+=1;s.stats.extra_bytes+=wire_bytes as u64}else{s.stats.blocked+=1;if let Some(share)=&mut s.share{share.reset();}s.backoff=Instant::now()+Duration::from_secs(1)}}}
 }
 impl Drop for CopyBudget{fn drop(&mut self){self.enabled.store(false,Ordering::Release);}}
 
@@ -49,6 +61,17 @@ pub fn permit(buf:&[u8],target:SocketAddr,local_port:u16)->Option<(Arc<CopyBudge
  fn target()->SocketAddr{"127.0.0.1:34567".parse().unwrap()}
  fn data()->Vec<u8>{let mut b=vec![0;100];b[0]=0x80;b[1]=120;b[2..4].copy_from_slice(&4u16.to_be_bytes());b[8..12].copy_from_slice(&123u32.to_be_bytes());b}
  async fn active()->Arc<CopyBudget>{let b=CopyBudget::new(Duration::from_secs(30),2000,1200).unwrap();b.activate(Duration::from_secs(20));tokio::time::sleep(Duration::from_millis(20)).await;b}
+ #[tokio::test]async fn share_limit_is_conjunctive_with_authority_and_rate_budget(){
+  assert!(CopyBudget::new_with_share(Duration::from_secs(30),2000,1200,26).is_none());
+  let b=CopyBudget::new_with_share(Duration::from_secs(30),2000,1200,25).unwrap();b.activate(Duration::from_secs(20));tokio::time::sleep(Duration::from_millis(20)).await;
+  for n in 1..=1000u64{if b.reserve(1200){b.result(1200,true);}let s=b.snapshot();assert!(s.extra_bytes*4<=s.original_bytes);assert!(s.copies<=32);assert_eq!(s.originals,n);}
+  let s=b.snapshot();assert!(s.copies>0&&s.limited>0);b.suspend();b.activate(Duration::from_secs(10));tokio::time::sleep(Duration::from_millis(20)).await;assert!(!b.reserve(1200));b.revoke();assert!(!b.reserve(1200));
+ }
+ #[tokio::test]async fn share_invalid_binding_does_not_earn_credit(){let b=CopyBudget::new_with_share(Duration::from_secs(30),2000,1200,25).unwrap();b.activate(Duration::from_secs(20));tokio::time::sleep(Duration::from_millis(20)).await;
+  for _ in 0..4 {within(CopyScope::new(target(),99,123,120,4,b.clone()).unwrap(),async{assert!(permit(&data(),target(),100).is_none());}).await;}assert_eq!(b.snapshot().originals,0);
+  within(CopyScope::new(target(),99,123,120,4,b.clone()).unwrap(),async{assert!(permit(&data(),target(),99).is_none());}).await;assert_eq!(b.snapshot().originals,1);
+ }
+ #[tokio::test]async fn share_backpressure_discards_credit(){let b=CopyBudget::new_with_share(Duration::from_secs(30),2000,1200,25).unwrap();b.activate(Duration::from_secs(20));tokio::time::sleep(Duration::from_millis(20)).await;for _ in 0..3{assert!(!b.reserve(1200));}assert!(b.reserve(1200));b.result(1200,false);assert_eq!(b.snapshot().copies,0);assert_eq!(b.snapshot().blocked,1);assert!(!b.reserve(1200));}
  #[tokio::test]async fn no_context_or_wrong_binding_never_copies(){let b=active().await;let d=data();assert!(permit(&d,target(),99).is_none());within(CopyScope::new(target(),99,123,120,4,b).unwrap(),async{assert!(permit(&d,target(),100).is_none());let mut wrong=d.clone();wrong[8]=1;assert!(permit(&wrong,target(),99).is_none());let mut wrong=d.clone();wrong[1]=111;assert!(permit(&wrong,target(),99).is_none());assert!(permit(&d,"127.0.0.1:34568".parse().unwrap(),99).is_none());assert!(permit(&d,target(),99).is_some());assert!(permit(&d,target(),99).is_none());}).await;}
  #[tokio::test]async fn child_task_cannot_inherit_copy_authority(){let b=active().await;within(CopyScope::new(target(),99,123,120,4,b).unwrap(),async{assert!(tokio::spawn(async{permit(&data(),target(),99).is_none()}).await.unwrap());assert!(permit(&data(),target(),99).is_some());}).await;}
  #[tokio::test]async fn inactive_revoked_expired_and_backpressure_stop_copies(){let b=CopyBudget::new(Duration::from_secs(2),2000,1200).unwrap();assert!(!b.reserve(100));b.activate(Duration::from_secs(20));tokio::time::sleep(Duration::from_millis(20)).await;assert!(b.reserve(100));b.result(100,false);assert!(!b.reserve(100));b.revoke();assert!(!b.reserve(100));let x=CopyBudget::new(Duration::from_millis(1),2000,1200).unwrap();x.activate(Duration::from_secs(20));tokio::time::sleep(Duration::from_millis(3)).await;assert!(!x.reserve(100));}
