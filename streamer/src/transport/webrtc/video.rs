@@ -53,6 +53,9 @@ use crate::transport::{
 mod annexb;
 mod h264;
 mod h265;
+#[cfg(test)]
+#[path="frame_boundary_tests.rs"]
+mod frame_boundary_tests;
 
 enum VideoCodec {
     H264 {
@@ -436,30 +439,19 @@ async fn send_single_frame(
     important: bool,
     needs_idr: &AtomicBool,
 ) {
+    let frame_samples = match packetize_access_unit(samples, payloader, timestamp) {
+        Ok(packets) if packets.is_empty() => return,
+        Ok(packets) => packets,
+        Err(err) => {
+            warn!("[Stream]: access unit rejected before enqueue: {err}");
+            sender.clear_queue(true).await;
+            needs_idr.store(true, Ordering::Release);
+            return;
+        }
+    };
+    // Only discard queued deltas after a complete replacement frame exists.
     if important {
         sender.clear_queue(false).await;
-    }
-
-    let mut peekable = samples.drain(..).peekable();
-
-    let mut frame_samples = Vec::new();
-    while let Some(sample) = peekable.next() {
-        let packets = match packetize(
-            payloader,
-            RTP_OUTBOUND_MTU,
-            0, // is set in the write fn
-            timestamp,
-            &sample.freeze(),
-            peekable.peek().is_none(),
-        ) {
-            Ok(value) => value,
-            Err(err) => {
-                warn!("failed to packetize packet: {err}");
-                continue;
-            }
-        };
-
-        frame_samples.extend(packets);
     }
 
     if !sender.send_samples(frame_samples, important).await {
@@ -468,6 +460,28 @@ async fn send_single_frame(
         // We've dropped a frame (likely due to buffering)
         needs_idr.store(true, Ordering::Release);
     }
+}
+
+fn packetize_access_unit(samples:&mut Vec<BytesMut>,payloader:&mut impl Payloader,timestamp:u32)->Result<Vec<Packet>,anyhow::Error>{
+    // A NAL may emit zero RTP packets (AUD/filler/cached parameter sets).
+    // Frame completeness must be marked on the final *emitted* packet, not
+    // inferred from the final source NAL. Dropping Drain consumes the entire
+    // access unit on error; nothing partially packetized reaches the sender.
+    let mut frame_samples = Vec::new();
+    for sample in samples.drain(..) {
+        frame_samples.extend(packetize(
+            payloader,
+            RTP_OUTBOUND_MTU,
+            0, // assigned at the actual RTP write
+            timestamp,
+            &sample.freeze(),
+            false,
+        )?);
+    }
+    if let Some(last) = frame_samples.last_mut() {
+        last.header.marker = true;
+    }
+    Ok(frame_samples)
 }
 
 fn packetize(
