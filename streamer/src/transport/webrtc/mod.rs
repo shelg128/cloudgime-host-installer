@@ -1,3 +1,6 @@
+#[cfg(feature = "cloudgime-nack-dispatch-qa")]
+mod nack_dispatch_qa;
+
 #[cfg(test)]
 mod datagram_redundancy_tests;
 
@@ -273,6 +276,10 @@ pub async fn new(
 
     // -- Build Api
     let mut api_registry = Registry::new();
+    // First/inner interceptor observes authenticated feedback before the default
+    // NACK responder and all RTP writes including its retransmissions.
+    #[cfg(feature = "cloudgime-nack-dispatch-qa")]
+    api_registry.add(Box::new(nack_dispatch_qa::Builder));
 
     // Use the default set of Interceptors
     api_registry = register_default_interceptors(api_registry, &mut api_media)
