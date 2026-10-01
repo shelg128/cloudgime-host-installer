@@ -51,6 +51,14 @@ const RTP_BINDING_UNPAUSE_WAIT: Duration = Duration::from_secs(5);
 const RTP_BINDING_UNPAUSE_POLL: Duration = Duration::from_millis(20);
 const RTP_WRITE_TIMEOUT: Duration = Duration::from_millis(1500);
 
+fn video_playout_delay(label: &str) -> PlayoutDelayExtension {
+    // RTP extension units are 10ms. QA only: permit bounded jitter buffering
+    // without forcing a minimum delay. No route/codec/budget changes.
+    if cfg!(feature = "cloudgime-jitter-window-qa") && label == "video" {
+        PlayoutDelayExtension::new(0, 10)
+    } else { PlayoutDelayExtension::new(0, 0) }
+}
+
 pub fn register_header_extensions(api_media: &mut MediaEngine) -> Result<(), webrtc::Error> {
     api_media.register_header_extension(
         RTCRtpHeaderExtensionCapability {
@@ -287,7 +295,7 @@ async fn sample_sender<Track>(
                 .write_with_extensions(
                     sample,
                     &[
-                        HeaderExtension::PlayoutDelay(PlayoutDelayExtension::new(0, 0)),
+                        HeaderExtension::PlayoutDelay(video_playout_delay(label)),
                         HeaderExtension::AbsSendTime(AbsSendTimeExtension {
                             timestamp: abs_send_time,
                         }),
@@ -494,6 +502,13 @@ mod sender_sequence_tests {
         assert_eq!(advance_rtp_sequence(&mut *a.sequence_number.lock().await), 0);
         assert_eq!(*b.sequence_number.lock().await, 0);
         assert_eq!(*a.sequence_number.lock().await, 1);
+    }
+
+    #[test]
+    fn playout_window_is_qa_only_and_never_changes_audio() {
+        assert_eq!(video_playout_delay("audio"),PlayoutDelayExtension::new(0,0));
+        assert_eq!(video_playout_delay("video"),PlayoutDelayExtension::new(0,if cfg!(feature="cloudgime-jitter-window-qa"){10}else{0}));
+        assert_eq!(video_playout_delay("other"),PlayoutDelayExtension::new(0,0));
     }
 
     #[test]
