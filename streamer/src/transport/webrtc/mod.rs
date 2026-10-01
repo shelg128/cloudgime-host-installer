@@ -475,7 +475,7 @@ impl WebRtcInner {
         debug!("[WebRTC] ICE connection state changed to {:?}", state);
     }
     async fn on_peer_connection_state_change(self: Arc<Self>, state: RTCPeerConnectionState) {
-        if state != RTCPeerConnectionState::Connected {if let Some(r)=&self.recovery{r.budget.suspend();}}
+        if state != RTCPeerConnectionState::Connected {if let Some(r)=&self.recovery{r.suspend();}}
         #[allow(clippy::collapsible_if)]
         if matches!(state, RTCPeerConnectionState::Closed) {
             if let Some(r)=&self.recovery {r.budget.revoke();}

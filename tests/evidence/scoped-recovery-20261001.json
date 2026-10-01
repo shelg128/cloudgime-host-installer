@@ -1,0 +1,95 @@
+{
+  "sourceBase": "1ac2b05",
+  "modifiedSource": [
+    "scoped_video_recovery.rs",
+    "recovery_loss_policy.rs",
+    "mod.rs"
+  ],
+  "contract": {
+    "contract": "cg-scoped-direct-recovery-v1",
+    "host": {
+      "schema": 1,
+      "contract": "cg-scoped-direct-recovery-v1",
+      "component": "host",
+      "ticketRouteBinding": true,
+      "ipcGrant": true
+    },
+    "streamer": {
+      "schema": 1,
+      "contract": "cg-scoped-direct-recovery-v1",
+      "component": "streamer",
+      "scoped": true,
+      "negotiatedVideo": true,
+      "bandwidthBudget": true,
+      "qaUnscoped": false
+    },
+    "hashes": {
+      "web-server": "b312fd02ad2254ad48ce19029c2a2325727363efbc51ae2228b67048e3a978ea",
+      "streamer": "762554362864841b12fb60bf0da01e9d879483c050e107652ecd50fb05950b4f"
+    },
+    "qualityAcceptance": "PHYSICAL_DIRECT_ACTIVE_MEDIA_PASS_1790813127496_NOT_FULL_RELEASE"
+  },
+  "run": "C:/Users/Admin/Documents/CLOUDGIME WORKSPACE/06 TEST/20260928-android-full-regression/capture-resize-1790813127496",
+  "stats": {
+    "valid": true,
+    "durationSeconds": 181.351846,
+    "decodedDelta": 5456,
+    "freezeDelta": 6,
+    "freezeSecondsDelta": 3.2640000000000002,
+    "lostDelta": 0,
+    "pass": true,
+    "reason": null
+  },
+  "decodedFps": 30.085163842225242,
+  "pauseDelta": 0,
+  "pauseSecondsDelta": 0,
+  "nackDelta": 91,
+  "rttMs": {
+    "n": 46,
+    "min": 51,
+    "median": 73,
+    "p95": 327,
+    "max": 517
+  },
+  "jitterBufferMs": {
+    "n": 45,
+    "min": 0.5,
+    "median": 8.3,
+    "p95": 132.9,
+    "max": 164.8
+  },
+  "frameArrivalMaxGapMs": {
+    "n": 45,
+    "min": 41,
+    "median": 67,
+    "p95": 539,
+    "max": 1225
+  },
+  "overhead": {
+    "samples": 35,
+    "duration": 174.423,
+    "extraBytes": 9656320,
+    "extraPackets": 9053,
+    "averageExtraKbps": 442.89204978701207,
+    "limited": 0,
+    "blocked": 0,
+    "scope": "IP+UDP byte budget, excludes L2 overhead, Host log subwindow only"
+  },
+  "startupSeparate": {
+    "waitMs": 7552,
+    "sourcesObserved": [
+      "2"
+    ],
+    "source": "2",
+    "framesAtStart": 1719
+  },
+  "identity": {
+    "rentalId": "5d30a9f2-c422-46f3-a1d7-4494ac5580b0",
+    "route": "direct",
+    "sameCounter": true
+  },
+  "qualityScope": "Physical 720x1570 Device Match @30fps on PC-02 -> existing physical Android. Not full installer or all-device acceptance.",
+  "sentinel": "Original package; no synthetic heartbeat; first stale-heartbeat run remains unexplained",
+  "runtime": "Restored to accepted Device Match baseline after test",
+  "deployment": "Restored after experiment; not retained as default pilot"
+}

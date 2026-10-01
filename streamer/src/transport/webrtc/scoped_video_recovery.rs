@@ -4,21 +4,27 @@ use common::direct_recovery::DirectRecoveryGrant;
 use tokio::sync::Mutex;
 use webrtc::{ice_transport::{ice_candidate_type::RTCIceCandidateType as Kind,ice_protocol::RTCIceProtocol},peer_connection::{RTCPeerConnection,peer_connection_state::RTCPeerConnectionState},rtp_transceiver::rtp_codec::{RTPCodecType,RTCRtpCodecParameters},track::track_local::{TrackLocal,TrackLocalContext,track_local_static_rtp::TrackLocalStaticRTP}};
 use webrtc_util::conn::scoped_recovery::{CopyBudget,CopyScope};
+#[path="recovery_loss_policy.rs"]
+mod recovery_loss_policy;
+use recovery_loss_policy::{LossPolicy,Decision};
 
-pub(super) struct Recovery {peer:Weak<RTCPeerConnection>,pub budget:Arc<CopyBudget>}
+pub(super) struct Recovery {peer:Weak<RTCPeerConnection>,pub budget:Arc<CopyBudget>,policy:std::sync::Mutex<LossPolicy>}
 impl Recovery {
  pub fn new(peer:Weak<RTCPeerConnection>,grant:&DirectRecoveryGrant)->Option<Arc<Self>>{
   let now=SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_millis()as u64;if !grant.valid_at(now){return None}
   let budget=CopyBudget::new(Duration::from_millis(grant.authority_expires_at_unix_ms-now),grant.max_extra_kbps,grant.max_extra_packets_per_second)?;
-  Some(Arc::new(Self{peer,budget}))
+  Some(Arc::new(Self{peer,budget,policy:std::sync::Mutex::new(LossPolicy::default())}))
  }
  pub fn loss_window(&self,sent:u64,first_nacks:u64){
   // Actual peer RTCP processed by SRTP/authenticated interceptor pipeline.
   // Do not respond to client-supplied RouteTelemetry or arbitrary JSON loss.
-  if sent>=50 && u128::from(first_nacks)*4>u128::from(sent) { self.budget.suspend(); }
-  else if loss_activates(sent,first_nacks){self.budget.activate(Duration::from_secs(15));}
-  let s=self.budget.snapshot();log::info!("CG_RECOVERY scoped=true sent={} copies={} extraBytes={} limited={} blocked={}",s.originals,s.copies,s.extra_bytes,s.limited,s.blocked);
+  let decision=if let Ok(mut policy)=self.policy.lock(){policy.update(std::time::Instant::now(),sent,first_nacks)}else{Decision::Suspend};
+  match decision {Decision::Renew=>self.budget.activate(Duration::from_secs(15)),Decision::Suspend=>self.budget.suspend(),Decision::Idle=>{}}
+  let s=self.budget.snapshot();
+  log::info!("CG_RECOVERY copies={} bytes={} limited={} blocked={}",s.copies,s.extra_bytes,s.limited,s.blocked);
+  log::info!("CG_RECOVERY_LOSS sent={sent} nacks={first_nacks} action={decision:?}");
  }
+ pub fn suspend(&self){if let Ok(mut p)=self.policy.lock(){p.reset();}self.budget.suspend();}
  async fn permission(&self,ssrc:u32,pt:u8,seq:u16,binding_live:Arc<AtomicBool>)->Option<CopyScope>{
   let peer=self.peer.upgrade()?;if peer.connection_state()!=RTCPeerConnectionState::Connected{return None}
   let dtls=peer.sctp().transport();let transport=dtls.ice_transport();let pair=transport.get_selected_candidate_pair().await?;
@@ -32,6 +38,7 @@ impl Drop for Recovery{fn drop(&mut self){self.budget.revoke();}}
 fn direct_udp(a:Kind,b:Kind,pa:RTCIceProtocol,pb:RTCIceProtocol)->bool{
  matches!(a,Kind::Host|Kind::Srflx|Kind::Prflx)&&matches!(b,Kind::Host|Kind::Srflx|Kind::Prflx)&&pa==RTCIceProtocol::Udp&&pb==RTCIceProtocol::Udp
 }
+#[cfg(test)]
 fn loss_activates(sent:u64,first:u64)->bool{sent>=50&&first>=3&&u128::from(first)*100>=u128::from(sent)*2&&u128::from(first)*4<=u128::from(sent)}
 
 pub(super) struct RecoveryTrack {pub inner:Arc<TrackLocalStaticRTP>,recovery:Option<Arc<Recovery>>,bindings:Mutex<HashMap<String,(u32,u8,Arc<AtomicBool>)>>}
