@@ -2820,14 +2820,7 @@ internal static partial class Program
                 return false;
             }
 
-            var failures = ExtractMatchingLines(
-                tail,
-                "encode wait timeout",
-                "NVENC returned empty packet",
-                "Could not encode video packet",
-                "Failed to create encoder D3D11 device",
-                "Could not open codec [h264_nvenc]",
-                "Failed to create encoder [h264_nvenc]");
+            var failures = NvencRuntimeHealth.FailureLines(tail);
             if (string.IsNullOrWhiteSpace(failures))
             {
                 return false;
