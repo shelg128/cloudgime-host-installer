@@ -16,6 +16,8 @@ use std::{
 };
 
 const MAX_BODY: usize = 64 * 1024;
+#[path = "host_receipt_clock.rs"]
+mod receipt_clock;
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 // Intentionally no Debug: the challenge is sensitive authorization material.
@@ -261,13 +263,18 @@ async fn poll(
 }
 
 async fn send_receipt(client:&reqwest::Client,root:&Path,pinned:&Context,verified:&VerifiedRevokeCommand)->Result<(),&'static str>{
-    let c=verified.command();let mut id=c.digest()?;id[6]=(id[6]&0x0f)|0x40;id[8]=(id[8]&0x3f)|0x80;
+    let c=verified.command();
+    // Called only after stream revocation/inspection. If the local clock is
+    // still behind the command, persist nothing; the next poll must inspect
+    // again. Never clamp observedAt or mutate an already durable receipt.
+    let observed_at=receipt_clock::observation_timestamp(&c.requested_at,Utc::now())?;
+    let mut id=c.digest()?;id[6]=(id[6]&0x0f)|0x40;id[8]=(id[8]&0x3f)|0x80;
     let receipt_id=uuid::Uuid::from_bytes(id[..16].try_into().map_err(|_|"HOST_RECEIPT_ID_FAILED")?).to_hyphenated().to_string();
     let fresh=serde_json::json!({"schemaVersion":1,"source":"HOST","receiptId":receipt_id,
       "operationId":c.operation_id,"sessionId":c.session_id,"prepareOperationId":c.prepare_operation_id,
       "handoffBindingId":c.handoff_binding_id,"nativeSessionId":c.native_session_id,"claimId":c.claim_id,
       "pcId":c.pc_id,"userId":c.user_id,"applicationActivationId":c.application_activation_id,
-      "commandId":c.command_id,"challenge":c.challenge,"observedAt":Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis,true),
+      "commandId":c.command_id,"challenge":c.challenge,"observedAt":observed_at,
       "proof":{"streamTerminated":true,"activeRentalStreams":0,"inspectionDigest":hex::encode(c.digest()?)}});
     let receipt_path=root.join("moonlight").join("server").join("cleanup-receipts").join(format!("{}.dpapi",c.operation_id));
     let receipt:serde_json::Value=if receipt_path.exists(){
