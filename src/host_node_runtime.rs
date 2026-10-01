@@ -3,6 +3,8 @@
 use super::*;
 use std::sync::Mutex;
 use sha2::{Digest, Sha256};
+#[path = "host_status_transport.rs"]
+mod status_transport;
 
 struct Verified {
     binding: provisioning::UniversalHostBinding,
@@ -89,15 +91,22 @@ pub(super) fn sync(paths: &BundlePaths, state: &mut HostActivationStateRecord) -
         .build().map_err(|_| anyhow!("NODE_STATUS_CLIENT_FAILED"))?;
     // Status verifies the existing credential. It neither reclaims the license
     // nor sends observations of readiness/heartbeat on behalf of the runtime.
-    let response = match client.post(format!("{}/api/v1/host-activation/status", provisioning::NODE_CONTROL_PLANE))
-        .json(&serde_json::json!({"hostId": binding.host_id, "machineIdentity":binding.machine_identity,
-            "installInstanceId":binding.install_instance_id,"runtimeToken":state.runtime_token}))
-        .send() {
-        Ok(response) => response,
-        Err(_) => { if !allows(state) { state.activation_state = "node_backend_unavailable".into(); } bail!("NODE_STATUS_NETWORK_UNAVAILABLE"); }
+    let request=serde_json::json!({"hostId": binding.host_id, "machineIdentity":binding.machine_identity,
+        "installInstanceId":binding.install_instance_id,"runtimeToken":state.runtime_token});
+    let response = client.post(format!("{}/api/v1/host-activation/status", provisioning::NODE_CONTROL_PLANE))
+        .json(&request).send();
+    let (code,payload)=match response {
+        Ok(response)=>{
+            let code=response.status().as_u16();
+            let payload=if response.status().is_success(){response.json::<Value>().map_err(|_|{invalidate();anyhow!("NODE_STATUS_RESPONSE_INVALID")})?}else{Value::Null};
+            (code,payload)
+        },
+        Err(_)=>match status_transport::status(&request){
+            Ok(response)=>response,
+            Err(_)=>{if !allows(state){state.activation_state="node_backend_unavailable".into();}bail!("NODE_STATUS_NETWORK_UNAVAILABLE");}
+        }
     };
-    if !response.status().is_success() {
-        let code = response.status().as_u16();
+    if !(200..300).contains(&code) {
         invalidate(); state.activation_state = match code {
             401 => "node_credential_repair_required",
             403 => "suspended",
@@ -109,7 +118,6 @@ pub(super) fn sync(paths: &BundlePaths, state: &mut HostActivationStateRecord) -
         save_activation_state(paths, state)?;
         bail!("NODE_STATUS_HTTP_{code}");
     }
-    let payload: Value = response.json().map_err(|_| { invalidate(); anyhow!("NODE_STATUS_RESPONSE_INVALID") })?;
     let phase = binding.verified_status(&payload).map_err(|_| { invalidate(); anyhow!("NODE_STATUS_BINDING_MISMATCH") })?;
     // Recheck files after network I/O; repair/rotation during request invalidates it.
     let latest = provisioning::read_universal_host_binding(&paths.bundle_root)?;
