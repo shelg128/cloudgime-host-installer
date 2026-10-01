@@ -39,9 +39,15 @@ impl Conn for UdpSocket {
         #[cfg(feature = "cloudgime-scoped-direct-recovery")]
         if sent == buf.len() {
             if let Ok(local) = self.local_addr() {
+            #[cfg(not(feature="cloudgime-recovery-delay-qa"))]
             if let Some((budget, cost)) = super::scoped_recovery::permit(buf, target, local.port()) {
                 let copied = self.try_send_to(buf, target).is_ok_and(|n| n == buf.len());
                 budget.result(cost, copied);
+            }
+            #[cfg(feature="cloudgime-recovery-delay-qa")]
+            if let Some((budget, bytes, cost))=super::scoped_recovery::delayed_copy(buf,target,local.port()){
+                let copied=self.try_send_to(&bytes,target).is_ok_and(|n|n==bytes.len());
+                budget.result(cost,copied);
             }
             }
         }

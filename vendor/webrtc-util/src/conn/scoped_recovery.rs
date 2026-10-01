@@ -5,23 +5,28 @@ use std::{future::Future,net::SocketAddr,sync::{Arc,Mutex,atomic::{AtomicBool,At
 #[path="recovery_share.rs"]
 mod recovery_share;
 use recovery_share::ShareBudget;
+#[cfg(feature="cloudgime-recovery-delay-qa")]
+#[path="recovery_delayed.rs"]
+mod recovery_delayed;
+#[cfg(feature="cloudgime-recovery-delay-qa")]
+pub use recovery_delayed::delayed_copy;
 
 #[derive(Debug,Default,Clone,Copy)]
 pub struct Snapshot {pub originals:u64,pub original_bytes:u64,pub copies:u64,pub extra_bytes:u64,pub limited:u64,pub blocked:u64}
-struct Bucket {share:Option<ShareBudget>,last:Instant,bytes:f64,packets:f64,until:Instant,backoff:Instant,stats:Snapshot}
+struct Bucket {#[cfg(feature="cloudgime-recovery-delay-qa")] delayed:recovery_delayed::DelayedSlot,share:Option<ShareBudget>,last:Instant,bytes:f64,packets:f64,until:Instant,backoff:Instant,stats:Snapshot}
 pub struct CopyBudget {deadline:Instant,byte_rate:f64,packet_rate:f64,burst_bytes:f64,burst_packets:f64,enabled:AtomicBool,generation:AtomicU64,state:Mutex<Bucket>}
 impl CopyBudget {
  pub fn new(lifetime:Duration,kbps:u32,pps:u32)->Option<Arc<Self>>{
   if lifetime.is_zero()||!(1..=8000).contains(&kbps)||!(1..=2000).contains(&pps){return None}
   let now=Instant::now();let bytes=kbps as f64*125.;let packets=pps as f64;
-  Some(Arc::new(Self{deadline:now.checked_add(lifetime)?,byte_rate:bytes,packet_rate:packets,burst_bytes:(bytes*0.1).clamp(1400.,32000.),burst_packets:(packets*0.1).clamp(1.,32.),enabled:AtomicBool::new(true),generation:AtomicU64::new(1),state:Mutex::new(Bucket{share:None,last:now,bytes:0.,packets:0.,until:now,backoff:now,stats:Snapshot::default()})}))
+  Some(Arc::new(Self{deadline:now.checked_add(lifetime)?,byte_rate:bytes,packet_rate:packets,burst_bytes:(bytes*0.1).clamp(1400.,32000.),burst_packets:(packets*0.1).clamp(1.,32.),enabled:AtomicBool::new(true),generation:AtomicU64::new(1),state:Mutex::new(Bucket{#[cfg(feature="cloudgime-recovery-delay-qa")] delayed:Default::default(),share:None,last:now,bytes:0.,packets:0.,until:now,backoff:now,stats:Snapshot::default()})}))
  }
  pub fn new_with_share(lifetime:Duration,kbps:u32,pps:u32,percent:u8)->Option<Arc<Self>>{
   let share=ShareBudget::new(percent)?;let budget=Self::new(lifetime,kbps,pps)?;
   budget.state.lock().ok()?.share=Some(share);Some(budget)
  }
  pub fn activate(&self,for_time:Duration){if !self.enabled.load(Ordering::Acquire){return}let now=Instant::now();if let Ok(mut s)=self.state.lock(){s.until=now+for_time.min(Duration::from_secs(20));}}
- pub fn suspend(&self){if let Ok(mut s)=self.state.lock(){s.until=Instant::now();s.bytes=0.;s.packets=0.;if let Some(share)=&mut s.share{share.reset();}self.generation.fetch_add(1,Ordering::AcqRel);}}
+ pub fn suspend(&self){if let Ok(mut s)=self.state.lock(){s.until=Instant::now();s.bytes=0.;s.packets=0.;#[cfg(feature="cloudgime-recovery-delay-qa")]s.delayed.reset();if let Some(share)=&mut s.share{share.reset();}self.generation.fetch_add(1,Ordering::AcqRel);}}
  pub fn revoke(&self){self.enabled.store(false,Ordering::Release);self.suspend();}
  pub fn snapshot(&self)->Snapshot{self.state.lock().map(|s|s.stats).unwrap_or_default()}
  fn reserve(&self,wire_bytes:usize)->bool{self.reserve_generation(wire_bytes,self.generation.load(Ordering::Acquire))}
@@ -33,7 +38,7 @@ impl CopyBudget {
   if let Some(share)=&mut s.share{share.debit(wire_bytes);}
   s.bytes-=wire_bytes as f64;s.packets-=1.;true
  }
- pub fn result(&self,wire_bytes:usize,ok:bool){if let Ok(mut s)=self.state.lock(){if ok{s.stats.copies+=1;s.stats.extra_bytes+=wire_bytes as u64}else{s.stats.blocked+=1;if let Some(share)=&mut s.share{share.reset();}s.backoff=Instant::now()+Duration::from_secs(1)}}}
+ pub fn result(&self,wire_bytes:usize,ok:bool){if let Ok(mut s)=self.state.lock(){if ok{s.stats.copies+=1;s.stats.extra_bytes+=wire_bytes as u64}else{s.stats.blocked+=1;#[cfg(feature="cloudgime-recovery-delay-qa")]s.delayed.reset();if let Some(share)=&mut s.share{share.reset();}s.backoff=Instant::now()+Duration::from_secs(1)}}}
 }
 impl Drop for CopyBudget{fn drop(&mut self){self.enabled.store(false,Ordering::Release);}}
 
@@ -48,13 +53,16 @@ pub async fn within<F:Future>(permission:CopyScope,send:F)->F::Output{CURRENT.sc
 /// Only matches a single negotiated SRTP packet. TURN/DTLS/STUN/RTCP have
 /// different framing and cannot match. No payload/cryptographic rewrite.
 pub fn permit(buf:&[u8],target:SocketAddr,local_port:u16)->Option<(Arc<CopyBudget>,usize)>{CURRENT.try_with(|s|{
+ if eligible_cost(s,buf,target,local_port).is_none(){return None}
+ if s.used.swap(true,Ordering::AcqRel){return None}
+ let cost=buf.len()+if target.is_ipv4(){28}else{48};s.budget.reserve_generation(cost,s.generation).then(||(s.budget.clone(),cost))
+ }).ok().flatten()}
+fn eligible_cost(s:&CopyScope,buf:&[u8],target:SocketAddr,local_port:u16)->Option<usize>{
  if !s.binding_live.load(Ordering::Acquire)||target!=s.target||local_port!=s.local_port||s.created.elapsed()>Duration::from_millis(50)||buf.len()<22||buf.len()>1280||buf[0]>>6!=2||buf[1]&127!=s.payload_type{return None}
  if u16::from_be_bytes([buf[2],buf[3]])!=s.sequence||u32::from_be_bytes([buf[8],buf[9],buf[10],buf[11]])!=s.ssrc{return None}
  let mut header=12+(buf[0]&15)as usize*4;if buf.len()<header+10{return None}if buf[0]&0x10!=0{if buf.len()<header+4+10{return None}let words=u16::from_be_bytes([buf[header+2],buf[header+3]])as usize;header=header.checked_add(4+words*4)?;if buf.len()<header+10{return None}}
- if s.used.swap(true,Ordering::AcqRel){return None}
- // Include IP+UDP overhead in the extra-bandwidth budget (not link framing).
- let cost=buf.len()+if target.is_ipv4(){28}else{48};s.budget.reserve_generation(cost,s.generation).then(||(s.budget.clone(),cost))
- }).ok().flatten()}
+ Some(buf.len()+if target.is_ipv4(){28}else{48})
+}
 
 #[cfg(test)]mod tests{
  use super::*;

@@ -26,8 +26,10 @@ async fn real_local_peer_negotiates_binding_and_scoped_ciphertext_copy(){
   let received=rx.recv().await.expect("receiver packet");assert_eq!(received.header.sequence_number,4);assert_eq!(received.header.ssrc,ssrc);assert_eq!(received.header.payload_type,120);
   if cfg!(feature="cloudgime-recovery-share-qa"){
    assert_eq!(recovery.budget.snapshot().copies,0,"no startup credit for a single original");
-   for seq in 5..=7 {let mut next=packet.clone();next.header.sequence_number=seq;let permission=track.permission(seq).await.unwrap();webrtc_util::conn::scoped_recovery::within(permission,raw.write_rtp_with_extensions(&next,&[])).await.unwrap();}
+   for seq in 5..=(4+100/super::RECOVERY_SHARE as u16-1) {let mut next=packet.clone();next.header.sequence_number=seq;let permission=track.permission(seq).await.unwrap();webrtc_util::conn::scoped_recovery::within(permission,raw.write_rtp_with_extensions(&next,&[])).await.unwrap();}
   }
+  #[cfg(feature="cloudgime-recovery-delay-qa")]
+  {assert_eq!(recovery.budget.snapshot().copies,0);sleep(Duration::from_millis(4)).await;let mut next=packet.clone();next.header.sequence_number=40;let permission=track.permission(40).await.unwrap();webrtc_util::conn::scoped_recovery::within(permission,raw.write_rtp_with_extensions(&next,&[])).await.unwrap();}
   assert_eq!(recovery.budget.snapshot().copies,1,"context must survive encryption/mux to UDP");
  }).await;
  a.close().await.unwrap();b.close().await.unwrap();outcome.expect("local negotiation/ciphertext timed out");

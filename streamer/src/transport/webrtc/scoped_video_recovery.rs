@@ -7,6 +7,7 @@ use webrtc_util::conn::scoped_recovery::{CopyBudget,CopyScope};
 #[path="recovery_loss_policy.rs"]
 mod recovery_loss_policy;
 use recovery_loss_policy::{LossPolicy,Decision};
+const RECOVERY_SHARE:u8=if cfg!(feature="cloudgime-recovery-share5-qa"){5}else if cfg!(feature="cloudgime-recovery-share10-qa"){10}else{25};
 
 pub(super) struct Recovery {peer:Weak<RTCPeerConnection>,pub budget:Arc<CopyBudget>,policy:std::sync::Mutex<LossPolicy>}
 impl Recovery {
@@ -14,7 +15,7 @@ impl Recovery {
   let now=SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_millis()as u64;if !grant.valid_at(now){return None}
   let lifetime=Duration::from_millis(grant.authority_expires_at_unix_ms-now);
   let budget=if cfg!(feature="cloudgime-recovery-share-qa"){
-   CopyBudget::new_with_share(lifetime,grant.max_extra_kbps,grant.max_extra_packets_per_second,25)?
+   CopyBudget::new_with_share(lifetime,grant.max_extra_kbps,grant.max_extra_packets_per_second,RECOVERY_SHARE)?
   }else{CopyBudget::new(lifetime,grant.max_extra_kbps,grant.max_extra_packets_per_second)?};
   Some(Arc::new(Self{peer,budget,policy:std::sync::Mutex::new(LossPolicy::default())}))
  }
@@ -26,7 +27,7 @@ impl Recovery {
   let s=self.budget.snapshot();
   log::info!("CG_RECOVERY copies={} bytes={} limited={} blocked={}",s.copies,s.extra_bytes,s.limited,s.blocked);
   #[cfg(feature="cloudgime-recovery-share-qa")]
-  log::info!("CG_RSH o={} b={} c={} e={} p=25",s.originals,s.original_bytes,s.copies,s.extra_bytes);
+  log::info!("CG_RSH o={} b={} c={} e={} p={}",s.originals,s.original_bytes,s.copies,s.extra_bytes,RECOVERY_SHARE);
   log::info!("CG_RECOVERY_LOSS sent={sent} nacks={first_nacks} action={decision:?}");
  }
  pub fn suspend(&self){if let Ok(mut p)=self.policy.lock(){p.reset();}self.budget.suspend();}
@@ -72,6 +73,7 @@ mod scoped_recovery_peer_tests;
 
 #[cfg(test)]mod tests{
  use super::*;
+ #[test]fn share_percent_feature_is_bounded(){assert_eq!(RECOVERY_SHARE,if cfg!(feature="cloudgime-recovery-share5-qa"){5}else if cfg!(feature="cloudgime-recovery-share10-qa"){10}else{25});}
  #[test]fn relay_tcp_unknown_never_get_copy_authority(){assert!(direct_udp(Kind::Srflx,Kind::Host,RTCIceProtocol::Udp,RTCIceProtocol::Udp));for k in[Kind::Relay,Kind::Unspecified]{assert!(!direct_udp(k,Kind::Host,RTCIceProtocol::Udp,RTCIceProtocol::Udp));assert!(!direct_udp(Kind::Host,k,RTCIceProtocol::Udp,RTCIceProtocol::Udp));}assert!(!direct_udp(Kind::Host,Kind::Host,RTCIceProtocol::Tcp,RTCIceProtocol::Udp));}
  #[test]fn small_noisy_windows_and_extreme_loss_do_not_amplify(){assert!(!loss_activates(10,3));assert!(!loss_activates(1000,1));assert!(!loss_activates(100,80));assert!(loss_activates(500,50));assert!(!loss_activates(u64::MAX,1));}
  #[tokio::test]async fn extreme_loss_deactivates_existing_window(){let peer=Weak::new();let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;let recovery=Recovery::new(peer,&DirectRecoveryGrant{authority_expires_at_unix_ms:now+30000,max_extra_kbps:2000,max_extra_packets_per_second:1200}).unwrap();recovery.loss_window(100,10);tokio::time::sleep(Duration::from_millis(20)).await;let target="127.0.0.1:9999".parse().unwrap();let mut data=vec![0u8;100];data[0]=0x80;data[1]=120;data[2..4].copy_from_slice(&4u16.to_be_bytes());data[8..12].copy_from_slice(&123u32.to_be_bytes());recovery.loss_window(100,80);webrtc_util::conn::scoped_recovery::within(CopyScope::new(target,99,123,120,4,recovery.budget.clone()).unwrap(),async{assert!(webrtc_util::conn::scoped_recovery::permit(&data,target,99).is_none());}).await;}
