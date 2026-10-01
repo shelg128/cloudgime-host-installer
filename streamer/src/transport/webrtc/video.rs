@@ -51,6 +51,11 @@ use crate::transport::{
 };
 
 mod annexb;
+#[path = "video_rtp_clock.rs"]
+mod video_rtp_clock;
+#[cfg(feature = "cloudgime-frame-correlation-qa")]
+#[path = "frame_probe.rs"]
+mod frame_probe;
 mod h264;
 mod h265;
 #[cfg(test)]
@@ -80,6 +85,10 @@ pub struct WebRtcVideo {
     active_format: Option<VideoFormat>,
     codec: Option<VideoCodec>,
     samples: Vec<BytesMut>,
+    rtp_clock: video_rtp_clock::VideoRtpClock,
+    rtp_clock_began: std::time::Instant,
+    #[cfg(feature = "cloudgime-frame-correlation-qa")]
+    frame_probe: Arc<frame_probe::FrameProbe>,
 }
 
 impl WebRtcVideo {
@@ -92,6 +101,10 @@ impl WebRtcVideo {
             codec: None,
             supported_video_formats: SupportedVideoFormats::empty(),
             samples: Default::default(),
+            rtp_clock: Default::default(),
+            rtp_clock_began: std::time::Instant::now(),
+            #[cfg(feature = "cloudgime-frame-correlation-qa")]
+            frame_probe: Arc::new(frame_probe::FrameProbe::new()),
         }
     }
 
@@ -105,6 +118,8 @@ impl WebRtcVideo {
         };
 
         let needs_idr = self.needs_idr.clone();
+        #[cfg(feature = "cloudgime-frame-correlation-qa")]
+        let frame_probe = self.frame_probe.clone();
         self.sender
             .create_track(
                 TrackLocalStaticRTP::new(
@@ -120,6 +135,8 @@ impl WebRtcVideo {
                         let packet = packet.as_any();
 
                         if packet.is::<PictureLossIndication>() {
+                            #[cfg(feature = "cloudgime-frame-correlation-qa")]
+                            frame_probe.pli();
                             needs_idr.store(true, Ordering::Release);
                         }
                         if let Some(_max_bitrate) =
@@ -196,6 +213,8 @@ impl WebRtcVideo {
 
         if !same_format_reconfigure {
             let needs_idr = self.needs_idr.clone();
+            #[cfg(feature = "cloudgime-frame-correlation-qa")]
+            let frame_probe = self.frame_probe.clone();
             if let Err(err) = self
                 .sender
                 .create_track(
@@ -212,6 +231,8 @@ impl WebRtcVideo {
                             let packet = packet.as_any();
 
                             if packet.is::<PictureLossIndication>() {
+                                #[cfg(feature = "cloudgime-frame-correlation-qa")]
+                                frame_probe.pli();
                                 needs_idr.store(true, Ordering::Release);
                             }
                             if let Some(_max_bitrate) =
@@ -286,7 +307,9 @@ impl WebRtcVideo {
     }
 
     pub async fn send_decode_unit(&mut self, unit: &VideoDecodeUnit<'_>) -> DecodeResult {
-        let timestamp = (unit.timestamp.as_nanos() * 90000 / 1_000_000_000) as u32;
+        let source_ticks = (unit.timestamp.as_nanos() * 90_000 / 1_000_000_000) as u64;
+        let monotonic_ticks = (self.rtp_clock_began.elapsed().as_nanos() * 90_000 / 1_000_000_000) as u64;
+        let timestamp = self.rtp_clock.map(source_ticks, monotonic_ticks);
 
         let mut full_frame = Vec::new();
         for buffer in unit.buffers {
@@ -336,6 +359,8 @@ impl WebRtcVideo {
                     timestamp,
                     important,
                     &self.needs_idr,
+                    #[cfg(feature = "cloudgime-frame-correlation-qa")]
+                    Some(&self.frame_probe),
                 )
                 .await;
             }
@@ -374,6 +399,8 @@ impl WebRtcVideo {
                     timestamp,
                     important,
                     &self.needs_idr,
+                    #[cfg(feature = "cloudgime-frame-correlation-qa")]
+                    None,
                 )
                 .await;
             }
@@ -395,6 +422,8 @@ impl WebRtcVideo {
                     timestamp,
                     important,
                     &self.needs_idr,
+                    #[cfg(feature = "cloudgime-frame-correlation-qa")]
+                    None,
                 )
                 .await;
             }
@@ -438,11 +467,20 @@ async fn send_single_frame(
     timestamp: u32,
     important: bool,
     needs_idr: &AtomicBool,
+    #[cfg(feature = "cloudgime-frame-correlation-qa")] probe: Option<&frame_probe::FrameProbe>,
 ) {
+    #[cfg(feature = "cloudgime-frame-correlation-qa")]
+    let meta = frame_probe::summarize_h264(samples);
     let frame_samples = match packetize_access_unit(samples, payloader, timestamp) {
-        Ok(packets) if packets.is_empty() => return,
+        Ok(packets) if packets.is_empty() => {
+            #[cfg(feature = "cloudgime-frame-correlation-qa")]
+            if let Some(p)=probe {p.record(meta,timestamp,important,0,0,"empty");}
+            return;
+        },
         Ok(packets) => packets,
         Err(err) => {
+            #[cfg(feature = "cloudgime-frame-correlation-qa")]
+            if let Some(p)=probe {p.record(meta,timestamp,important,0,0,"packetizer_error");}
             warn!("[Stream]: access unit rejected before enqueue: {err}");
             sender.clear_queue(true).await;
             needs_idr.store(true, Ordering::Release);
@@ -454,7 +492,12 @@ async fn send_single_frame(
         sender.clear_queue(false).await;
     }
 
-    if !sender.send_samples(frame_samples, important).await {
+    #[cfg(feature = "cloudgime-frame-correlation-qa")]
+    let packet_meta=(frame_samples.len(),frame_samples.iter().filter(|p|p.header.marker).count());
+    let accepted=sender.send_samples(frame_samples, important).await;
+    #[cfg(feature = "cloudgime-frame-correlation-qa")]
+    if let Some(p)=probe {p.record(meta,timestamp,important,packet_meta.0,packet_meta.1,if accepted {"queued"}else{"queue_rejected"});}
+    if !accepted {
         sender.clear_queue(true).await;
 
         // We've dropped a frame (likely due to buffering)
