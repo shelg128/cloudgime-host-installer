@@ -1383,7 +1383,7 @@ fn write_dpapi_secret(_path: &Path, _plaintext: &[u8]) -> Result<()> {
     Err(anyhow!("DPAPI provisioning is supported only on Windows"))
 }
 
-fn restrict_to_local_system_and_current_user(path: &Path) -> Result<()> {
+pub(crate) fn restrict_to_local_system_and_current_user(path: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         let output = std::process::Command::new("icacls")

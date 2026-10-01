@@ -1900,7 +1900,7 @@ fn send_host_runtime_heartbeat_with_curl(
     heartbeat_body: &Value,
     activation: &mut HostActivationStateRecord,
 ) -> Result<bool> {
-    if Command::new("curl.exe").arg("--version").output().is_err() {
+    if Command::new("curl.exe").arg("--disable").arg("--version").output().is_err() {
         append_supervisor_log(paths, "host runtime heartbeat curl fallback unavailable")?;
         return Ok(false);
     }
@@ -1910,11 +1910,17 @@ fn send_host_runtime_heartbeat_with_curl(
         now_unix_ms()
     ));
     fs::write(&body_path, serde_json::to_vec(heartbeat_body)?)?;
+    provisioning::restrict_to_local_system_and_current_user(&body_path)?;
 
     let url = format!("{control_plane_url}/api/v1/host/heartbeat");
     let data_arg = format!("@{}", body_path.display());
     let mut command = Command::new("curl.exe");
     command
+        .arg("--disable")
+        .arg("--proto").arg("=https")
+        .arg("--connect-timeout").arg("3")
+        .arg("--max-time").arg("7")
+        .arg("--max-filesize").arg("65536")
         .arg("--silent")
         .arg("--show-error")
         .arg("--request")
