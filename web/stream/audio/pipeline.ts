@@ -3,7 +3,7 @@ import { AudioDecoderPipe } from "./audio_decoder_pipe.js"
 import { AudioElementPlayer } from "./audio_element.js"
 import { AudioMediaStreamTrackGeneratorPipe } from "./media_stream_track_generator_pipe.js"
 import { Logger } from "../log.js"
-import { buildPipeline, gatherPipeInfo, OutputPipeStatic, PipeInfoStatic, PipeStatic } from "../pipeline/index.js"
+import { buildPipeline, getPipeInfo, OutputPipeStatic, PipeInfoStatic, PipeStatic } from "../pipeline/index.js"
 import { OpusAudioDecoderPipe } from "./opus_decoder_pipe.js"
 import { AudioBufferPipe as AudioPcmBufferPipe } from "./audio_buffer_pipe.js"
 import { ContextDestinationNodeAudioPlayer } from "./audio_context_destination.js"
@@ -40,7 +40,6 @@ export function buildAudioPipeline(type: "audiotrack", settings: AudioPipelineOp
 export function buildAudioPipeline(type: "data", settings: AudioPipelineOptions, logger?: Logger): Promise<PipelineResult<DataPipe & AudioPlayer>>
 
 export async function buildAudioPipeline(type: string, settings: AudioPipelineOptions, logger?: Logger): Promise<PipelineResult<AudioPlayer>> {
-    const pipesInfo = await gatherPipeInfo()
 
     if (logger) {
         logger.debug(`Inspecting ${AUDIO_PLAYERS.length} audio players`)
@@ -57,7 +56,7 @@ export async function buildAudioPipeline(type: string, settings: AudioPipelineOp
 
         // Check if supported
         for (const pipe of pipeline.pipes) {
-            const pipeInfo = pipesInfo.get(pipe)
+            const pipeInfo = await getPipeInfo(pipe)
             if (!pipeInfo) {
                 logger?.debug(`Failed to query info for audio pipe ${pipe.name}`)
                 continue pipelineLoop

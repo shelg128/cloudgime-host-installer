@@ -8,7 +8,7 @@ import { buildAudioPipeline } from "./audio/pipeline.js"
 import { BIG_BUFFER, ByteBuffer } from "./buffer.js"
 import { defaultStreamInputConfig, StreamInput } from "./input.js"
 import { Logger, LogMessageInfo } from "./log.js"
-import { gatherPipeInfo, getPipe } from "./pipeline/index.js"
+import { getPipe } from "./pipeline/index.js"
 import { StreamStats } from "./stats.js"
 import {
     Transport,
@@ -1244,8 +1244,7 @@ export class Stream implements Component {
 
         this.debugLog("Beginning pipeline creation after WebRTC connection")
 
-        const pipesInfo = await gatherPipeInfo()
-        this.debugLog(`Pipe inventory ready (${pipesInfo.size})`)
+        this.debugLog("Inspecting only selected transport pipeline capabilities")
 
         const videoCodecSupport = await this.createPipelines()
         if (!videoCodecSupport) {
@@ -1293,8 +1292,6 @@ export class Stream implements Component {
 
     private async createPipelines(): Promise<VideoCodecSupport | null> {
         this.debugLog("Creating video and audio pipelines")
-        const pipesInfo = await gatherPipeInfo()
-        this.debugLog(`Pipeline capability snapshot ready (${pipesInfo.size})`)
 
         // Create pipelines
         const [supportedVideoCodecs] = await Promise.all([this.createVideoRenderer(), this.createAudioPlayer()])

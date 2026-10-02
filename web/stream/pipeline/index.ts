@@ -100,31 +100,23 @@ export function buildPipeline(base: OutputPipeStatic, pipeline: Pipeline, logger
     return pipe
 }
 
-let PIPE_INFO: Promise<Map<PipeStatic, PipeInfo>> | null
+const PIPE_INFO_CACHE = new Map<PipeStatic, Promise<PipeInfo>>()
 
-export function gatherPipeInfo(): Promise<Map<PipeStatic, PipeInfo>> {
-    if (PIPE_INFO) {
-        return PIPE_INFO
-    } else {
-        PIPE_INFO = gatherPipeInfoInternal()
-        return PIPE_INFO
-    }
+/** Probe only capabilities selection reaches. Share concurrent work; evict errors
+ * so a transient worker/module failure does not poison all later attempts. */
+export function getPipeInfo(pipe: PipeStatic): Promise<PipeInfo> {
+    const cached = PIPE_INFO_CACHE.get(pipe)
+    if (cached) return cached
+    const pending = Promise.resolve().then(() => pipe.getInfo())
+    PIPE_INFO_CACHE.set(pipe, pending)
+    pending.catch(() => { if (PIPE_INFO_CACHE.get(pipe) === pending) PIPE_INFO_CACHE.delete(pipe) })
+    return pending
 }
-async function gatherPipeInfoInternal(): Promise<Map<PipeStatic, PipeInfo>> {
-    const map = new Map()
 
-    const promises = []
-
-    const all: Array<PipeStatic> = pipes()
-    for (const pipe of all) {
-        promises.push(pipe.getInfo().then(info => {
-            map.set(pipe, info)
-        }))
-    }
-
-    await Promise.all(promises)
-
-    return map
+// Explicit inventory remains available but is never on the stream startup path.
+export async function gatherPipeInfo(): Promise<Map<PipeStatic, PipeInfo>> {
+    const entries = await Promise.all(pipes().map(async pipe => [pipe, await getPipeInfo(pipe)] as const))
+    return new Map(entries)
 }
 
 export function pipes(): Array<PipeStatic> {

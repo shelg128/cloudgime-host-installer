@@ -27,24 +27,38 @@ export class WorkerPipe implements WorkerReceiver {
         }
 
         const sendMessage: ToWorkerMessage = { checkSupport: pipeline }
-        worker.postMessage(sendMessage)
-
-        const info = await new Promise<PipeInfo>((resolve, reject) => {
+        // Install handlers BEFORE sending, and release this probe-only worker on
+        // every outcome. It is not the worker used by an active media pipeline.
+        return new Promise<PipeInfo>((resolve, reject) => {
+            let settled = false
+            const finish = (info?: PipeInfo, error?: unknown) => {
+                if (settled) return
+                settled = true
+                clearTimeout(timer)
+                worker.onmessage = null
+                worker.onerror = null
+                worker.onmessageerror = null
+                worker.terminate()
+                if (error) reject(error)
+                else resolve(info!)
+            }
+            const timer = setTimeout(() => finish(undefined, new Error("Worker capability probe timed out")), 12000)
             worker.onmessage = (event) => {
                 const message = event.data as ToMainMessage
-
-                if ("checkSupport" in message) {
-                    resolve(message.checkSupport)
-                } else if ("log" in message) {
-                    throw message.log
-                } else {
-                    throw "Failed to get info about worker pipeline because it returned a wrong message"
-                }
+                if (message && typeof message === "object" && "checkSupport" in message) {
+                    const info = message.checkSupport
+                    if (!info || typeof info.environmentSupported !== "boolean") {
+                        finish(undefined, new Error("Invalid worker capability response"))
+                    } else finish(info)
+                } else if (message && typeof message === "object" && "log" in message) {
+                    // Informational logs are not the support result.
+                } else finish(undefined, new Error("Unexpected worker capability response"))
             }
-            worker.onerror = reject
+            worker.onerror = () => finish(undefined, new Error("Worker capability probe failed"))
+            worker.onmessageerror = () => finish(undefined, new Error("Worker capability response could not be decoded"))
+            try { worker.postMessage(sendMessage) }
+            catch (error) { finish(undefined, error) }
         })
-
-        return info
     }
 
     readonly implementationName: string

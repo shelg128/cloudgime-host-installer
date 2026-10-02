@@ -5,7 +5,7 @@ import { VideoDecoderPipe } from "./video_decoder_pipe.js"
 import { DepacketizeVideoPipe } from "./depackitize_pipe.js"
 import { Logger } from "../log.js"
 import { andVideoCodecs, hasAnyCodec, VideoCodecSupport } from "../video.js"
-import { buildPipeline, gatherPipeInfo, OutputPipeStatic, PipeInfoStatic, PipeStatic } from "../pipeline/index.js"
+import { buildPipeline, getPipeInfo, OutputPipeStatic, PipeInfoStatic, PipeStatic } from "../pipeline/index.js"
 import { DataPipe } from "../pipeline/pipes.js"
 import { workerPipe } from "../pipeline/worker_pipe.js"
 import { WorkerVideoDataSendPipe, WorkerVideoFrameReceivePipe, WorkerVideoTrackReceivePipe, WorkerVideoTrackSendPipe } from "../pipeline/worker_io.js"
@@ -86,7 +86,6 @@ export async function buildVideoPipeline(type: "videotrack", settings: VideoPipe
 export async function buildVideoPipeline(type: "data", settings: VideoPipelineOptions, logger?: Logger): Promise<PipelineResult<DataPipe & VideoRenderer>>
 
 export async function buildVideoPipeline(type: string, settings: VideoPipelineOptions, logger?: Logger): Promise<PipelineResult<VideoRenderer>> {
-    const pipesInfo = await gatherPipeInfo()
 
     if (logger) {
         logger.debug(`Inspecting ${VIDEO_RENDERERS.length} video renderers`)
@@ -132,7 +131,7 @@ export async function buildVideoPipeline(type: string, settings: VideoPipelineOp
         // Check if supported and contains codecs
         let supportedCodecs = settings.supportedVideoCodecs
         for (const pipe of pipeline.pipes) {
-            const pipeInfo = pipesInfo.get(pipe)
+            const pipeInfo = await getPipeInfo(pipe)
             if (!pipeInfo) {
                 logger?.debug(`Failed to query info for video pipe ${pipe.name}`)
                 continue pipelineLoop
