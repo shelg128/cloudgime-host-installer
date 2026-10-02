@@ -62,6 +62,8 @@ fn video_playout_delay(label: &str) -> PlayoutDelayExtension {
     } else { PlayoutDelayExtension::new(0, 0) }
 }
 
+fn include_abs_send_time(label:&str)->bool{!(cfg!(feature="cloudgime-video-noast-qa")&&label=="video")}
+
 pub fn register_header_extensions(api_media: &mut MediaEngine) -> Result<(), webrtc::Error> {
     api_media.register_header_extension(
         RTCRtpHeaderExtensionCapability {
@@ -78,6 +80,7 @@ pub fn register_header_extensions(api_media: &mut MediaEngine) -> Result<(), web
         None,
     )?;
 
+    if include_abs_send_time("video") {
     api_media.register_header_extension(
         RTCRtpHeaderExtensionCapability {
             uri: ABS_SEND_TIME_URI.to_string(),
@@ -85,6 +88,7 @@ pub fn register_header_extensions(api_media: &mut MediaEngine) -> Result<(), web
         RTPCodecType::Video,
         None,
     )?;
+    }
     api_media.register_header_extension(
         RTCRtpHeaderExtensionCapability {
             uri: ABS_SEND_TIME_URI.to_string(),
@@ -298,17 +302,9 @@ async fn sample_sender<Track>(
             let now_secs = now.as_secs() as f64 + now.subsec_nanos() as f64 * 1e-9;
             let abs_send_time: u64 = (now_secs * 262_144.0) as u64;
 
-            match track
-                .write_with_extensions(
-                    sample,
-                    &[
-                        HeaderExtension::PlayoutDelay(video_playout_delay(label)),
-                        HeaderExtension::AbsSendTime(AbsSendTimeExtension {
-                            timestamp: abs_send_time,
-                        }),
-                    ],
-                )
-                .await
+            let extensions=[HeaderExtension::PlayoutDelay(video_playout_delay(label)),HeaderExtension::AbsSendTime(AbsSendTimeExtension{timestamp:abs_send_time})];
+            let extensions=if include_abs_send_time(label){&extensions[..]}else{&extensions[..1]};
+            match track.write_with_extensions(sample,extensions).await
             {
                 Ok(bytes_written) => {
                     if bytes_written == 0 { zero_writes += 1; continue; }
@@ -514,6 +510,9 @@ mod sender_sequence_tests {
         assert_eq!(*b.sequence_number.lock().await, 0);
         assert_eq!(*a.sequence_number.lock().await, 1);
     }
+
+    #[test]fn ast_control_is_opt_in_video_only(){assert!(include_abs_send_time("audio"));assert!(include_abs_send_time("other"));assert_eq!(include_abs_send_time("video"),!cfg!(feature="cloudgime-video-noast-qa"));assert_eq!(video_playout_delay("video"),PlayoutDelayExtension::new(0,if cfg!(feature="cloudgime-jitter-window-qa"){10}else{0}));}
+    #[tokio::test]async fn sdp_extension_configuration_matches_video_only_qa(){use webrtc::{api::APIBuilder,peer_connection::configuration::RTCConfiguration};let mut media=MediaEngine::default();media.register_default_codecs().unwrap();register_header_extensions(&mut media).unwrap();let api=APIBuilder::new().with_media_engine(media).build();let pc=api.new_peer_connection(RTCConfiguration::default()).await.unwrap();pc.add_transceiver_from_kind(RTPCodecType::Video,None).await.unwrap();pc.add_transceiver_from_kind(RTPCodecType::Audio,None).await.unwrap();let offer=pc.create_offer(None).await.unwrap();let sections:Vec<_>=offer.sdp.split("\r\nm=").collect();let v=sections.iter().find(|s|s.starts_with("video ")).unwrap();let a=sections.iter().find(|s|s.starts_with("audio ")).unwrap();assert_eq!(v.contains(ABS_SEND_TIME_URI),include_abs_send_time("video"));assert!(a.contains(ABS_SEND_TIME_URI));assert!(v.contains(PLAYOUT_DELAY_URI));pc.close().await.unwrap();}
 
     #[test]
     fn playout_window_is_qa_only_and_never_changes_audio() {
