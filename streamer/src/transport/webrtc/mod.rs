@@ -1,4 +1,6 @@
 #[cfg(feature="cloudgime-total-egress-qa")]
+mod original_write_qa;
+#[cfg(feature="cloudgime-total-egress-qa")]
 mod total_egress_qa;
 #[cfg(feature = "cloudgime-nack-dispatch-qa")]
 mod nack_dispatch_qa;

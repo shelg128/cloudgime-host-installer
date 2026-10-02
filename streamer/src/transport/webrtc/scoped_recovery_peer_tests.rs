@@ -9,6 +9,12 @@ async fn peer()->Arc<RTCPeerConnection>{
  let api_builder={let mut registry=webrtc::interceptor::registry::Registry::new();registry.add(Box::new(crate::transport::webrtc::total_egress_qa::Builder));api_builder.with_interceptor_registry(registry)};
  let api=api_builder.build();Arc::new(api.new_peer_connection(RTCConfiguration::default()).await.unwrap())
 }
+async fn write_original<F:std::future::Future>(seq:u16,ts:u32,send:F)->F::Output{
+ #[cfg(feature="cloudgime-total-egress-qa")]
+ {crate::transport::webrtc::original_write_qa::within(seq,ts,send).await}
+ #[cfg(not(feature="cloudgime-total-egress-qa"))]
+ {let _=(seq,ts);send.await}
+}
 #[tokio::test]
 async fn real_local_peer_negotiates_binding_and_scoped_ciphertext_copy(){
  let _=rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -25,11 +31,11 @@ async fn real_local_peer_negotiates_binding_and_scoped_ciphertext_copy(){
   recovery.loss_window(100,10);sleep(Duration::from_millis(25)).await;
   let scope=track.permission(4).await.expect("real negotiated binding must grant");assert_eq!(scope.payload_type,120);assert_ne!(scope.ssrc,0);
   let ssrc=scope.ssrc;let packet=Packet{header:webrtc::rtp::header::Header{version:2,sequence_number:4,timestamp:90000,marker:true,..Default::default()},payload:bytes::Bytes::from_static(&[0x65,1,2,3,4]),..Default::default()};
-  webrtc_util::conn::scoped_recovery::within(scope,raw.write_rtp_with_extensions(&packet,&[])).await.unwrap();
+  write_original(4,packet.header.timestamp,webrtc_util::conn::scoped_recovery::within(scope,raw.write_rtp_with_extensions(&packet,&[]))).await.unwrap();
   let received=rx.recv().await.expect("receiver packet");assert_eq!(received.header.sequence_number,4);assert_eq!(received.header.ssrc,ssrc);assert_eq!(received.header.payload_type,120);
   if cfg!(feature="cloudgime-recovery-share-qa"){
    assert_eq!(recovery.budget.snapshot().copies,0,"no startup credit for a single original");
-   for seq in 5..=(4+100/super::RECOVERY_SHARE as u16-1) {let mut next=packet.clone();next.header.sequence_number=seq;let permission=track.permission(seq).await.unwrap();webrtc_util::conn::scoped_recovery::within(permission,raw.write_rtp_with_extensions(&next,&[])).await.unwrap();}
+   for seq in 5..=(4+100/super::RECOVERY_SHARE as u16-1) {let mut next=packet.clone();next.header.sequence_number=seq;let permission=track.permission(seq).await.unwrap();write_original(seq,next.header.timestamp,webrtc_util::conn::scoped_recovery::within(permission,raw.write_rtp_with_extensions(&next,&[]))).await.unwrap();}
   }
   #[cfg(feature="cloudgime-recovery-delay-qa")]
   {assert_eq!(recovery.budget.snapshot().copies,0);sleep(Duration::from_millis(4)).await;let mut next=packet.clone();next.header.sequence_number=40;let permission=track.permission(40).await.unwrap();webrtc_util::conn::scoped_recovery::within(permission,raw.write_rtp_with_extensions(&next,&[])).await.unwrap();}

@@ -451,6 +451,8 @@ impl TrackLike for SequencedTrackLocalStaticRTP {
 
         let permission=if let Some(track)=&self.recovery_track {track.permission(sample.header.sequence_number).await}else{None};
         let send=async {let send=self.track.write_rtp_with_extensions(&sample,extensions);if let Some(scope)=permission{webrtc_util::conn::scoped_recovery::within(scope,send).await}else{send.await}};
+        #[cfg(feature="cloudgime-total-egress-qa")]
+        let send=super::original_write_qa::within(sample.header.sequence_number,sample.header.timestamp,send);
         let bytes_written = match tokio::time::timeout(
             RTP_WRITE_TIMEOUT,
             send,
