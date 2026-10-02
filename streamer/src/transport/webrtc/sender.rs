@@ -44,6 +44,9 @@ mod nack_probe;
 use nack_probe::NackProbe;
 use super::scoped_video_recovery::{Recovery,RecoveryTrack};
 
+#[cfg(feature="cloudgime-egress-pacing-qa")]
+#[path="frame_egress_plan_qa.rs"]
+mod frame_egress_plan_qa;
 const PLAYOUT_DELAY_URI: &str = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay";
 const VIDEO_PACKET_PACING_BATCH: usize = 8;
 const VIDEO_PACKET_PACING_DELAY_US: u64 = 350;
@@ -280,8 +283,12 @@ async fn sample_sender<Track>(
         let send_started = Instant::now();
         let should_micro_pace = frame.samples.len() >= VIDEO_PACKET_PACING_BATCH * 2;
 
+        #[cfg(feature="cloudgime-egress-pacing-qa")]
+        let mut plan=frame_egress_plan_qa::FramePlan::default();
         for (index, sample) in frame.samples.into_iter().enumerate() {
-            if should_micro_pace && index > 0 && index % VIDEO_PACKET_PACING_BATCH == 0 {
+            #[cfg(feature="cloudgime-egress-pacing-qa")]
+            if label=="video" {if let Some(due)=plan.next_due(send_started.elapsed()) {tokio::time::sleep_until(tokio::time::Instant::from_std(send_started+due)).await;}}
+            if !(cfg!(feature="cloudgime-egress-pacing-qa")&&label=="video") && should_micro_pace && index > 0 && index % VIDEO_PACKET_PACING_BATCH == 0 {
                 tokio::time::sleep(Duration::from_micros(VIDEO_PACKET_PACING_DELAY_US)).await;
             }
 
@@ -305,6 +312,8 @@ async fn sample_sender<Track>(
             {
                 Ok(bytes_written) => {
                     if bytes_written == 0 { zero_writes += 1; continue; }
+                    #[cfg(feature="cloudgime-egress-pacing-qa")]
+                    if label=="video"{plan.record(((bytes_written as u64).saturating_add(60)).saturating_mul(5)/4);}
                     samples_written = samples_written.saturating_add(1);
                     bytes_written_total = bytes_written_total.saturating_add(bytes_written as u64);
                     if !first_write_logged {

@@ -1,3 +1,5 @@
+#[cfg(feature="cloudgime-total-egress-qa")]
+mod total_egress_qa;
 #[cfg(feature = "cloudgime-nack-dispatch-qa")]
 mod nack_dispatch_qa;
 
@@ -276,6 +278,8 @@ pub async fn new(
 
     // -- Build Api
     let mut api_registry = Registry::new();
+    #[cfg(feature="cloudgime-total-egress-qa")]
+    api_registry.add(Box::new(total_egress_qa::Builder));
     // First/inner interceptor observes authenticated feedback before the default
     // NACK responder and all RTP writes including its retransmissions.
     #[cfg(feature = "cloudgime-nack-dispatch-qa")]

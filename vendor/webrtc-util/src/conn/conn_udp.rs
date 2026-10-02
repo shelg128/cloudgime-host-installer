@@ -1,3 +1,6 @@
+#[cfg(all(feature="cloudgime-total-egress-qa",feature="cloudgime-recovery-delay-qa"))]
+compile_error!("Total-egress QA and delayed-copy QA require separate experiments; combined accounting is not validated.");
+
 #[cfg(feature = "cloudgime-datagram-redundancy-qa")]
 compile_error!("Unscoped QA datagram duplication is prohibited on the scoped recovery branch; use archived experiment bc18bf7 for evidence only.");
 
@@ -39,10 +42,16 @@ impl Conn for UdpSocket {
         #[cfg(feature = "cloudgime-scoped-direct-recovery")]
         if sent == buf.len() {
             if let Ok(local) = self.local_addr() {
+            #[cfg(feature="cloudgime-total-egress-qa")]
+            let observed=super::media_egress_qa::observe_success(buf,target,local.port());
             #[cfg(not(feature="cloudgime-recovery-delay-qa"))]
             if let Some((budget, cost)) = super::scoped_recovery::permit(buf, target, local.port()) {
+                #[cfg(feature="cloudgime-total-egress-qa")]
+                if !observed.as_ref().is_some_and(|l|l.reserve_copy(target,local.port(),cost)){return Ok(sent);}
                 let copied = self.try_send_to(buf, target).is_ok_and(|n| n == buf.len());
                 budget.result(cost, copied);
+                #[cfg(feature="cloudgime-total-egress-qa")]
+                if let Some(l)=observed{l.copy_result(cost,copied);}
             }
             #[cfg(feature="cloudgime-recovery-delay-qa")]
             if let Some((budget, bytes, cost))=super::scoped_recovery::delayed_copy(buf,target,local.port()){

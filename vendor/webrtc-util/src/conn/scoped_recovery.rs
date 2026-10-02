@@ -52,6 +52,8 @@ tokio::task_local! {static CURRENT:CopyScope;}
 pub async fn within<F:Future>(permission:CopyScope,send:F)->F::Output{CURRENT.scope(permission,send).await}
 /// Only matches a single negotiated SRTP packet. TURN/DTLS/STUN/RTCP have
 /// different framing and cannot match. No payload/cryptographic rewrite.
+#[cfg(feature="cloudgime-total-egress-qa")]
+pub fn is_original_write(ssrc:u32,pt:u8,seq:u16)->bool{CURRENT.try_with(|s|s.binding_live.load(Ordering::Acquire)&&s.ssrc==ssrc&&s.payload_type==pt&&s.sequence==seq&&s.created.elapsed()<=Duration::from_millis(50)&&!s.used.load(Ordering::Acquire)).unwrap_or(false)}
 pub fn permit(buf:&[u8],target:SocketAddr,local_port:u16)->Option<(Arc<CopyBudget>,usize)>{CURRENT.try_with(|s|{
  if eligible_cost(s,buf,target,local_port).is_none(){return None}
  if s.used.swap(true,Ordering::AcqRel){return None}

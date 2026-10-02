@@ -1,6 +1,8 @@
 pub mod conn_bridge;
 pub mod conn_disconnected_packet;
 pub mod conn_pipe;
+#[cfg(feature="cloudgime-total-egress-qa")]
+pub mod media_egress_qa;
 pub mod scoped_recovery;
 pub mod conn_udp;
 pub mod conn_udp_listener;

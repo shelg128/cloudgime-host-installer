@@ -4,7 +4,10 @@ use tokio::{sync::mpsc,time::{sleep,timeout}};
 async fn peer()->Arc<RTCPeerConnection>{
  let mut media=MediaEngine::default();media.register_codec(RTCRtpCodecParameters{capability:RTCRtpCodecCapability{mime_type:"video/H264".into(),clock_rate:90000,sdp_fmtp_line:"level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".into(),..Default::default()},payload_type:120,..Default::default()},RTPCodecType::Video).unwrap();
  let mut settings=SettingEngine::default();settings.set_network_types(vec![NetworkType::Udp4]);settings.set_include_loopback_candidate(true);settings.set_ip_filter(Box::new(|ip|ip.is_loopback()));
- let api=APIBuilder::new().with_media_engine(media).with_setting_engine(settings).build();Arc::new(api.new_peer_connection(RTCConfiguration::default()).await.unwrap())
+ let api_builder=APIBuilder::new().with_media_engine(media).with_setting_engine(settings);
+ #[cfg(feature="cloudgime-total-egress-qa")]
+ let api_builder={let mut registry=webrtc::interceptor::registry::Registry::new();registry.add(Box::new(crate::transport::webrtc::total_egress_qa::Builder));api_builder.with_interceptor_registry(registry)};
+ let api=api_builder.build();Arc::new(api.new_peer_connection(RTCConfiguration::default()).await.unwrap())
 }
 #[tokio::test]
 async fn real_local_peer_negotiates_binding_and_scoped_ciphertext_copy(){
