@@ -28,6 +28,8 @@ impl Recovery {
   log::info!("CG_RECOVERY copies={} bytes={} limited={} blocked={}",s.copies,s.extra_bytes,s.limited,s.blocked);
   #[cfg(feature="cloudgime-recovery-share-qa")]
   log::info!("CG_RSH o={} b={} c={} e={} p={}",s.originals,s.original_bytes,s.copies,s.extra_bytes,RECOVERY_SHARE);
+  #[cfg(feature="cloudgime-frame-tail-copy-qa")]
+  log::info!("CG_TAIL t={} b={} c={}",s.tail_copies,s.body_copies,s.copies);
   log::info!("CG_RECOVERY_LOSS sent={sent} nacks={first_nacks} action={decision:?}");
  }
  pub fn suspend(&self){if let Ok(mut p)=self.policy.lock(){p.reset();}self.budget.suspend();}

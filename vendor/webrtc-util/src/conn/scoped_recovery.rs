@@ -12,7 +12,7 @@ mod recovery_delayed;
 pub use recovery_delayed::delayed_copy;
 
 #[derive(Debug,Default,Clone,Copy)]
-pub struct Snapshot {pub originals:u64,pub original_bytes:u64,pub copies:u64,pub extra_bytes:u64,pub limited:u64,pub blocked:u64}
+pub struct Snapshot {pub originals:u64,pub original_bytes:u64,pub copies:u64,pub extra_bytes:u64,pub limited:u64,pub blocked:u64,pub tail_copies:u64,pub body_copies:u64}
 struct Bucket {#[cfg(feature="cloudgime-recovery-delay-qa")] delayed:recovery_delayed::DelayedSlot,share:Option<ShareBudget>,last:Instant,bytes:f64,packets:f64,until:Instant,backoff:Instant,stats:Snapshot}
 pub struct CopyBudget {deadline:Instant,byte_rate:f64,packet_rate:f64,burst_bytes:f64,burst_packets:f64,enabled:AtomicBool,generation:AtomicU64,state:Mutex<Bucket>}
 impl CopyBudget {
@@ -30,15 +30,18 @@ impl CopyBudget {
  pub fn revoke(&self){self.enabled.store(false,Ordering::Release);self.suspend();}
  pub fn snapshot(&self)->Snapshot{self.state.lock().map(|s|s.stats).unwrap_or_default()}
  fn reserve(&self,wire_bytes:usize)->bool{self.reserve_generation(wire_bytes,self.generation.load(Ordering::Acquire))}
- fn reserve_generation(&self,wire_bytes:usize,generation:u64)->bool{let now=Instant::now();if !self.enabled.load(Ordering::Acquire)||now>=self.deadline{return false}let Ok(mut s)=self.state.lock()else{return false};if !self.enabled.load(Ordering::Acquire)||self.generation.load(Ordering::Acquire)!=generation{return false}s.stats.originals+=1;s.stats.original_bytes+=wire_bytes as u64;
+ fn reserve_generation(&self,wire_bytes:usize,generation:u64)->bool{self.reserve_packet(wire_bytes,generation,true)}
+ fn reserve_packet(&self,wire_bytes:usize,generation:u64,end_frame:bool)->bool{let now=Instant::now();if !self.enabled.load(Ordering::Acquire)||now>=self.deadline{return false}let Ok(mut s)=self.state.lock()else{return false};if !self.enabled.load(Ordering::Acquire)||self.generation.load(Ordering::Acquire)!=generation{return false}s.stats.originals+=1;s.stats.original_bytes+=wire_bytes as u64;
   let elapsed=now.duration_since(s.last).as_secs_f64();s.last=now;s.bytes=(s.bytes+elapsed*self.byte_rate).min(self.burst_bytes);s.packets=(s.packets+elapsed*self.packet_rate).min(self.burst_packets);
   if now>=s.until||now<s.backoff{if let Some(share)=&mut s.share{share.reset();}return false}
-  if let Some(share)=&mut s.share{share.original(wire_bytes);if !share.allows(wire_bytes){s.stats.limited+=1;return false}}
+  if let Some(share)=&mut s.share{share.original(wire_bytes);let preserve=if cfg!(feature="cloudgime-frame-tail-copy-qa")&&!end_frame{1328}else{0};if !share.allows_preserving(wire_bytes,preserve){s.stats.limited+=1;return false}}
   if s.bytes<wire_bytes as f64||s.packets<1.{s.stats.limited+=1;return false}
   if let Some(share)=&mut s.share{share.debit(wire_bytes);}
   s.bytes-=wire_bytes as f64;s.packets-=1.;true
  }
- pub fn result(&self,wire_bytes:usize,ok:bool){if let Ok(mut s)=self.state.lock(){if ok{s.stats.copies+=1;s.stats.extra_bytes+=wire_bytes as u64}else{s.stats.blocked+=1;#[cfg(feature="cloudgime-recovery-delay-qa")]s.delayed.reset();if let Some(share)=&mut s.share{share.reset();}s.backoff=Instant::now()+Duration::from_secs(1)}}}
+ pub fn result_packet(&self,wire_bytes:usize,ok:bool,end_frame:bool){self.finish(wire_bytes,ok,Some(end_frame));}
+ pub fn result(&self,wire_bytes:usize,ok:bool){self.finish(wire_bytes,ok,None);}
+ fn finish(&self,wire_bytes:usize,ok:bool,end_frame:Option<bool>){if let Ok(mut s)=self.state.lock(){if ok{s.stats.copies+=1;s.stats.extra_bytes+=wire_bytes as u64;if let Some(end_frame)=end_frame{if end_frame{s.stats.tail_copies+=1;}else{s.stats.body_copies+=1;}}}else{s.stats.blocked+=1;#[cfg(feature="cloudgime-recovery-delay-qa")]s.delayed.reset();if let Some(share)=&mut s.share{share.reset();}s.backoff=Instant::now()+Duration::from_secs(1)}}}
 }
 impl Drop for CopyBudget{fn drop(&mut self){self.enabled.store(false,Ordering::Release);}}
 
@@ -57,7 +60,7 @@ pub fn is_original_write(ssrc:u32,pt:u8,seq:u16)->bool{CURRENT.try_with(|s|s.bin
 pub fn permit(buf:&[u8],target:SocketAddr,local_port:u16)->Option<(Arc<CopyBudget>,usize)>{CURRENT.try_with(|s|{
  if eligible_cost(s,buf,target,local_port).is_none(){return None}
  if s.used.swap(true,Ordering::AcqRel){return None}
- let cost=buf.len()+if target.is_ipv4(){28}else{48};s.budget.reserve_generation(cost,s.generation).then(||(s.budget.clone(),cost))
+ let cost=buf.len()+if target.is_ipv4(){28}else{48};s.budget.reserve_packet(cost,s.generation,buf[1]&0x80!=0).then(||(s.budget.clone(),cost))
  }).ok().flatten()}
 fn eligible_cost(s:&CopyScope,buf:&[u8],target:SocketAddr,local_port:u16)->Option<usize>{
  if !s.binding_live.load(Ordering::Acquire)||target!=s.target||local_port!=s.local_port||s.created.elapsed()>Duration::from_millis(50)||buf.len()<22||buf.len()>1280||buf[0]>>6!=2||buf[1]&127!=s.payload_type{return None}
@@ -71,6 +74,11 @@ fn eligible_cost(s:&CopyScope,buf:&[u8],target:SocketAddr,local_port:u16)->Optio
  fn target()->SocketAddr{"127.0.0.1:34567".parse().unwrap()}
  fn data()->Vec<u8>{let mut b=vec![0;100];b[0]=0x80;b[1]=120;b[2..4].copy_from_slice(&4u16.to_be_bytes());b[8..12].copy_from_slice(&123u32.to_be_bytes());b}
  async fn active()->Arc<CopyBudget>{let b=CopyBudget::new(Duration::from_secs(30),2000,1200).unwrap();b.activate(Duration::from_secs(20));tokio::time::sleep(Duration::from_millis(20)).await;b}
+ #[cfg(feature="cloudgime-frame-tail-copy-qa")]
+ #[test]fn tail_reserve_keeps_hard_rate_and_prefix_byte_share(){let b=CopyBudget::new_with_share(Duration::from_secs(30),2000,1200,25).unwrap();b.activate(Duration::from_secs(20));{let mut s=b.state.lock().unwrap();s.bytes=b.burst_bytes;s.packets=b.burst_packets;}
+  let mut copies=0;for i in 0..400u64{let tail=i%12==11;let size=if tail{300}else{1200};if b.reserve_packet(size,1,tail){copies+=1;b.result_packet(size,true,tail);}let s=b.snapshot();assert!(s.extra_bytes*4<=s.original_bytes);}let s=b.snapshot();assert!(s.tail_copies>0);assert!(s.body_copies>0);assert!(copies<=32);assert!(s.extra_bytes<=32000);b.suspend();b.activate(Duration::from_secs(20));assert!(!b.reserve_packet(1200,b.generation.load(Ordering::Acquire),true));b.revoke();assert!(!b.reserve_packet(1,b.generation.load(Ordering::Acquire),true));}
+ #[cfg(feature="cloudgime-frame-tail-copy-qa")]
+ #[test]fn body_cannot_consume_tail_credit(){let b=CopyBudget::new_with_share(Duration::from_secs(30),2000,1200,25).unwrap();b.activate(Duration::from_secs(10));{let mut s=b.state.lock().unwrap();s.bytes=b.burst_bytes;s.packets=b.burst_packets;}for _ in 0..8{assert!(!b.reserve_packet(1200,1,false));}assert!(b.reserve_packet(100,1,true));b.result_packet(100,true,true);assert!(b.reserve_packet(1200,1,false));assert!(b.snapshot().extra_bytes*4<=b.snapshot().original_bytes);}
  #[tokio::test]async fn share_limit_is_conjunctive_with_authority_and_rate_budget(){
   assert!(CopyBudget::new_with_share(Duration::from_secs(30),2000,1200,26).is_none());
   let b=CopyBudget::new_with_share(Duration::from_secs(30),2000,1200,25).unwrap();b.activate(Duration::from_secs(20));tokio::time::sleep(Duration::from_millis(20)).await;

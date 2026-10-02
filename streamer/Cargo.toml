@@ -10,6 +10,7 @@ cloudgime-scoped-direct-recovery = ["webrtc-util/cloudgime-scoped-direct-recover
 cloudgime-recovery-delay-qa = ["cloudgime-recovery-share-qa", "webrtc-util/cloudgime-recovery-delay-qa"]
 cloudgime-egress-pacing-qa = ["cloudgime-total-egress-qa"]
 cloudgime-total-egress-qa = ["cloudgime-recovery-share-qa", "webrtc-util/cloudgime-total-egress-qa"]
+cloudgime-frame-tail-copy-qa = ["cloudgime-recovery-share-qa", "webrtc-util/cloudgime-frame-tail-copy-qa"]
 cloudgime-recovery-share-qa = []
 cloudgime-recovery-share10-qa = ["cloudgime-recovery-share-qa"]
 cloudgime-recovery-share5-qa = ["cloudgime-recovery-share-qa"]

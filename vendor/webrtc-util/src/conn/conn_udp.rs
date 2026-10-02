@@ -1,3 +1,6 @@
+#[cfg(all(feature="cloudgime-frame-tail-copy-qa",any(feature="cloudgime-total-egress-qa",feature="cloudgime-recovery-delay-qa")))]
+compile_error!("Frame-tail copy must be tested separately from delayed-copy and total-egress controls.");
+
 #[cfg(all(feature="cloudgime-total-egress-qa",feature="cloudgime-recovery-delay-qa"))]
 compile_error!("Total-egress QA and delayed-copy QA require separate experiments; combined accounting is not validated.");
 
@@ -49,7 +52,10 @@ impl Conn for UdpSocket {
                 #[cfg(feature="cloudgime-total-egress-qa")]
                 if !observed.as_ref().is_some_and(|l|l.reserve_copy(target,local.port(),cost)){return Ok(sent);}
                 let copied = self.try_send_to(buf, target).is_ok_and(|n| n == buf.len());
-                budget.result(cost, copied);
+                #[cfg(feature="cloudgime-frame-tail-copy-qa")]
+                budget.result_packet(cost, copied,buf[1]&0x80!=0);
+                #[cfg(not(feature="cloudgime-frame-tail-copy-qa"))]
+                budget.result(cost,copied);
                 #[cfg(feature="cloudgime-total-egress-qa")]
                 if let Some(l)=observed{l.copy_result(cost,copied);}
             }

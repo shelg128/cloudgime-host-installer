@@ -30,6 +30,7 @@ repository = "https://github.com/webrtc-rs/webrtc/tree/master/util"
 [features]
 cloudgime-recovery-delay-qa = ["cloudgime-scoped-direct-recovery"]
 cloudgime-total-egress-qa = ["cloudgime-scoped-direct-recovery"]
+cloudgime-frame-tail-copy-qa = ["cloudgime-scoped-direct-recovery"]
 cloudgime-scoped-direct-recovery = []
 # Diagnostic-only, off by default; no silent route changes.
 cloudgime-datagram-redundancy-qa = []
