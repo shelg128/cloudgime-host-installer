@@ -1698,21 +1698,26 @@ pub async fn post_android_native_bootstrap_web_session_from_native_session(
 #[post("/android-native/shared-session/invite")]
 pub async fn post_android_native_shared_session_invite(
     app: Data<App>,
+    req: HttpRequest,
     user: AuthenticatedUser,
     Json(request): Json<PostAndroidNativeSharedSessionInviteRequest>,
 ) -> Result<Json<PostAndroidNativeSharedSessionInviteResponse>, AppError> {
-    let record = app
-        .issue_android_native_shared_session_invite(
-            user.id(),
-            HostId(request.host_id),
-            AppId(request.app_id),
-            request.role,
-        )
-        .await?;
-
-    Ok(Json(
-        build_shared_session_invite_response(&app, record).await,
-    ))
+    let scoped = crate::api::auth::scoped_stream_ticket(&req)?;
+    let expected = match scoped {
+        Some(ticket) => Some(app.peek_android_native_stream_ticket(&ticket).await?),
+        None => None,
+    };
+    if let Some(ref ticket) = expected {
+        if ticket.user_id != user.id() || ticket.host_id != HostId(request.host_id)
+            || ticket.app_id != AppId(request.app_id) {
+            return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
+        }
+    }
+    let record = app.issue_android_native_shared_session_invite_scoped(
+        user.id(), HostId(request.host_id), AppId(request.app_id), request.role,
+        expected.as_ref().map(|t| (t.session_id.as_str(), t.token_id.as_str())),
+    ).await?;
+    Ok(Json(build_shared_session_invite_response(&app, record).await))
 }
 
 #[post("/android-native/shared-session/invite-loopback")]

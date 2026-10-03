@@ -477,3 +477,25 @@ async fn required_mode_defaults_off_for_legacy_configs() {
     assert!(!config.web_server.rental_stream_ticket_required);
     assert!(!common::config::WebServerConfig::default().rental_stream_ticket_required);
 }
+
+#[actix_web::test]
+async fn share_invite_requires_exact_active_ticket_binding_and_preserves_scope() {
+    let (app, root, _, launch) = fixture().await;
+    let (_, ticket) = app.consume_android_native_launch_token_with_stream_ticket(&launch.launch_token).await.unwrap();
+    app.update_android_native_session_lifecycle(Some(&ticket.stream_ticket),Some(&launch.token_id),Some(&launch.session_id),"session_started".into(),None,None).await.unwrap();
+    let service=test::init_service(HttpApp::new().app_data(app.clone()).service(web::scope("/pilot").service(crate::api::api_service()))).await;
+    for (host_id,app_id,role,success) in [(1,1379015545u64,"viewer",true),(2,1379015545,"viewer",false),(1,42,"viewer",false),(1,1379015545,"owner",false)] {
+        let response=test::try_call_service(&service,test::TestRequest::post().uri("/pilot/api/android-native/shared-session/invite")
+            .insert_header(("authorization",format!("Bearer {}",ticket.stream_ticket)))
+            .set_json(serde_json::json!({"host_id":host_id,"app_id":app_id,"role":role})).to_request()).await;
+        match response { Ok(r)=>assert_eq!(r.status().is_success(),success,"host={host_id} app={app_id} role={role}"),Err(_)=>assert!(!success) }
+    }
+    assert!(app.issue_android_native_shared_session_invite_scoped(ticket.user_id,ticket.host_id,ticket.app_id,common::api_bindings::AndroidNativeSharedSessionRole::Viewer,Some(("different-session",&ticket.token_id))).await.is_err());
+    assert!(app.issue_android_native_shared_session_invite_scoped(ticket.user_id,ticket.host_id,ticket.app_id,common::api_bindings::AndroidNativeSharedSessionRole::Viewer,Some((&ticket.session_id,"different-token"))).await.is_err());
+    let no_auth=test::try_call_service(&service,test::TestRequest::post().uri("/pilot/api/android-native/shared-session/invite").set_json(serde_json::json!({"host_id":1,"app_id":1379015545u64,"role":"viewer"})).to_request()).await;
+    match no_auth {Ok(r)=>assert!(!r.status().is_success()),Err(_)=>{}}
+    app.update_android_native_session_lifecycle(Some(&ticket.stream_ticket),Some(&launch.token_id),Some(&launch.session_id),"session_revoke_requested".into(),None,None).await.unwrap();
+    let revoked=test::try_call_service(&service,test::TestRequest::post().uri("/pilot/api/android-native/shared-session/invite").insert_header(("authorization",format!("Bearer {}",ticket.stream_ticket))).set_json(serde_json::json!({"host_id":1,"app_id":1379015545u64,"role":"viewer"})).to_request()).await;
+    match revoked {Ok(r)=>assert!(!r.status().is_success()),Err(_)=>{}}
+    drop(service);drop(app);std::fs::remove_dir_all(root).unwrap();
+}

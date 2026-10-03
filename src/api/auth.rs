@@ -133,6 +133,7 @@ pub async fn rental_cookie_middleware(
                 && matches!(
                     route,
                     "/android-native/refresh-stream-ticket"
+                        | "/android-native/shared-session/invite"
                         | "/android-native/session-event"
                         | "/android-native/session-lifecycle"
                 ));

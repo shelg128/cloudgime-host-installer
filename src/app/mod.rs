@@ -1688,6 +1688,17 @@ impl App {
         app_id: AppId,
         role: common::api_bindings::AndroidNativeSharedSessionRole,
     ) -> Result<AndroidNativeSharedSessionInviteRecord, AppError> {
+        self.issue_android_native_shared_session_invite_scoped(user_id, host_id, app_id, role, None).await
+    }
+
+    pub async fn issue_android_native_shared_session_invite_scoped(
+        &self,
+        user_id: UserId,
+        host_id: HostId,
+        app_id: AppId,
+        role: common::api_bindings::AndroidNativeSharedSessionRole,
+        expected: Option<(&str, &str)>,
+    ) -> Result<AndroidNativeSharedSessionInviteRecord, AppError> {
         if matches!(
             role,
             common::api_bindings::AndroidNativeSharedSessionRole::Owner
@@ -1699,6 +1710,12 @@ impl App {
             .find_active_android_native_owner_session(user_id, host_id, app_id)
             .await
             .ok_or(AppError::AndroidNativeSharedSessionActiveOwnerNotFound)?;
+
+        if let Some((session_id, token_id)) = expected {
+            if owner_session.session_id != session_id || owner_session.token_id != token_id {
+                return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
+            }
+        }
 
         const INVITE_TTL_MS: u64 = 15 * 60 * 1000;
 
