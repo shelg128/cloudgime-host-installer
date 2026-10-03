@@ -53,6 +53,8 @@ use crate::transport::{
 mod annexb;
 mod h264;
 mod h265;
+#[path = "video_rtp_clock.rs"]
+mod video_rtp_clock;
 
 enum VideoCodec {
     H264 {
@@ -77,6 +79,8 @@ pub struct WebRtcVideo {
     active_format: Option<VideoFormat>,
     codec: Option<VideoCodec>,
     samples: Vec<BytesMut>,
+    rtp_clock: video_rtp_clock::VideoRtpClock,
+    rtp_clock_began: std::time::Instant,
 }
 
 impl WebRtcVideo {
@@ -89,6 +93,8 @@ impl WebRtcVideo {
             codec: None,
             supported_video_formats: SupportedVideoFormats::empty(),
             samples: Default::default(),
+            rtp_clock: Default::default(),
+            rtp_clock_began: std::time::Instant::now(),
         }
     }
 
@@ -283,7 +289,9 @@ impl WebRtcVideo {
     }
 
     pub async fn send_decode_unit(&mut self, unit: &VideoDecodeUnit<'_>) -> DecodeResult {
-        let timestamp = (unit.timestamp.as_nanos() * 90000 / 1_000_000_000) as u32;
+        let source_ticks = (unit.timestamp.as_nanos() * 90000 / 1_000_000_000) as u64;
+        let monotonic_ticks = (self.rtp_clock_began.elapsed().as_nanos() * 90000 / 1_000_000_000) as u64;
+        let timestamp = self.rtp_clock.map(source_ticks, monotonic_ticks);
 
         let mut full_frame = Vec::new();
         for buffer in unit.buffers {
