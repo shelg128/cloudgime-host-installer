@@ -29,6 +29,9 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[path = "../idle_stream_recovery.rs"]
+mod idle_stream_recovery;
+
 #[path = "../host_node_runtime.rs"]
 mod host_node_runtime;
 #[path = "../local_http_health.rs"]
@@ -1200,19 +1203,17 @@ fn stale_route_recovery_can_restart(
     command_pending: bool,
     active_stream: bool,
 ) -> bool {
-    matches!(state.lifecycle_phase, LifecyclePhase::Recovering)
-        && state.lifecycle_reason.as_deref() == Some("route_failure_reconnect")
-        && required_processes_ready
-        && local_http_ready
-        && !command_pending
-        && !active_stream
-        && !matches!(
-            state.last_command_status.as_deref(),
-            Some("running" | "queued")
-        )
-        && state.lifecycle_updated_at_unix_ms.is_some_and(|updated| {
-            updated > 0 && now.checked_sub(updated).is_some_and(|age| age > 60_000)
-        })
+    idle_stream_recovery::should_recover(idle_stream_recovery::IdleStreamRecovery {
+        phase: state.lifecycle_phase.as_str(),
+        reason: state.lifecycle_reason.as_deref(),
+        updated_ms: state.lifecycle_updated_at_unix_ms,
+        now_ms: now,
+        processes_ready: required_processes_ready,
+        http_ready: local_http_ready,
+        command_pending,
+        command_busy: matches!(state.last_command_status.as_deref(), Some("running" | "queued")),
+        active_stream,
+    })
 }
 
 #[cfg(test)]
