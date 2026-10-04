@@ -1057,7 +1057,12 @@ impl WebRtcInner {
         let mut packet = Vec::with_capacity(4 + data.len());
         packet.extend_from_slice(b"CGA1");
         packet.extend_from_slice(data);
-        match channel.send(&Bytes::from(packet)).await {
+        #[cfg(feature="cloudgime-egress-observer")]
+        let send_start=Instant::now();
+        let send_result=channel.send(&Bytes::from(packet)).await;
+        #[cfg(feature="cloudgime-egress-observer")]
+        crate::transport_probe::mark("audio_dc_send",send_start);
+        match send_result {
             Ok(_) => Ok(()),
             Err(webrtc::Error::ErrDataChannelNotOpen) => Err(TransportError::ChannelClosed),
             Err(err) => {

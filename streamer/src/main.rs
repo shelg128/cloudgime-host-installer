@@ -568,7 +568,12 @@ mod convert;
 mod dynamic_ice_servers;
 mod gamepad_sidecar;
 mod transport;
+#[cfg(test)]
+mod transport_access_tests;
+
 mod video;
+#[cfg(feature="cloudgime-egress-observer")]
+mod transport_probe;
 
 #[tokio::main]
 async fn main() {
@@ -1910,10 +1915,19 @@ impl StreamConnection {
         }
     }
     async fn try_send_packet(&self, packet: OutboundPacket, packet_ty: &str, should_warn: bool) {
+        #[cfg(feature="cloudgime-egress-observer")]
+        let lock_start=Instant::now();
         let mut sender = self.transport_sender.lock().await;
+        #[cfg(feature="cloudgime-egress-observer")]
+        transport_probe::mark("control_wait",lock_start);
 
         if let Some(sender) = sender.as_mut() {
-            if let Err(err) = sender.send(packet).await {
+            #[cfg(feature="cloudgime-egress-observer")]
+            let send_start=Instant::now();
+            let send_result=sender.send(packet).await;
+            #[cfg(feature="cloudgime-egress-observer")]
+            transport_probe::mark("control_send",send_start);
+            if let Err(err) = send_result {
                 if should_warn {
                     warn!("Failed to send outbound packet: {packet_ty}, {err:?}");
                 } else {

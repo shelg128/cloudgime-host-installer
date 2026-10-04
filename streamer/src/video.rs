@@ -110,7 +110,11 @@ impl VideoDecoder for StreamVideoDecoder {
         };
 
         stream.runtime.clone().block_on(async {
+            #[cfg(feature="cloudgime-egress-observer")]
+            let lock_start=Instant::now();
             let mut sender = stream.transport_sender.lock().await;
+            #[cfg(feature="cloudgime-egress-observer")]
+            crate::transport_probe::mark("video_wait",lock_start);
 
             if let Some(sender) = sender.as_mut() {
                 let start = Instant::now();

@@ -44,7 +44,11 @@ impl AudioDecoder for StreamAudioDecoder {
         };
 
         stream.runtime.clone().block_on(async move {
+            #[cfg(feature="cloudgime-egress-observer")]
+            let lock_start=std::time::Instant::now();
             let mut stream = stream.transport_sender.lock().await;
+            #[cfg(feature="cloudgime-egress-observer")]
+            crate::transport_probe::mark("audio_wait",lock_start);
 
             if let Some(stream) = stream.as_mut() {
                 if let Err(err) = stream.send_audio_sample(&sample.buffer).await {
