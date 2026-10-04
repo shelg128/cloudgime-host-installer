@@ -1440,7 +1440,7 @@ struct StreamConnection {
     controller_id_map: Mutex<HashMap<u8, u8>>,
     gamepad_broker_path: Option<PathBuf>,
     gamepad_broker: Mutex<Option<Arc<GamepadBroker>>>,
-    pub transport_sender: Mutex<Option<Box<dyn TransportSender + Send + Sync + 'static>>>,
+    pub transport_sender: RwLock<Option<Box<dyn TransportSender + Send + Sync + 'static>>>,
     pending_pre_transport_messages: Mutex<VecDeque<ServerIpcMessage>>,
     mouse_cursor_state: Mutex<HostMouseCursorState>,
     host_cursor_visibility: Mutex<HostCursorVisibilityState>,
@@ -1463,7 +1463,7 @@ struct StreamConnection {
 impl StreamConnection {
     async fn ensure_host_cursor_restored_if_idle(&self, reason: &str) {
         let has_active_stream = self.stream.read().await.is_some();
-        let has_transport = self.transport_sender.lock().await.is_some();
+        let has_transport = self.transport_sender.read().await.is_some();
 
         if has_active_stream || has_transport {
             return;
@@ -1562,7 +1562,7 @@ impl StreamConnection {
                 .map(PathBuf::from)
                 .filter(|path| path.exists()),
             gamepad_broker: Mutex::new(None),
-            transport_sender: Mutex::new(None),
+            transport_sender: RwLock::new(None),
             pending_pre_transport_messages: Mutex::new(VecDeque::new()),
             mouse_cursor_state: Mutex::new(HostMouseCursorState::default()),
             host_cursor_visibility: Mutex::new(HostCursorVisibilityState::default()),
@@ -1663,7 +1663,7 @@ impl StreamConnection {
         let this = self.clone();
 
         let old_transport = {
-            let mut sender = this.transport_sender.lock().await;
+            let mut sender = this.transport_sender.write().await;
             sender.replace(new_sender)
         };
 
@@ -1917,11 +1917,11 @@ impl StreamConnection {
     async fn try_send_packet(&self, packet: OutboundPacket, packet_ty: &str, should_warn: bool) {
         #[cfg(feature="cloudgime-egress-observer")]
         let lock_start=Instant::now();
-        let mut sender = self.transport_sender.lock().await;
+        let sender = self.transport_sender.read().await;
         #[cfg(feature="cloudgime-egress-observer")]
         transport_probe::mark("control_wait",lock_start);
 
-        if let Some(sender) = sender.as_mut() {
+        if let Some(sender) = sender.as_ref() {
             #[cfg(feature="cloudgime-egress-observer")]
             let send_start=Instant::now();
             let send_result=sender.send(packet).await;
@@ -1953,7 +1953,7 @@ impl StreamConnection {
     }
 
     async fn sync_host_clipboard_to_client(&self) {
-        if self.stream.read().await.is_none() || self.transport_sender.lock().await.is_none() {
+        if self.stream.read().await.is_none() || self.transport_sender.read().await.is_none() {
             return;
         }
 
@@ -2581,8 +2581,8 @@ impl StreamConnection {
         &self,
         message: ServerIpcMessage,
     ) -> Result<(), ServerIpcMessage> {
-        let mut sender = self.transport_sender.lock().await;
-        if let Some(sender) = sender.as_mut() {
+        let sender = self.transport_sender.read().await;
+        if let Some(sender) = sender.as_ref() {
             if let Err(err) = sender.on_ipc_message(message).await {
                 warn!("Failed to send ipc message: {err}");
             }
@@ -3443,7 +3443,7 @@ impl StreamConnection {
             *button_states = [false; 5];
         }
 
-        let mut transport = self.transport_sender.lock().await;
+        let mut transport = self.transport_sender.write().await;
         if let Some(transport) = transport.take() {
             if let Err(err) = transport.close().await {
                 warn!("Error whilst closing transport: {err}");

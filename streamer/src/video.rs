@@ -49,7 +49,7 @@ impl VideoDecoder for StreamVideoDecoder {
         let stream_for_setup = stream.clone();
         let result = {
             stream.runtime.clone().block_on(async move {
-                let mut sender = stream_for_setup.transport_sender.lock().await;
+                let mut sender = stream_for_setup.transport_sender.write().await;
 
                 if let Some(sender) = sender.as_mut() {
                     sender.setup_video(setup).await
@@ -112,11 +112,11 @@ impl VideoDecoder for StreamVideoDecoder {
         stream.runtime.clone().block_on(async {
             #[cfg(feature="cloudgime-egress-observer")]
             let lock_start=Instant::now();
-            let mut sender = stream.transport_sender.lock().await;
+            let sender = stream.transport_sender.read().await;
             #[cfg(feature="cloudgime-egress-observer")]
             crate::transport_probe::mark("video_wait",lock_start);
 
-            if let Some(sender) = sender.as_mut() {
+            if let Some(sender) = sender.as_ref() {
                 let start = Instant::now();
                 let result = match sender.send_video_unit(&unit).await {
                     Err(err) => {
