@@ -4,6 +4,10 @@ version.workspace = true
 edition = "2024"
 license.workspace = true
 
+[features]
+default = []
+cloudgime-egress-observer = []
+
 [dependencies]
 moonlight-common = { workspace = true }
 common = { workspace = true }

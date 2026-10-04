@@ -37,6 +37,10 @@ use webrtc::{
     },
 };
 
+#[cfg(feature = "cloudgime-egress-observer")]
+#[path = "egress_window.rs"]
+mod egress_window;
+
 const PLAYOUT_DELAY_URI: &str = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay";
 const VIDEO_PACKET_PACING_BATCH: usize = 8;
 const VIDEO_PACKET_PACING_DELAY_US: u64 = 350;
@@ -96,6 +100,8 @@ where
 {
     important: bool,
     samples: Vec<Track::Sample>,
+    #[cfg(feature = "cloudgime-egress-observer")]
+    enqueued_at: Instant,
 }
 
 impl<Track> TrackLocalSender<Track>
@@ -205,7 +211,7 @@ where
         let mut queue = self.queue.lock().await;
 
         let result = if important {
-            queue.push_front(FrameSamples { important, samples });
+            queue.push_front(FrameSamples { important, samples, #[cfg(feature = "cloudgime-egress-observer")] enqueued_at: Instant::now() });
             true
         } else {
             if queue.len() >= self.channel_queue_size {
@@ -216,7 +222,7 @@ where
                 return false;
             }
 
-            queue.push_front(FrameSamples { important, samples });
+            queue.push_front(FrameSamples { important, samples, #[cfg(feature = "cloudgime-egress-observer")] enqueued_at: Instant::now() });
             true
         };
 
@@ -249,6 +255,10 @@ async fn sample_sender<Track>(
     let mut samples_written = 0u64;
     let mut bytes_written_total = 0u64;
     let mut last_stats_log_at = Instant::now();
+    #[cfg(feature = "cloudgime-egress-observer")]
+    let mut window = egress_window::EgressWindow::default();
+    #[cfg(feature = "cloudgime-egress-observer")]
+    let (mut observed_at, observer_started) = (Instant::now(), Instant::now());
     loop {
         let frame = {
             let Some(queue) = queue.upgrade() else {
@@ -267,6 +277,8 @@ async fn sample_sender<Track>(
             new_frame
         };
 
+        #[cfg(feature = "cloudgime-egress-observer")]
+        let (queue_age_us, frame_started) = (frame.enqueued_at.elapsed().as_micros() as u64, Instant::now());
         let should_micro_pace = frame.samples.len() >= VIDEO_PACKET_PACING_BATCH * 2;
 
         for (index, sample) in frame.samples.into_iter().enumerate() {
@@ -280,6 +292,8 @@ async fn sample_sender<Track>(
             let now_secs = now.as_secs() as f64 + now.subsec_nanos() as f64 * 1e-9;
             let abs_send_time: u64 = (now_secs * 262_144.0) as u64;
 
+            #[cfg(feature = "cloudgime-egress-observer")]
+            let write_started = Instant::now();
             match track
                 .write_with_extensions(
                     sample,
@@ -293,6 +307,8 @@ async fn sample_sender<Track>(
                 .await
             {
                 Ok(bytes_written) => {
+                    #[cfg(feature = "cloudgime-egress-observer")]
+                    window.packet(write_started.elapsed().as_micros() as u64, Some(bytes_written));
                     samples_written = samples_written.saturating_add(1);
                     bytes_written_total = bytes_written_total.saturating_add(bytes_written as u64);
                     if !first_write_logged {
@@ -307,8 +323,20 @@ async fn sample_sender<Track>(
                     }
                 }
                 Err(err) => {
+                    #[cfg(feature = "cloudgime-egress-observer")]
+                    window.packet(write_started.elapsed().as_micros() as u64, None);
                     warn!("[Stream]: {label} track.write_sample failed: {err}");
                 }
+            }
+        }
+        #[cfg(feature = "cloudgime-egress-observer")]
+        {
+            window.frame(queue_age_us, frame_started.elapsed().as_micros() as u64);
+            if observed_at.elapsed() >= Duration::from_secs(2) {
+                if observer_started.elapsed() < Duration::from_secs(600) {
+                    info!("{}",window.take().line(label, observed_at.elapsed().as_millis() as u64));
+                } else { let _ = window.take(); }
+                observed_at=Instant::now();
             }
         }
     }
