@@ -37,6 +37,9 @@ use webrtc::{
     },
 };
 
+#[path = "sender_wakeup.rs"]
+mod sender_wakeup;
+
 #[cfg(feature = "cloudgime-egress-observer")]
 #[path = "egress_window.rs"]
 mod egress_window;
@@ -226,7 +229,7 @@ where
             true
         };
 
-        self.new_samples_notify.notify_waiters();
+        self.new_samples_notify.notify_one();
 
         result
     }
@@ -260,21 +263,9 @@ async fn sample_sender<Track>(
     #[cfg(feature = "cloudgime-egress-observer")]
     let (mut observed_at, observer_started) = (Instant::now(), Instant::now());
     loop {
-        let frame = {
-            let Some(queue) = queue.upgrade() else {
-                debug!("no sample queue available: stopping to submit samples");
-                continue;
-            };
-
-            let mut queue = queue.lock().await;
-            let Some(new_frame) = queue.pop_back() else {
-                drop(queue); // Important: drop the mutex
-
-                new_samples_notify.notified().await;
-                continue;
-            };
-
-            new_frame
+        let Some(frame) = sender_wakeup::pop_or_wait(&queue, new_samples_notify).await else {
+            debug!("no sample queue available: stopping to submit samples");
+            break;
         };
 
         #[cfg(feature = "cloudgime-egress-observer")]
