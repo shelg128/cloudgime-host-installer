@@ -77,6 +77,10 @@ mod sender;
 mod video;
 
 const LOCAL_OFFER_DEBOUNCE_DELAY: Duration = Duration::from_millis(80);
+#[path = "channel_origin.rs"]
+mod channel_origin;
+use channel_origin::ChannelOrigin;
+
 const LOCAL_OFFER_STABLE_WAIT: Duration = Duration::from_secs(2);
 const LOCAL_OFFER_STABLE_POLL: Duration = Duration::from_millis(50);
 
@@ -311,7 +315,7 @@ pub async fn new(
     // don't forget to register the general channel created by us
     {
         let this = this_owned.clone();
-        this.on_data_channel(general_channel).await;
+        this.on_data_channel(general_channel, ChannelOrigin::Host).await;
     }
 
     let this = Arc::downgrade(&this_owned);
@@ -342,7 +346,7 @@ pub async fn new(
     peer.on_data_channel(create_event_handler(
         this.clone(),
         async move |this, channel| {
-            this.on_data_channel(channel).await;
+            this.on_data_channel(channel, ChannelOrigin::Remote).await;
         },
     ));
 
@@ -846,7 +850,7 @@ impl WebRtcInner {
         };
     }
 
-    async fn on_data_channel(self: Arc<Self>, channel: Arc<RTCDataChannel>) {
+    async fn on_data_channel(self: Arc<Self>, channel: Arc<RTCDataChannel>, origin: ChannelOrigin) {
         let label = channel.label();
         debug!("adding data channel: \"{label}\"");
 
@@ -855,9 +859,11 @@ impl WebRtcInner {
         match label {
             "general" => {
                 debug!("setting up general channel message handler");
-                {
+                if channel_origin::accepts_legacy_audio(origin, label) {
                     let mut client_general = self.client_general_channel.lock().await;
                     *client_general = Some(channel.clone());
+                } else {
+                    info!("[Stream]: host general is control only; legacy audio copy not requested");
                 }
                 channel.on_message(create_channel_message_handler(
                     inner,
