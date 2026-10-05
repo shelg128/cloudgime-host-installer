@@ -114,7 +114,11 @@ impl WebRtcAudio {
                         rtcp_feedback: vec![],
                     },
                     "audio".to_string(),
-                    "moonlight".to_string(),
+                    // QA discriminator only: audio stays enabled, but does not
+                    // request the receiver's shared audio/video sync group.
+                    if cfg!(feature="cloudgime-qa-independent-audio-sync") {
+                        "moonlight-audio-qa-independent".to_string()
+                    } else { "moonlight".to_string() },
                 )
                 .into(),
                 |_| {},

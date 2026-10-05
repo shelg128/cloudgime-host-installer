@@ -9,6 +9,7 @@ default = []
 cloudgime-egress-observer = []
 cloudgime-fixture-capture = []
 cloudgime-session-baseline = []
+cloudgime-qa-independent-audio-sync = []
 
 [dependencies]
 moonlight-common = { workspace = true }
