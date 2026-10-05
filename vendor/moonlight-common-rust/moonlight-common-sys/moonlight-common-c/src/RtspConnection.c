@@ -1314,6 +1314,17 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             }
         }
 
+        if (StreamConfig.cgH264BaselineLevel != 0) {
+            unsigned int version = 0;
+            if (NegotiatedVideoFormat != VIDEO_FORMAT_H264 ||
+                !parseSdpAttributeToUInt(response.payload, "x-cg-video.h264BaselineSession", &version) || version != 1) {
+                Limelog("CloudGime session Baseline unsupported; refusing legacy profile fallback\n");
+                freeMessage(&response);
+                ret = -5501;
+                goto Exit;
+            }
+        }
+
         // Look for the SDP attribute that indicates we're dealing with a server that supports RFI
         ReferenceFrameInvalidationSupported = strstr(response.payload, "x-nv-video[0].refPicInvalidation") != NULL;
         if (!ReferenceFrameInvalidationSupported) {

@@ -629,7 +629,17 @@ impl WebRtcInner {
                     video.set_codecs(video_supported_formats).await;
                 }
 
-                // TODO: check peer for supported formats via sdp
+                let h264_baseline_level = if cfg!(feature="cloudgime-session-baseline") && video_supported_formats.bits() == SupportedVideoFormats::H264.bits() {
+                    let accepted = match self.peer.remote_description().await {
+                        Some(description) => video::baseline_contract::accepted_baseline_level(&description.sdp),
+                        None => Err("remote_sdp_missing"),
+                    };
+                    match accepted {
+                        Ok(level) => Some(level),
+                        Err(reason) => { error!("[Stream] session Baseline negotiation rejected: {reason}");let _=self.event_sender.send(TransportEvent::Closed).await;return; }
+                    }
+                } else { None };
+                { let mut video=self.video.lock().await;video.require_baseline(h264_baseline_level); }
 
                 if let Err(err) = self
                     .event_sender
@@ -648,6 +658,7 @@ impl WebRtcInner {
                             video_colorspace: video_colorspace.into(),
                             play_audio_local,
                             hdr,
+                            h264_baseline_level,
                         },
                     })
                     .await
@@ -1185,7 +1196,14 @@ impl TransportSender for WebRTCTransportSender {
         unit: &'a VideoDecodeUnit<'a>,
     ) -> Result<DecodeResult, TransportError> {
         let mut video = self.inner.video.lock().await;
-        Ok(video.send_decode_unit(unit).await)
+        let result=video.send_decode_unit(unit).await;
+        if let Some(reason)=video.baseline_error(){
+            error!("[Stream] refusing mismatched H264 bitstream: {reason}");
+            drop(video);
+            let _=self.inner.event_sender.send(TransportEvent::Closed).await;
+            return Ok(DecodeResult::Ok);
+        }
+        Ok(result)
     }
 
     async fn setup_audio(

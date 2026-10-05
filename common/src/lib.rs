@@ -25,6 +25,9 @@ pub struct StreamSettings {
     pub video_colorspace: ColorSpace,
     pub video_color_range_full: bool,
     pub hdr: bool,
+    /// Internal transport contract; None preserves legacy encoding.
+    #[serde(default)]
+    pub h264_baseline_level: Option<u8>,
 }
 
 impl Display for StreamSettings {

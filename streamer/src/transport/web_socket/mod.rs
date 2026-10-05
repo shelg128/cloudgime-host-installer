@@ -311,6 +311,7 @@ impl TransportSender for WebSocketTransportSender {
                             video_colorspace: video_colorspace.into(),
                             play_audio_local,
                             hdr,
+                            h264_baseline_level: None,
                         },
                     })
                     .await

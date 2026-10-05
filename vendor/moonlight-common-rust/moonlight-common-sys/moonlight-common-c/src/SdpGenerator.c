@@ -534,6 +534,11 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
         err |= addAttributeString(&optionHead, "x-nv-video[0].encoderCscMode", payloadStr);
     }
 
+    if (StreamConfig.cgH264BaselineLevel != 0 && NegotiatedVideoFormat == VIDEO_FORMAT_H264) {
+        snprintf(payloadStr, sizeof(payloadStr), "%d", StreamConfig.cgH264BaselineLevel);
+        err |= addAttributeString(&optionHead, "x-cg-video.h264BaselineLevel", payloadStr);
+    }
+
     if (err == 0) {
         return optionHead;
     }

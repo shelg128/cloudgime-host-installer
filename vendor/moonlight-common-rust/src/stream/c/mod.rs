@@ -194,6 +194,7 @@ impl MoonlightStream {
                 colorSpace: stream_settings.color_space as u32 as i32,
                 colorRange: stream_settings.color_range as u32 as i32,
                 encryptionFlags: stream_settings.encryption_flags.bits() as i32,
+                cgH264BaselineLevel: stream_settings.h264_baseline_level.map(i32::from).unwrap_or(0),
                 remoteInputAesKey: to_c_char_array(stream_config.remote_input_aes_key.0),
                 remoteInputAesIv: to_c_char_array({
                     let mut iv = [0u8; 16];

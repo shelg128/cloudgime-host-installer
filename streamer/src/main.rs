@@ -3035,6 +3035,7 @@ impl StreamConnection {
             audio_config: AudioConfig::STEREO,
             gamepads_attached: ActiveGamepads::empty(),
             gamepads_persist_after_disconnect: false,
+            h264_baseline_level: settings.h264_baseline_level,
         };
 
         let legacy_nvenc_compat = legacy_nvenc_compat_enabled();

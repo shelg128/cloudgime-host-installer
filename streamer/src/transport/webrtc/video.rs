@@ -55,6 +55,8 @@ mod h264;
 mod h265;
 #[path = "video_rtp_clock.rs"]
 mod video_rtp_clock;
+#[path = "baseline_contract.rs"]
+pub(super) mod baseline_contract;
 #[cfg(feature="cloudgime-fixture-capture")]
 #[path = "fixture_capture.rs"]
 mod fixture_capture;
@@ -84,6 +86,9 @@ pub struct WebRtcVideo {
     samples: Vec<BytesMut>,
     rtp_clock: video_rtp_clock::VideoRtpClock,
     rtp_clock_began: std::time::Instant,
+    baseline_level: Option<u8>,
+    baseline_verified: bool,
+    baseline_error: Option<&'static str>,
     #[cfg(feature="cloudgime-fixture-capture")]
     fixture_capture: fixture_capture::FixtureCapture,
 }
@@ -100,10 +105,18 @@ impl WebRtcVideo {
             samples: Default::default(),
             rtp_clock: Default::default(),
             rtp_clock_began: std::time::Instant::now(),
+            baseline_level: None,
+            baseline_verified: false,
+            baseline_error: None,
             #[cfg(feature="cloudgime-fixture-capture")]
             fixture_capture: Default::default(),
         }
     }
+
+    pub fn require_baseline(&mut self, level: Option<u8>) {
+        self.baseline_level=level;self.baseline_verified=false;self.baseline_error=None;
+    }
+    pub fn baseline_error(&self)->Option<&'static str>{self.baseline_error}
 
     pub async fn prepare(&mut self) -> Result<(), anyhow::Error> {
         if matches!(self.active_format, Some(VideoFormat::H264)) && self.codec.is_some() {
@@ -170,6 +183,8 @@ impl WebRtcVideo {
         }: VideoSetup,
     ) -> bool {
         info!("[Stream] Stream setup: {width}x{height}x{redraw_rate} and {format:?}");
+        self.baseline_verified=false;self.baseline_error=None;
+        if self.baseline_level.is_some() && !matches!(format,VideoFormat::H264){self.baseline_error=Some("unexpected_codec");return false;}
 
         if !format.contained_in(self.supported_video_formats) {
             let message = format!(
@@ -306,6 +321,17 @@ impl WebRtcVideo {
         }
 
         let important = matches!(unit.frame_type, FrameType::Idr);
+        if let Some(limit)=self.baseline_level {
+            if self.baseline_error.is_some(){return DecodeResult::Ok;}
+            match baseline_contract::inspect_sps(&full_frame) {
+                Ok(Some(sps)) if sps.level<=limit => { self.baseline_verified=true; },
+                Ok(Some(_)) => {self.baseline_error=Some("sps_level_above_negotiated");},
+                Ok(None) if important || !self.baseline_verified => {self.baseline_error=Some("sps_missing");},
+                Err(reason) => {self.baseline_error=Some(reason);},
+                _=>{}
+            }
+            if self.baseline_error.is_some(){self.sender.clear_queue(true).await;return DecodeResult::Ok;}
+        }
         #[cfg(feature="cloudgime-fixture-capture")]
         if matches!(self.active_format,Some(VideoFormat::H264)) && self.fixture_capture.observe(&full_frame,timestamp,important) {
             self.needs_idr.store(true,Ordering::Release);
@@ -544,8 +570,9 @@ fn video_format_to_codec(format: VideoFormat) -> Option<RTCRtpCodecParameters> {
                 clock_rate: 90000,
                 channels: 0,
                 sdp_fmtp_line:
-                    "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
-                        .to_owned(),
+                    if cfg!(feature="cloudgime-session-baseline") {
+                        "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e02a"
+                    } else { "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f" }.to_owned(),
                 rtcp_feedback: rtcp_feedback.clone(),
             },
             payload_type: 96,

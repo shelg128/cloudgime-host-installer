@@ -8,6 +8,7 @@ license.workspace = true
 default = []
 cloudgime-egress-observer = []
 cloudgime-fixture-capture = []
+cloudgime-session-baseline = []
 
 [dependencies]
 moonlight-common = { workspace = true }

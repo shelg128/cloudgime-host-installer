@@ -157,6 +157,8 @@ pub struct MoonlightStreamSettings {
     pub audio_config: AudioConfig,
     pub gamepads_attached: ActiveGamepads,
     pub gamepads_persist_after_disconnect: bool,
+    /// CloudGime RTSP session extension, capability checked before ANNOUNCE.
+    pub h264_baseline_level: Option<u8>,
 }
 
 impl MoonlightStreamSettings {
