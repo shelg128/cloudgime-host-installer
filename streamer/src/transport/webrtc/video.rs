@@ -55,6 +55,9 @@ mod h264;
 mod h265;
 #[path = "video_rtp_clock.rs"]
 mod video_rtp_clock;
+#[cfg(feature="cloudgime-fixture-capture")]
+#[path = "fixture_capture.rs"]
+mod fixture_capture;
 
 enum VideoCodec {
     H264 {
@@ -81,6 +84,8 @@ pub struct WebRtcVideo {
     samples: Vec<BytesMut>,
     rtp_clock: video_rtp_clock::VideoRtpClock,
     rtp_clock_began: std::time::Instant,
+    #[cfg(feature="cloudgime-fixture-capture")]
+    fixture_capture: fixture_capture::FixtureCapture,
 }
 
 impl WebRtcVideo {
@@ -95,6 +100,8 @@ impl WebRtcVideo {
             samples: Default::default(),
             rtp_clock: Default::default(),
             rtp_clock_began: std::time::Instant::now(),
+            #[cfg(feature="cloudgime-fixture-capture")]
+            fixture_capture: Default::default(),
         }
     }
 
@@ -299,6 +306,10 @@ impl WebRtcVideo {
         }
 
         let important = matches!(unit.frame_type, FrameType::Idr);
+        #[cfg(feature="cloudgime-fixture-capture")]
+        if matches!(self.active_format,Some(VideoFormat::H264)) && self.fixture_capture.observe(&full_frame,timestamp,important) {
+            self.needs_idr.store(true,Ordering::Release);
+        }
 
         match &mut self.codec {
             // -- H264
