@@ -698,3 +698,10 @@ pub(super) fn qa_packetize_frame(index:u32)->Vec<super::recovery_frame::VideoSam
  let packets=packetize(&mut H264Payloader::default(),1212,0,90000+index*3000,&Bytes::from(payload),true).unwrap();
  super::recovery_frame::attach(packets,2)
 }
+
+#[cfg(all(test,feature="cloudgime-scoped-recovery-metadata"))]
+pub(super) fn qa_packetize_access_unit(data:Vec<u8>,timestamp:u32,payloader:&mut H264Payloader)->Vec<super::recovery_frame::VideoSample>{
+ let mut reader=H264Reader::new(Cursor::new(data),0);let mut samples=Vec::new();while let Some(nal)=reader.next_nal().unwrap(){let bytes=trim_bytes_to_range(nal.full,nal.header_range.start..nal.payload_range.end);samples.push(bytes);}
+ let reference=super::recovery_frame::classify_h264(&samples);let mut packets=Vec::new();let len=samples.len();for(i,nal)in samples.into_iter().enumerate(){packets.extend(packetize(payloader,RTP_OUTBOUND_MTU,0,timestamp,&nal.freeze(),i+1==len).unwrap());}
+ super::recovery_frame::attach(packets,reference)
+}

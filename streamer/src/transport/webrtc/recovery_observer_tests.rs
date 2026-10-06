@@ -36,3 +36,10 @@ struct ReadOnce{packets:Mutex<Option<Vec<Box<dyn RtcpPacket+Send+Sync>>>>,calls:
 
 #[cfg(feature="cloudgime-scoped-recovery-metadata")]
 #[path="recovery_scoped_loopback_tests.rs"]mod scoped_loopback;
+
+#[cfg(feature="cloudgime-scoped-recovery-metadata")]
+#[path="recovery_baseline_transport_tests.rs"]mod baseline_qualification;
+#[cfg(feature="cloudgime-scoped-recovery-metadata")]
+#[path="recovery_sustained_tests.rs"]mod sustained_qualification;
+#[cfg(feature="cloudgime-scoped-recovery-metadata")]
+#[path="recovery_cost_tests.rs"]mod cost_qualification;

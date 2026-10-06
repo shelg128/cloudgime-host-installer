@@ -27,7 +27,7 @@ pub(super) enum Data {
 #[derive(Clone,Debug,serde::Deserialize,Serialize)]
 pub(super) struct Event{pub id:u64,pub started_us:u64,pub completed_us:u64,pub data:Data}
 #[derive(Default)]
-struct State{#[cfg(test)]rr_with_lsr:AtomicU64,active:AtomicBool,in_flight:AtomicUsize,outstanding_calls:AtomicUsize,cancelled_calls:AtomicU64,attempted:AtomicU64,accepted:AtomicU64,dropped:AtomicU64,omitted:AtomicU64,quota:AtomicBool}
+struct State{#[cfg(test)]rtp_writes:AtomicU64,#[cfg(test)]rr_with_lsr:AtomicU64,active:AtomicBool,in_flight:AtomicUsize,outstanding_calls:AtomicUsize,cancelled_calls:AtomicU64,attempted:AtomicU64,accepted:AtomicU64,dropped:AtomicU64,omitted:AtomicU64,quota:AtomicBool}
 #[derive(Clone)]
 pub(super) struct Tap{tx:SyncSender<Event>,state:Arc<State>,began:Instant,deadline:Instant}
 pub(super) struct PendingCall{state:Arc<State>,finished:bool}
@@ -81,6 +81,7 @@ impl Tap{
  pub(super) fn active(&self)->bool{self.state.active.load(Ordering::Relaxed)&&Instant::now()<self.deadline}
  pub(super) fn omit(&self,n:usize){if self.active(){self.state.omitted.fetch_add(n as u64,Ordering::Relaxed);}}
  pub(super) fn record(&self,started_us:u64,completed_us:u64,data:Data){
+  #[cfg(test)]if matches!(&data,Data::Rtp{ok:true,..}){self.state.rtp_writes.fetch_add(1,Ordering::Release);}
   #[cfg(test)]if matches!(&data,Data::Rr{lsr,..}if *lsr!=0){self.state.rr_with_lsr.fetch_add(1,Ordering::Release);}
   if !self.active(){return;}
   self.state.in_flight.fetch_add(1,Ordering::AcqRel);
@@ -90,6 +91,7 @@ impl Tap{
   match self.tx.try_send(Event{id,started_us,completed_us,data}){Ok(())=>{self.state.accepted.fetch_add(1,Ordering::Release);},Err(TrySendError::Full(_))=>{self.state.dropped.fetch_add(1,Ordering::Relaxed);},Err(TrySendError::Disconnected(_))=>{self.state.omitted.fetch_add(1,Ordering::Relaxed);self.state.active.store(false,Ordering::Release);}}
   self.state.in_flight.fetch_sub(1,Ordering::Release);
  }
+ #[cfg(test)]pub(super) fn rtp_writes(&self)->u64{self.state.rtp_writes.load(Ordering::Acquire)}
  #[cfg(test)]pub(super) fn has_rr_lsr(&self)->bool{self.state.rr_with_lsr.load(Ordering::Acquire)>0}
  pub(super) fn close(&self){self.state.active.store(false,Ordering::Release);}
  #[cfg(test)] pub(super) fn test_file()->(Self,PathBuf){let dir=std::env::var_os("CG_QA_TEST_EVIDENCE_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);let peer=PEERS.fetch_add(1,Ordering::Relaxed);let path=dir.join(format!("sdk-trace-{}-{}.jsonl",std::process::id(),peer));let file=OpenOptions::new().write(true).create_new(true).open(&path).unwrap();(Self::start(file,"a".repeat(32),peer,Duration::from_secs(15)).unwrap(),path)}

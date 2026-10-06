@@ -1,4 +1,6 @@
 //! Operator-only QA: context is derived from an already-authorized ticket, never request JSON.
+#[cfg(test)]
+#[path="qa_trace_authority_tests.rs"]mod qualification;
 use crate::app::AndroidNativeStreamTicketRecord;
 use common::qa_trace_scope::TraceContext;
 use tokio::process::Command;
