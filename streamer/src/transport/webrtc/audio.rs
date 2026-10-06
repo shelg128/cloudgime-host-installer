@@ -1,4 +1,7 @@
-use std::{sync::Weak, time::Duration};
+use std::{sync::Weak, time::Instant};
+
+#[path = "audio_rtp_clock.rs"]
+mod audio_rtp_clock;
 
 use bytes::Bytes;
 use log::{error, info, warn};
@@ -41,7 +44,10 @@ pub struct WebRtcAudio {
     config: Option<OpusMultistreamConfig>,
     track_created: bool,
     first_sample_logged: bool,
-    next_rtp_timestamp: u32,
+    rtp_clock: audio_rtp_clock::AudioRtpClock,
+    clock_began: Instant,
+    setup_generation: u64,
+    setup_sample_pending: bool,
 }
 
 impl WebRtcAudio {
@@ -51,7 +57,10 @@ impl WebRtcAudio {
             config: None,
             track_created: false,
             first_sample_logged: false,
-            next_rtp_timestamp: 0,
+            rtp_clock: Default::default(),
+            clock_began: Instant::now(),
+            setup_generation: 0,
+            setup_sample_pending: false,
         }
     }
 }
@@ -67,12 +76,11 @@ impl WebRtcAudio {
         audio_config: AudioConfig,
         stream_config: OpusMultistreamConfig,
     ) -> i32 {
-        const SUPPORTED_SAMPLE_RATES: &[u32] = &[80000, 12000, 16000, 24000, 48000];
-        if !SUPPORTED_SAMPLE_RATES.contains(&stream_config.sample_rate) {
-            warn!(
-                "[Stream] Audio could have problems because of the sample rate, Selected: {}, Expected one of: {SUPPORTED_SAMPLE_RATES:?}",
-                stream_config.sample_rate
-            );
+        self.config = None;
+        if let Err(reason) = self.rtp_clock.configure(stream_config.sample_rate, stream_config.samples_per_frame) {
+            error!("[Stream] refusing invalid Opus clock setup: {reason}");
+            self.sender.clear_queue(true).await;
+            return -1;
         }
         if audio_config != self.config() {
             warn!(
@@ -88,7 +96,8 @@ impl WebRtcAudio {
         };
 
         self.config = Some(stream_config);
-        self.next_rtp_timestamp = 0;
+        self.setup_generation = self.setup_generation.saturating_add(1);
+        self.setup_sample_pending = true;
         self.sender.clear_queue(true).await;
 
         0
@@ -139,22 +148,23 @@ impl WebRtcAudio {
             return;
         };
 
-        let duration =
-            Duration::from_secs_f64(config.samples_per_frame as f64 / config.sample_rate as f64);
+        let elapsed_ticks = (self.clock_began.elapsed().as_nanos() * 48_000 / 1_000_000_000)
+            .min(u64::MAX as u128) as u64;
+        let Some(timestamp) = self.rtp_clock.stamp(elapsed_ticks) else { return; };
+        if self.setup_sample_pending {
+            self.setup_sample_pending = false;
+            info!("[Stream] audio_track_clock generation={} rtp={} monotonic_ticks={} rate={} samples={} clock_rate=48000", self.setup_generation, timestamp, elapsed_ticks, config.sample_rate, config.samples_per_frame);
+        }
         if !self.first_sample_logged {
             self.first_sample_logged = true;
             info!(
                 "[Stream] first host audio sample queued for WebRTC: bytes={} duration_ms={:.2}",
                 data.len(),
-                duration.as_secs_f64() * 1000.0
+                config.samples_per_frame as f64 * 1000.0 / config.sample_rate as f64
             );
         }
 
         let data = Bytes::copy_from_slice(data);
-        let timestamp = self.next_rtp_timestamp;
-        self.next_rtp_timestamp = self
-            .next_rtp_timestamp
-            .wrapping_add(config.samples_per_frame);
 
         let packet = Packet {
             header: Header {
