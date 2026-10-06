@@ -5,7 +5,7 @@ use webrtc::{api::{APIBuilder,media_engine::MediaEngine,setting_engine::SettingE
 async fn encrypted_peer_loopback_observes_final_identity_sr_and_rr(){
  let _=rustls::crypto::aws_lc_rs::default_provider().install_default();
  let(tap,trace_path)=Tap::test_file();let mut media=MediaEngine::default();media.register_default_codecs().unwrap();
- let mut registry=Registry::new();registry.add(Box::new(ObserverBuilder{tap:tap.clone(),consumed:AtomicBool::new(false)}));registry=register_default_interceptors(registry,&mut media).unwrap();
+ let mut registry=Registry::new();registry.add(Box::new(ObserverBuilder{tap:tap.clone().into(),consumed:AtomicBool::new(false)}));registry=register_default_interceptors(registry,&mut media).unwrap();
  let settings=||{let mut s=SettingEngine::default();s.set_network_types(vec![NetworkType::Udp4]);s.set_include_loopback_candidate(true);s.set_ip_filter(Box::new(|ip|ip.is_loopback()));s};
  let a=Arc::new(APIBuilder::new().with_setting_engine(settings()).with_media_engine(media).with_interceptor_registry(registry).build().new_peer_connection(RTCConfiguration::default()).await.unwrap());
  let mut media=MediaEngine::default();media.register_default_codecs().unwrap();let registry=register_default_interceptors(Registry::new(),&mut media).unwrap();
@@ -20,7 +20,7 @@ async fn encrypted_peer_loopback_observes_final_identity_sr_and_rr(){
   tokio::time::timeout(std::time::Duration::from_secs(5),async{while a.connection_state()!=RTCPeerConnectionState::Connected||b.connection_state()!=RTCPeerConnectionState::Connected{tokio::time::sleep(std::time::Duration::from_millis(20)).await;}}).await.expect("loopback ICE/DTLS");
   for i in 0..20u16{let mut p=packet();p.header.ssrc=0;p.header.payload_type=0;p.header.sequence_number=100+i;p.header.timestamp=90000+u32::from(i)*3000;track.write_rtp(&p).await.unwrap();tokio::time::sleep(std::time::Duration::from_millis(5)).await;}
   let mut actual=Vec::new();for _ in 0..20{actual.push(tokio::time::timeout(std::time::Duration::from_secs(2),received.recv()).await.unwrap().unwrap());}
-  tokio::time::sleep(std::time::Duration::from_millis(2300)).await;
+  tokio::time::timeout(std::time::Duration::from_secs(6),async{while !tap.has_rr_lsr(){tokio::time::sleep(std::time::Duration::from_millis(20)).await;}}).await.expect("SDK RR with LSR deadline");
   actual
  };
  let actual=test.await;a.close().await.unwrap();b.close().await.unwrap();read_task.abort();let rows:Vec<recorder::Event>={let until=std::time::Instant::now()+std::time::Duration::from_secs(2);loop{let text=std::fs::read_to_string(&trace_path).unwrap();let lines:Vec<serde_json::Value>=text.lines().filter_map(|s|serde_json::from_str(s).ok()).collect();if let Some(footer)=lines.last().filter(|f|f["type"]=="footer"){assert_eq!(footer["observation_complete"],true);break lines.into_iter().filter(|x|x.get("data").is_some()).map(|x|serde_json::from_value(x).unwrap()).collect();}assert!(std::time::Instant::now()<until,"writer footer deadline");tokio::time::sleep(std::time::Duration::from_millis(20)).await;}};

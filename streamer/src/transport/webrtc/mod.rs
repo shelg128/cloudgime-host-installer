@@ -75,6 +75,8 @@ use crate::{
 mod audio;
 #[cfg(feature = "cloudgime-recovery-metadata")]
 mod recovery_observer;
+#[cfg(feature="cloudgime-scoped-recovery-metadata")]
+mod recovery_frame;
 mod sender;
 mod video;
 

@@ -107,6 +107,10 @@ edition = "2024"
 license = { workspace = true }
 default-run = "web-server"
 
+[features]
+default = []
+cloudgime-scoped-recovery-metadata = ["common/qa-trace-scope"]
+
 [dependencies]
 moonlight-common = { workspace = true, features = ["openssl"] }
 common = { workspace = true }

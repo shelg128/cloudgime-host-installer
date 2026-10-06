@@ -5828,6 +5828,8 @@ pub async fn start_host(
 
         // Spawn child
         let mut staged_streamer_command = Command::new(&staged_streamer_path);
+        #[cfg(feature="cloudgime-scoped-recovery-metadata")]
+        super::qa_trace_parent::configure(&mut staged_streamer_command,android_native_stream_ticket_record.as_ref(),registration_id);
         staged_streamer_command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

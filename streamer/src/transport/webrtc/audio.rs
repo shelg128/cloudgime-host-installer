@@ -182,6 +182,8 @@ impl WebRtcAudio {
             ..Default::default()
         };
 
+        #[cfg(feature="cloudgime-scoped-recovery-metadata")]
+        let packet=super::recovery_frame::VideoSample{packet,frame_id:0,index:0,count:0,reference:0};
         self.sender.send_samples(vec![packet], false).await;
     }
 

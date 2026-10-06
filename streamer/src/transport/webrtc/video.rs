@@ -377,6 +377,8 @@ impl WebRtcVideo {
                     payloader,
                     timestamp,
                     important,
+                    #[cfg(feature="cloudgime-scoped-recovery-metadata")]
+                    true,
                     &self.needs_idr,
                 )
                 .await;
@@ -415,6 +417,8 @@ impl WebRtcVideo {
                     payloader,
                     timestamp,
                     important,
+                    #[cfg(feature="cloudgime-scoped-recovery-metadata")]
+                    false,
                     &self.needs_idr,
                 )
                 .await;
@@ -436,6 +440,8 @@ impl WebRtcVideo {
                     payloader,
                     timestamp,
                     important,
+                    #[cfg(feature="cloudgime-scoped-recovery-metadata")]
+                    false,
                     &self.needs_idr,
                 )
                 .await;
@@ -479,12 +485,16 @@ async fn send_single_frame(
     payloader: &mut impl Payloader,
     timestamp: u32,
     important: bool,
+    #[cfg(feature="cloudgime-scoped-recovery-metadata")]
+    h264_metadata: bool,
     needs_idr: &AtomicBool,
 ) {
     if important {
         sender.clear_queue(false).await;
     }
 
+    #[cfg(feature="cloudgime-scoped-recovery-metadata")]
+    let reference=if h264_metadata&&samples.iter().all(|n|n.first().is_some_and(|h|matches!(h&31,1|5|6|7|8|9|10|11|12))) {super::recovery_frame::classify_h264(samples)} else {0};
     let mut peekable = samples.drain(..).peekable();
 
     let mut frame_samples = Vec::new();
@@ -507,6 +517,8 @@ async fn send_single_frame(
         frame_samples.extend(packets);
     }
 
+    #[cfg(feature="cloudgime-scoped-recovery-metadata")]
+    let frame_samples=super::recovery_frame::attach(frame_samples,reference);
     if !sender.send_samples(frame_samples, important).await {
         sender.clear_queue(true).await;
 
@@ -678,4 +690,11 @@ fn trim_bytes_to_range(mut buf: BytesMut, range: Range<usize>) -> BytesMut {
     }
 
     buf
+}
+
+#[cfg(all(test,feature="cloudgime-scoped-recovery-metadata"))]
+pub(super) fn qa_packetize_frame(index:u32)->Vec<super::recovery_frame::VideoSample>{
+ let mut payload=vec![0x88u8;5592];payload[0]=0x61;
+ let packets=packetize(&mut H264Payloader::default(),1212,0,90000+index*3000,&Bytes::from(payload),true).unwrap();
+ super::recovery_frame::attach(packets,2)
 }

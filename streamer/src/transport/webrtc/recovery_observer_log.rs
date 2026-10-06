@@ -21,12 +21,13 @@ pub(super) enum Data {
  Nack{sender:u32,ssrc:u32,pid:u16,blp:u16},
  Remb{sender:u32,ssrc:u32,bitrate:f32},
  Pli{sender:u32,ssrc:u32},
+ FramePacket{epoch:u64,ssrc:u32,seq:u16,rtp:u32,frame_id:u64,index:u32,count:u32,reference:u8},
  ReadError,
 }
 #[derive(Clone,Debug,serde::Deserialize,Serialize)]
 pub(super) struct Event{pub id:u64,pub started_us:u64,pub completed_us:u64,pub data:Data}
 #[derive(Default)]
-struct State{active:AtomicBool,in_flight:AtomicUsize,outstanding_calls:AtomicUsize,cancelled_calls:AtomicU64,attempted:AtomicU64,accepted:AtomicU64,dropped:AtomicU64,omitted:AtomicU64,quota:AtomicBool}
+struct State{#[cfg(test)]rr_with_lsr:AtomicU64,active:AtomicBool,in_flight:AtomicUsize,outstanding_calls:AtomicUsize,cancelled_calls:AtomicU64,attempted:AtomicU64,accepted:AtomicU64,dropped:AtomicU64,omitted:AtomicU64,quota:AtomicBool}
 #[derive(Clone)]
 pub(super) struct Tap{tx:SyncSender<Event>,state:Arc<State>,began:Instant,deadline:Instant}
 pub(super) struct PendingCall{state:Arc<State>,finished:bool}
@@ -50,9 +51,12 @@ impl Tap{
   let duration=Duration::from_millis(config.expires_ms.saturating_sub(wall_ms()).min(MAX_SECONDS*1000));
   Self::start(file,config.nonce,peer,duration).ok()
  }
- fn start(file:File,nonce:String,peer:u64,duration:Duration)->std::io::Result<Self>{
+ fn start(file:File,nonce:String,peer:u64,duration:Duration)->std::io::Result<Self>{Self::start_with_scope(file,nonce,peer,duration,None)}
+ #[cfg(feature="cloudgime-scoped-recovery-metadata")]
+ pub(super) fn start_scoped(file:File,nonce:String,peer:u64,duration:Duration,scope:serde_json::Value)->std::io::Result<Self>{Self::start_with_scope(file,nonce,peer,duration,Some(scope))}
+ fn start_with_scope(file:File,nonce:String,peer:u64,duration:Duration,scope:Option<serde_json::Value>)->std::io::Result<Self>{
   let(mut writer,began)=(BufWriter::new(file),Instant::now());
-  serde_json::to_writer(&mut writer,&serde_json::json!({"type":"header","schema":1,"nonce":nonce,"process":std::process::id(),"peer":peer,"clock":"peer-local Instant microseconds","scope":"SDK peer only; no authenticated rental mapping","rtp_boundary":"innermost SDK RTP writer before SRTP; begin/end of awaited call, not NIC egress","rtcp_boundary":"SR write begin/end; RTCP read completion after SRTP decrypt before default interceptors","payload_retained":false,"max_events":MAX_EVENTS,"max_bytes":MAX_BYTES,"max_duration_ms":duration.as_millis()}))?;writer.write_all(b"\n")?;writer.flush()?;
+  serde_json::to_writer(&mut writer,&serde_json::json!({"type":"header","schema":1,"nonce":nonce,"process":std::process::id(),"peer":peer,"clock":"peer-local Instant microseconds","scope":"SDK peer only; see optional parent_binding for operator-authorized mapping","parent_binding":scope,"rtp_boundary":"innermost SDK RTP writer before SRTP; begin/end of awaited call, not NIC egress","rtcp_boundary":"SR write begin/end; RTCP read completion after SRTP decrypt before default interceptors","payload_retained":false,"max_events":MAX_EVENTS,"max_bytes":MAX_BYTES,"max_duration_ms":duration.as_millis()}))?;writer.write_all(b"\n")?;writer.flush()?;
   let(tx,rx)=mpsc::sync_channel(QUEUE);let state=Arc::new(State::default());state.active.store(true,Ordering::Release);let status=state.clone();let deadline=began+duration;
   std::thread::Builder::new().name("cg-qa-meta-writer".into()).spawn(move||{
    let(mut written,mut bytes,mut io_error,mut reason)=(0u64,0usize,false,"closed");
@@ -77,6 +81,7 @@ impl Tap{
  pub(super) fn active(&self)->bool{self.state.active.load(Ordering::Relaxed)&&Instant::now()<self.deadline}
  pub(super) fn omit(&self,n:usize){if self.active(){self.state.omitted.fetch_add(n as u64,Ordering::Relaxed);}}
  pub(super) fn record(&self,started_us:u64,completed_us:u64,data:Data){
+  #[cfg(test)]if matches!(&data,Data::Rr{lsr,..}if *lsr!=0){self.state.rr_with_lsr.fetch_add(1,Ordering::Release);}
   if !self.active(){return;}
   self.state.in_flight.fetch_add(1,Ordering::AcqRel);
   if !self.state.active.load(Ordering::Acquire){self.state.in_flight.fetch_sub(1,Ordering::Release);return;}
@@ -85,6 +90,7 @@ impl Tap{
   match self.tx.try_send(Event{id,started_us,completed_us,data}){Ok(())=>{self.state.accepted.fetch_add(1,Ordering::Release);},Err(TrySendError::Full(_))=>{self.state.dropped.fetch_add(1,Ordering::Relaxed);},Err(TrySendError::Disconnected(_))=>{self.state.omitted.fetch_add(1,Ordering::Relaxed);self.state.active.store(false,Ordering::Release);}}
   self.state.in_flight.fetch_sub(1,Ordering::Release);
  }
+ #[cfg(test)]pub(super) fn has_rr_lsr(&self)->bool{self.state.rr_with_lsr.load(Ordering::Acquire)>0}
  pub(super) fn close(&self){self.state.active.store(false,Ordering::Release);}
  #[cfg(test)] pub(super) fn test_file()->(Self,PathBuf){let dir=std::env::var_os("CG_QA_TEST_EVIDENCE_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);let peer=PEERS.fetch_add(1,Ordering::Relaxed);let path=dir.join(format!("sdk-trace-{}-{}.jsonl",std::process::id(),peer));let file=OpenOptions::new().write(true).create_new(true).open(&path).unwrap();(Self::start(file,"a".repeat(32),peer,Duration::from_secs(15)).unwrap(),path)}
  #[cfg(test)] pub(super) fn memory(capacity:usize)->(Self,mpsc::Receiver<Event>){let(tx,rx)=mpsc::sync_channel(capacity);let state=Arc::new(State::default());state.active.store(true,Ordering::Release);let began=Instant::now();(Self{tx,state,began,deadline:began+Duration::from_secs(60)},rx)}

@@ -382,13 +382,20 @@ impl From<TrackLocalStaticRTP> for SequencedTrackLocalStaticRTP {
 }
 
 impl TrackLike for SequencedTrackLocalStaticRTP {
+    #[cfg(not(feature="cloudgime-scoped-recovery-metadata"))]
     type Sample = rtp::packet::Packet;
+    #[cfg(feature="cloudgime-scoped-recovery-metadata")]
+    type Sample = super::recovery_frame::VideoSample;
 
     async fn write_with_extensions(
         &self,
-        mut sample: Self::Sample,
+        sample: Self::Sample,
         extensions: &[HeaderExtension],
     ) -> Result<usize, anyhow::Error> {
+        #[cfg(feature="cloudgime-scoped-recovery-metadata")]
+        let (mut sample,attributes) = {let attrs=sample.attributes();(sample.packet,attrs)};
+        #[cfg(not(feature="cloudgime-scoped-recovery-metadata"))]
+        let mut sample=sample;
         let mut any_paused = self.track.any_binding_paused().await;
         let mut all_paused = self.track.all_binding_paused().await;
 
@@ -423,7 +430,12 @@ impl TrackLike for SequencedTrackLocalStaticRTP {
 
         let bytes_written = match tokio::time::timeout(
             RTP_WRITE_TIMEOUT,
-            self.track.write_rtp_with_extensions(&sample, extensions),
+            async {
+                #[cfg(feature="cloudgime-scoped-recovery-metadata")]
+                {self.track.write_rtp_with_extensions_attributes(&sample,extensions,&attributes).await}
+                #[cfg(not(feature="cloudgime-scoped-recovery-metadata"))]
+                {self.track.write_rtp_with_extensions(&sample,extensions).await}
+            },
         )
         .await
         {

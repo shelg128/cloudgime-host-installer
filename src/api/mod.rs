@@ -54,6 +54,8 @@ pub mod admin;
 pub mod android_native;
 pub mod auth;
 pub mod stream;
+#[cfg(feature="cloudgime-scoped-recovery-metadata")]
+mod qa_trace_parent;
 
 pub mod response_streaming;
 

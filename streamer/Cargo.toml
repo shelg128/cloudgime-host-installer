@@ -8,6 +8,7 @@ license.workspace = true
 default = []
 cloudgime-egress-observer = []
 cloudgime-recovery-metadata = []
+cloudgime-scoped-recovery-metadata = ["cloudgime-recovery-metadata", "common/qa-trace-scope"]
 cloudgime-fixture-capture = []
 cloudgime-session-baseline = []
 cloudgime-qa-independent-audio-sync = []

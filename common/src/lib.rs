@@ -9,6 +9,8 @@ pub mod api_bindings;
 pub mod api_bindings_ext;
 pub mod config;
 pub mod ipc;
+#[cfg(feature="qa-trace-scope")]
+pub mod qa_trace_scope;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamSettings {
