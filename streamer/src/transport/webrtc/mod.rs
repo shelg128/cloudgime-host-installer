@@ -73,6 +73,8 @@ use crate::{
 };
 
 mod audio;
+#[cfg(feature = "cloudgime-recovery-metadata")]
+mod recovery_observer;
 mod sender;
 mod video;
 
@@ -269,6 +271,14 @@ pub async fn new(
 
     // -- Build Api
     let mut api_registry = Registry::new();
+
+    // First registered = innermost writer/reader in interceptor 0.17.1.
+    // Observe finalized RTP identities, SDK-generated SR and NACK retransmissions.
+    // Compile flag AND explicit short-lived environment gate; no recovery changes.
+    #[cfg(feature = "cloudgime-recovery-metadata")]
+    if let Some(observer) = recovery_observer::ObserverBuilder::from_environment() {
+        api_registry.add(Box::new(observer));
+    }
 
     // Use the default set of Interceptors
     api_registry = register_default_interceptors(api_registry, &mut api_media)
