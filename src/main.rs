@@ -51,6 +51,8 @@ mod provisioning;
 mod rental_desktop_target;
 mod runtime_service;
 mod stream_controller;
+#[cfg(feature="cloudgime-scoped-recovery-metadata")]
+mod qa_trace_startup;
 
 #[actix_web::main]
 async fn main() {
@@ -101,6 +103,8 @@ async fn main() {
     }
 
     let guard = init_log(&config);
+    #[cfg(feature="cloudgime-scoped-recovery-metadata")]
+    qa_trace_startup::attest_from_environment();
 
     if let Err(err) = start(config).await {
         error!("{err:?}");
