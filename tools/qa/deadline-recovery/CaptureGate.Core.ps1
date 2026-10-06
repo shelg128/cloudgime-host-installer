@@ -19,10 +19,15 @@ function Test-CgCaptureGate($Evidence,$Snapshot,[long]$Now){
  if((Get-CgField $proc 'owned')-ne$true-or(Get-CgField $proc 'alive')-ne$true){throw 'PROCESS_NOT_OWNED'}
  $expectedHash=Get-CgField $e 'streamerSha256';$actualHash=Get-CgField $proc 'sha256';if($expectedHash-isnot[string]-or$expectedHash-notmatch'^[a-fA-F0-9]{64}$'-or$actualHash-isnot[string]-or$actualHash.ToLowerInvariant()-cne$expectedHash.ToLowerInvariant()){throw 'PROCESS_HASH'}
  Assert-CgFresh (Get-CgField $e 'backendObservedHostLowerMs') $Now 3000 'BACKEND'
- Assert-CgFresh (Get-CgField $e 'reviewedHostLowerMs') $Now 5000 'REVIEW'
+ $quarantine=(Get-CgField $e 'protocol')-ceq'quarantined-metadata-v1'
+ if($quarantine){
+  if((Get-CgField $e 'visualApproved')-ne$false-or(Get-CgField $e 'analysisDisposition')-cne'quarantine-pending-review'){throw 'QUARANTINE_REQUIRED'}
+  $image=Get-CgField $e 'image';if((Get-CgField $image 'verified')-ne$true-or(Get-CgField $image 'captureNonce')-cnotmatch'^[a-f0-9]{32}$'-or(Get-CgField $image 'jpegSha256')-cnotmatch'^[a-f0-9]{64}$'){throw 'QUARANTINE_IMAGE'}
+  Assert-CgFresh (Get-CgField $e 'capturedHostLowerMs') $Now 5000 'IMAGE'
+ }else{Assert-CgFresh (Get-CgField $e 'reviewedHostLowerMs') $Now 5000 'REVIEW'}
  Assert-CgFresh (Get-CgField $progress 'observed_at_ms') $Now 1000 'PROGRESS'
  if((Get-CgField $backend 'billingStatus')-cne'BILLING_RUNNING'-or$null-ne(Get-CgField $backend 'endedAt')-or(Get-CgField $backend 'sessionId')-cne$ctx.rental_session_id-or(Get-CgField $backend 'claimId')-cne$ctx.claim_id-or(Get-CgField $backend 'nativeRoot')-cne$ctx.native_session_id-or(Get-CgField $backend 'billingCommitId')-isnot[string]-or![string](Get-CgField $backend 'billingCommitId')){throw 'BILLING_SCOPE'}
- if((Get-CgField $e 'visualApproved')-ne$true-or(Get-CgField $e 'route')-cne'direct'-or(Get-CgField $e 'width')-ne720-or(Get-CgField $e 'height')-ne1570-or(Get-CgField $e 'fps')-ne30-or(Get-CgField $e 'targetKbps')-ne5000){throw 'VISUAL_MODE'}
+ if((!$quarantine-and(Get-CgField $e 'visualApproved')-ne$true)-or(Get-CgField $e 'route')-cne'direct'-or(Get-CgField $e 'width')-ne720-or(Get-CgField $e 'height')-ne1570-or(Get-CgField $e 'fps')-ne30-or(Get-CgField $e 'targetKbps')-ne5000){throw 'VISUAL_MODE'}
  if((Get-CgField $rental 'RentalSessionId')-cne$ctx.rental_session_id-or(Get-CgField $rental 'ClaimId')-cne$ctx.claim_id-or(Get-CgField $rental 'PcId')-cne'2'){throw 'RENTAL_LOCAL_SCOPE'}
  if((Get-CgField $fixture 'sessionId')-cne$ctx.rental_session_id-or(Get-CgField $fixture 'claimId')-cne$ctx.claim_id-or(Get-CgField $fixture 'foreground')-ne$true-or(Get-CgField $fixture 'error')-or(Get-CgField $fixture 'width')-ne720-or(Get-CgField $fixture 'height')-ne1570){throw 'FIXTURE_CHANGED'}
  Assert-CgFresh (Get-CgField $s 'fixtureAtMs') $Now 3000 'FIXTURE'
@@ -30,5 +35,5 @@ function Test-CgCaptureGate($Evidence,$Snapshot,[long]$Now){
  $pps=Get-CgField $progress 'packets_per_second';$frames=Get-CgField $progress 'progress_frames';if(!(Test-CgNumber $pps)-or$pps-le0-or!(Test-CgInteger $frames)-or$frames-lt3){throw 'PROGRESS_INVALID'}
  $duration=[Math]::Min(25000,[Math]::Floor(43000/([double]$pps*3+250))*1000);if($duration-lt10000-or$Now+$duration+2000-ge$ctx.authority_expires_ms){throw 'CAPTURE_BUDGET'}
  $nonce=Get-CgField $e 'requestNonce';if($nonce-isnot[string]-or$nonce-cnotmatch'^[a-f0-9]{32}$'){throw 'REQUEST_NONCE'}
- return [pscustomobject]@{eligible=$true;durationMs=[long]$duration;projectedEvents=[Math]::Ceiling(($pps*3+250)*$duration/1000);backendAgeUpperMs=$Now-$e.backendObservedHostLowerMs;reviewAgeUpperMs=$Now-$e.reviewedHostLowerMs;progressAgeMs=$Now-$progress.observed_at_ms;request=[pscustomobject]@{context=$ctx;request_nonce=$nonce;expires_ms=$Now+2000;duration_ms=[long]$duration}}
+ return [pscustomobject]@{eligible=$true;durationMs=[long]$duration;projectedEvents=[Math]::Ceiling(($pps*3+250)*$duration/1000);backendAgeUpperMs=$Now-$e.backendObservedHostLowerMs;reviewAgeUpperMs=$(if($quarantine){$null}else{$Now-$e.reviewedHostLowerMs});imageAgeUpperMs=$(if($quarantine){$Now-$e.capturedHostLowerMs}else{$Now-$e.reviewedHostLowerMs});analysisDisposition=$(if($quarantine){'quarantine-pending-review'}else{'pre-reviewed-evidence'});progressAgeMs=$Now-$progress.observed_at_ms;request=[pscustomobject]@{context=$ctx;request_nonce=$nonce;expires_ms=$Now+2000;duration_ms=[long]$duration}}
 }

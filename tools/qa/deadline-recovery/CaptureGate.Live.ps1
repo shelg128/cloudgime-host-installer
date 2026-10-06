@@ -24,7 +24,12 @@ $now=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds();$result=Test-CgCaptureGat
 $s.rental=Read-CgGateJson 'C:\Users\CloudGimeRenter\AppData\Roaming\SentinelLauncher\state\session.json' 8192
 $s.process.alive=(!$handle.HasExited);$s.stopExists=Test-Path "$dir\stop.json";$s.stoppedExists=Test-Path "$dir\gate-stopped.json"
 $now=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds();$result=Test-CgCaptureGate $e $s $now
+# Seal the collection conditions before request creation. This receipt is not a review approval.
+$receipt=@{schema=1;requestNonce=$e.requestNonce;protocol=(Get-CgField $e 'protocol');analysisDisposition=$result.analysisDisposition;context=$peer.context;image=(Get-CgField $e 'image');hostMs=$now;imageAgeUpperMs=$result.imageAgeUpperMs;backendAgeUpperMs=$result.backendAgeUpperMs;progressAgeMs=$result.progressAgeMs;durationMs=$result.durationMs;fixture=$fixture;processId=$peer.process;coreSha256=$CoreSha256}
+$receiptPath=Join-Path $dir ('collection-conditions-'+$e.requestNonce+'.json');$receiptBytes=[Text.Encoding]::UTF8.GetBytes(($receipt|ConvertTo-Json -Depth 9 -Compress));$rf=[IO.File]::Open($receiptPath,'CreateNew','Write','None');try{$rf.Write($receiptBytes,0,$receiptBytes.Length)}finally{$rf.Dispose()}
+# Recheck original evidence ages after receipt I/O; never restamp captured data.
+$now=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds();$result=Test-CgCaptureGate $e $s $now
 $json=$result.request|ConvertTo-Json -Depth 7 -Compress;$bytes=[Text.Encoding]::UTF8.GetBytes($json)
 $f=[IO.File]::Open("$dir\request.json",'CreateNew','Write','None');try{$f.Write($bytes,0,$bytes.Length)}finally{$f.Dispose()}
 # Receipt is best effort after request creation; caller must reconcile request/armed if reply lost.
-@{requested=$true;dryRun=$false;hostMs=$now;durationMs=$result.durationMs;projectedEvents=$result.projectedEvents;backendAgeUpperMs=$result.backendAgeUpperMs;reviewAgeUpperMs=$result.reviewAgeUpperMs;progressAgeMs=$result.progressAgeMs;coreSha256=$CoreSha256}|ConvertTo-Json -Depth 5 -Compress
+@{requested=$true;dryRun=$false;hostMs=$now;durationMs=$result.durationMs;projectedEvents=$result.projectedEvents;backendAgeUpperMs=$result.backendAgeUpperMs;reviewAgeUpperMs=$result.reviewAgeUpperMs;imageAgeUpperMs=$result.imageAgeUpperMs;analysisDisposition=$result.analysisDisposition;progressAgeMs=$result.progressAgeMs;coreSha256=$CoreSha256}|ConvertTo-Json -Depth 5 -Compress
