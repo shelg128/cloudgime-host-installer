@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><EnableDefaultCompileItems>false</EnableDefaultCompileItems><StartupObject>EncoderProfileTests</StartupObject></PropertyGroup>
+  <ItemGroup><Compile Include="EncoderProfileTests.cs"/><Compile Include="UniversalCases.cs"/><Compile Include="../../portable/DisplayPrepareHelper/*.cs"/></ItemGroup>
+</Project>

@@ -14,6 +14,11 @@ if(-not(Test-Path $InputBundleRoot -PathType Container)){throw 'INPUT_BUNDLE_MIS
 if((Get-Item -LiteralPath $InputBundleRoot -Force).Attributes-band[IO.FileAttributes]::ReparsePoint){throw 'REPARSE_INPUT_ROOT'}
 if(Test-Path $OutputBundleRoot){throw 'OUTPUT_BUNDLE_MUST_BE_NEW'}
 if((Get-FileHash $SentinelInstallerPath -Algorithm SHA256).Hash-ne$SentinelInstallerSha256){throw 'SENTINEL_HASH_MISMATCH'}
+# Require the proven helper receipt before creating a release output; fixture-only is never installable.
+if(-not$FixtureOnly){
+ & node (Join-Path $PSScriptRoot 'verify-encoder-runtime.mjs') verify (Join-Path $InputBundleRoot 'moonlight\server\display-prepare-helper.exe') (Join-Path $PSScriptRoot 'DisplayPrepareHelper')
+ if($LASTEXITCODE-ne0){throw 'UNIVERSAL_ENCODER_IDENTITY_REQUIRED'}
+}
 # Copy without following reparse points.
 $queue=New-Object 'Collections.Generic.Queue[object]';$queue.Enqueue(@($InputBundleRoot,$OutputBundleRoot));New-Item -ItemType Directory $OutputBundleRoot|Out-Null
 while($queue.Count){$pair=$queue.Dequeue();foreach($e in Get-ChildItem -LiteralPath $pair[0] -Force){if($e.Attributes-band[IO.FileAttributes]::ReparsePoint){throw 'REPARSE_INPUT_ENTRY'};$dst=Join-Path $pair[1] $e.Name;if($e.PSIsContainer){New-Item -ItemType Directory $dst -Force|Out-Null;$queue.Enqueue(@($e.FullName,$dst))}else{Copy-Item -LiteralPath $e.FullName -Destination $dst}}}
@@ -21,7 +26,7 @@ while($queue.Count){$pair=$queue.Dequeue();foreach($e in Get-ChildItem -LiteralP
 $blocked=@('provisioning','keeper-tunnel\data','moonlight\server\sunshine-shared','sunshine\config\credentials','sunshine-legacy\config\credentials')
 foreach($r in $blocked){$p=Join-Path $OutputBundleRoot $r;if(Test-Path $p){Remove-Item $p -Recurse -Force}}
 foreach($pattern in @('*.dpapi','*.pem','*.key','.env*','*.env')){Get-ChildItem $OutputBundleRoot -Recurse -Force -File -Filter $pattern -ErrorAction SilentlyContinue|Remove-Item -Force}
-foreach($relative in @('PUBLIC_URL.txt','moonlight\server\host_activation_state.json','moonlight\server\shared_pair_info.json','sunshine\config\sunshine_state.json','sunshine-legacy\config\sunshine_state.json','cloudgime-host-bundle.json')){$p=Join-Path $OutputBundleRoot $relative;if(Test-Path $p){Remove-Item $p -Force}}
+foreach($relative in @('PUBLIC_URL.txt','moonlight\server\host_activation_state.json','moonlight\server\host_capability_profile.json','moonlight\server\selected_sunshine_runtime.txt','moonlight\server\stream_display_preferences.json','moonlight\server\shared_pair_info.json','sunshine\config\sunshine_state.json','sunshine-legacy\config\sunshine_state.json','cloudgime-host-bundle.json')){$p=Join-Path $OutputBundleRoot $relative;if(Test-Path $p){Remove-Item $p -Force}}
 # Reset web runtime to first-run loopback state; never preserve a builder's user/pairing.
 $configPath=Join-Path $OutputBundleRoot 'moonlight\server\config.json';$config=Get-Content $configPath -Raw|ConvertFrom-Json
 $web=$config.web_server

@@ -19,7 +19,10 @@
     "build": "npm run generate-bindings && npm run build-light",
     "build-light": "tsc && npm run copy-static && node tools/copy_native_bridge.cjs && node tools/version_dist_imports.cjs && node tools/sync_runtime_static.cjs",
     "generate-bindings": "cargo test export_bindings --package common -- --test-threads=1",
-    "copy-static": "cpx \"web/**/*.{html,json,css,svg,png,js,wasm}\" dist/"
+    "copy-static": "cpx \"web/**/*.{html,json,css,svg,png,js,wasm}\" dist/",
+    "test:encoder-stability": "dotnet run --project tools/qa/encoder-profile-tests/EncoderProfileTests.csproj -c Release",
+    "test:universal-contract": "dotnet run --project tools/portable/HostControlBootstrap.PolicyTests -c Release",
+    "test:release-identity": "node --test tools/portable/verify-encoder-runtime.test.mjs tools/portable/verify-display-runtime.test.mjs"
   },
   "license": "GPL-3.0-or-later",
   "private": "true",

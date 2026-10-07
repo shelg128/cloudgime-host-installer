@@ -9,5 +9,6 @@
 
   <ItemGroup>
     <Compile Include="../HostControlBootstrap/UniversalBundleContract.cs" Link="UniversalBundleContract.cs" />
+    <Compile Include="../HostControlBootstrap/EncoderBundleContract.cs" Link="EncoderBundleContract.cs" />
   </ItemGroup>
 </Project>

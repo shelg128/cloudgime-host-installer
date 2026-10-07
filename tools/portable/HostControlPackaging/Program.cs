@@ -65,6 +65,7 @@ internal static class Program
         var manifest = Path.Combine(root, CloudgimeHostBootstrap.UniversalBundleContract.ManifestName);
         if (File.Exists(manifest)) throw new InvalidOperationException("MANIFEST_ALREADY_EXISTS: stage a fresh candidate; never reseal an installed bundle.");
         var fixtureOnly = args.HasFlag("fixture-only");
+        if (!fixtureOnly) CloudgimeHostBootstrap.EncoderBundleContract.Validate(root);
         var entries = new JsonArray();
         foreach (var relative in CloudgimeHostBootstrap.UniversalBundleContract.Walk(root).Order(StringComparer.Ordinal))
         {
@@ -122,6 +123,7 @@ internal static class Program
             throw new InvalidOperationException($"Bundle root not found: {bundleRoot}");
         }
 
+        CloudgimeHostBootstrap.EncoderBundleContract.Validate(bundleRoot);
         CopyDirectoryContents(bundleRoot, bundleReleaseRoot);
         OverlayLatestRuntimeStatic(repoRoot, bundleReleaseRoot);
         OverlayDriverSeed(repoRoot, bundleReleaseRoot);
@@ -183,6 +185,7 @@ internal static class Program
             throw new InvalidOperationException($"Bundle root not found: {bundleRoot}");
         }
 
+        CloudgimeHostBootstrap.EncoderBundleContract.Validate(bundleRoot);
         EnsureDirectoryDeleted(payloadRoot);
         var appPayload = Path.Combine(payloadRoot, "app");
         var bundlePayload = Path.Combine(payloadRoot, "bundle");
@@ -243,8 +246,9 @@ internal static class Program
             throw new InvalidOperationException($"NSIS payload not found in {payloadRoot}. Run prepare-nsis-payload first.");
         }
 
+        CloudgimeHostBootstrap.EncoderBundleContract.Validate(payloadBundle);
         if (CloudgimeHostBootstrap.UniversalBundleContract.IsUniversal(payloadBundle))
-            CloudgimeHostBootstrap.UniversalBundleContract.Validate(payloadBundle);
+            CloudgimeHostBootstrap.UniversalBundleContract.RequireInstallable(payloadBundle);
         Directory.CreateDirectory(outputDir);
         var makensisPath = ResolveMakensisPath();
         var outputDefine = ConvertToNsisDefinePath(installerRoot, outputDir);

@@ -2,13 +2,16 @@ name: universal-node-contract
 on:
   pull_request:
     paths:
-      - 'src/provisioning.rs'
-      - 'src/universal_transport_config.rs'
+      - 'src/**'
+      - 'common/**'
       - 'tools/portable/**'
+      - 'tools/qa/encoder-profile-tests/**'
       - '.github/workflows/universal-node-contract.yml'
   push:
     branches:
-      - 'chatbox/universal-node-permanent'
+      - main
+      - 'chatbox/universal-*'
+  workflow_dispatch:
 jobs:
   contract:
     runs-on: windows-latest
@@ -17,17 +20,55 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Qualify capability-aware helper and artifact identity
+        shell: powershell
+        run: |
+          & tools/portable/test-encoder-release.ps1 -OutputRoot "$env:RUNNER_TEMP\cg-qualified-helper"
+          if ($LASTEXITCODE -ne 0) { throw 'ENCODER_QUALIFICATION_FAILED' }
+      - name: Artifact drift and existing NVENC marker regressions
+        shell: powershell
+        run: |
+          node --test tools/portable/verify-encoder-runtime.test.mjs tools/portable/verify-display-runtime.test.mjs tools/portable/verify-installed-stability.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'ARTIFACT_TESTS_FAILED' }
+          dotnet run --project tools/portable/NvencRuntimeHealth.Tests -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'NVENC_MARKER_REGRESSION' }
       - name: Build Bootstrap
-        shell: pwsh
-        run: dotnet build tools/portable/HostControlBootstrap/HostControlBootstrap.csproj -c Release
+        shell: powershell
+        run: |
+          dotnet build tools/portable/HostControlBootstrap/HostControlBootstrap.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'BOOTSTRAP_BUILD_FAILED' }
       - name: Build Packaging
-        shell: pwsh
-        run: dotnet build tools/portable/HostControlPackaging/HostControlPackaging.csproj -c Release
+        shell: powershell
+        run: |
+          dotnet build tools/portable/HostControlPackaging/HostControlPackaging.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'PACKAGING_BUILD_FAILED' }
       - name: Contract tests
-        shell: pwsh
-        run: dotnet run --project tools/portable/HostControlBootstrap.PolicyTests -c Release
+        shell: powershell
+        run: |
+          dotnet run --project tools/portable/HostControlBootstrap.PolicyTests -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'INSTALLER_CONTRACT_FAILED' }
       - name: Parse PowerShell 5.1 scripts
         shell: powershell
         run: |
-          $files=@('tools/portable/auto-pair-host.ps1','tools/portable/finalize-universal-bundle.ps1','tools/portable/build-universal-host-installer.ps1','tools/portable/test-universal-package-pipeline.ps1')
+          $files=@('tools/portable/test-encoder-release.ps1','tools/portable/build_portable_host_bundle.ps1','tools/portable/auto-pair-host.ps1','tools/portable/finalize-universal-bundle.ps1','tools/portable/build-universal-host-installer.ps1','tools/portable/test-universal-package-pipeline.ps1')
           foreach($p in $files){$tokens=$null;$errors=$null;[void][Management.Automation.Language.Parser]::ParseFile((Resolve-Path $p),[ref]$tokens,[ref]$errors);if($errors.Count){$errors|Format-List;throw "Parse failed: $p"}}
+      - name: Preserve existing multi-device display behavior
+        shell: powershell
+        run: |
+          foreach ($p in @('DisplayProfiles.Tests','DisplayConfigModeSetter.Tests','DisplayModeStability.Tests')) {
+            dotnet run --project "tools/portable/$p" -c Release
+            if ($LASTEXITCODE -ne 0) { throw "DISPLAY_REGRESSION_$p" }
+          }
+      - name: Keep qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: encoder-qualification
+          path: |
+            ${{ runner.temp }}/cg-qualified-helper/encoder-regression.json
+            ${{ runner.temp }}/cg-qualified-helper/qualification.json
+            ${{ runner.temp }}/cg-qualified-helper/publish/*.json
+          if-no-files-found: warn

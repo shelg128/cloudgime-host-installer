@@ -7,6 +7,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../HostControlBootstrap/UniversalBundleContract.cs" Link="UniversalBundleContract.cs" />
+    <Compile Include="../HostControlBootstrap/EncoderBundleContract.cs" Link="EncoderBundleContract.cs" />
     <Compile Include="../HostControlBootstrap/AutoLogonTransaction.cs" Link="AutoLogonTransaction.cs" />
     <Compile Include="../HostControlBootstrap/UniversalTransportPolicy.cs" Link="UniversalTransportPolicy.cs" />
     <Compile Include="../HostControlBootstrap/UniversalFileTransaction.cs" Link="UniversalFileTransaction.cs" />

@@ -66,7 +66,7 @@ internal static class BundleTests
             Fails(()=>{var m=Manifest();File.WriteAllText(Path.Combine(root,UniversalBundleContract.ManifestName),m.ToJsonString().Replace("\"schemaVersion\":1","\"schemaVersion\":1,\"schemaVersion\":1"));},"DUPLICATE_JSON_KEY");
             foreach(var bad in new[]{"/absolute","C:/path","a\\b","a//b","a/../b","nul.txt","dir/COM1.log","dir./file","dir /file"})
             {if(UniversalBundleContract.IsSafeRelativePath(bad))throw new Exception("UNSAFE_PATH_ALLOWED:"+bad);passed++;}
-            foreach(var bad in new[]{"sunshine/config/sunshine_state.json","moonlight/server/shared_pair_info.json",".env.production","folder/key.pem","keeper-tunnel/data/status.json"})
+            foreach(var bad in new[]{"moonlight/server/host_capability_profile.json","moonlight/server/selected_sunshine_runtime.txt","moonlight/server/stream_display_preferences.json","sunshine/config/sunshine_state.json","moonlight/server/shared_pair_info.json",".env.production","folder/key.pem","keeper-tunnel/data/status.json"})
             {try{UniversalBundleContract.RejectMachineState(bad);}catch(InvalidDataException){passed++;continue;}throw new Exception("MACHINE_STATE_ALLOWED");}
             return passed;
         }

@@ -1,5 +1,10 @@
 # Universal Node — automatic managed-rental cleanup verified
 
+## Current stability integration — 7 October 2026
+
+Read [PERMANENT-STABILITY.md](./PERMANENT-STABILITY.md) before building or deploying. The verified NVENC log/cache fix is now in the Universal source, with mandatory source/binary contracts and multi-GPU regression gates. The qualified helper (SHA256 fe69d3bf…478e717b) is permanently installed on PC-02; other Host/media/APK components were not replaced. Older installer candidates below remain historical; no new full signed installer was released by this integration. Original Host worktree changes were preserved.
+
+
 ## Latest: 24 September 2026 Standard User full upgrade and automatic cleanup
 
 See workspace `05 LAPORAN/20260924-STANDARD-USER-E2E-PREBILLING-RECOVERY.md` and `05 LAPORAN/20260924-UNIVERSAL-V11-FULL-UPGRADE-PC02.md`.

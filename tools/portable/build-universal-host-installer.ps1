@@ -16,6 +16,11 @@ if(Test-Path $OutputDir){throw 'OUTPUT_MUST_BE_NEW'}
 foreach($p in @($RawBundleRoot,$AppRoot)){if(-not(Test-Path $p -PathType Container)){throw 'INPUT_ROOT_MISSING'};if($OutputDir.StartsWith($p.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'OUTPUT_NESTED_IN_INPUT'}}
 if((Get-FileHash $SentinelInstallerPath -Algorithm SHA256).Hash-ne$SentinelInstallerSha256){throw 'SENTINEL_HASH_MISMATCH'}
 if(-not$InternalUnsignedCandidate-and(Get-AuthenticodeSignature $SentinelInstallerPath).Status-ne'Valid'){throw 'SIGNED_SENTINEL_REQUIRED'}
+if(-not$FixtureOnly){
+ $helper=Join-Path $RawBundleRoot 'moonlight\server\display-prepare-helper.exe'
+ & node (Join-Path $PSScriptRoot 'verify-encoder-runtime.mjs') verify $helper (Join-Path $PSScriptRoot 'DisplayPrepareHelper')
+ if($LASTEXITCODE-ne0){throw 'RELEASE_ENCODER_SOURCE_OR_BINARY_MISMATCH'}
+}
 foreach($n in @('cloudgime-host-control.exe','open-host-control.exe','uninstaller-cloudgime.exe')){if(-not(Test-Path (Join-Path $AppRoot $n) -PathType Leaf)){throw "APP_PAYLOAD_MISSING:$n"}}
 # Seal a sanitized copy; RawBundleRoot is never mutated.
 $bundle=Join-Path $OutputDir 'sealed-bundle';New-Item -ItemType Directory $OutputDir|Out-Null

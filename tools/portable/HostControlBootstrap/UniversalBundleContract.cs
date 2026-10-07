@@ -72,6 +72,8 @@ internal static class UniversalBundleContract
             throw new InvalidDataException("FIXTURE_OR_UNCLASSIFIED_PACKAGE_NOT_INSTALLABLE");
         foreach (var relative in Required.Where(p => p.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)))
             RequireWindowsExecutable(Path.Combine(root, relative));
+        RequireWindowsExecutable(Path.Combine(root, EncoderBundleContract.HelperPath));
+        EncoderBundleContract.Validate(root);
     }
 
     internal static void RequireWindowsExecutable(string path)
@@ -103,6 +105,7 @@ internal static class UniversalBundleContract
             || name.EndsWith(".dpapi") || name.EndsWith(".pem") || name.EndsWith(".key") || name.EndsWith(".pfx") || name.EndsWith(".p12")
             || name is "pc_identity.json" or "host_activation_state.json" or "shared_pair_info.json"
                 or "sunshine_state.json" or "host_provisioning_secret.xml" or "public_url.txt"
+                or "host_capability_profile.json" or "selected_sunshine_runtime.txt" or "stream_display_preferences.json"
             || name.StartsWith(".env") || name.EndsWith(".env"))
             throw new InvalidDataException("MACHINE_STATE_IN_PAYLOAD: " + relative);
     }
@@ -167,7 +170,7 @@ internal static class UniversalBundleContract
                 throw new InvalidDataException("REPARSE_PAYLOAD_PATH");
     }
 
-    private static JsonObject ParseObject(string path)
+    internal static JsonObject ParseObject(string path)
     {
         RejectReparse(path);
         if (new FileInfo(path).Length > 16 * 1024 * 1024) throw new InvalidDataException("MANIFEST_TOO_LARGE");
