@@ -2,6 +2,8 @@ name: universal-node-contract
 on:
   pull_request:
     paths:
+      - 'patches/sunshine/**'
+      - 'tools/build-sunshine-capture.ps1'
       - 'src/**'
       - 'common/**'
       - 'tools/portable/**'
@@ -35,6 +37,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'ARTIFACT_TESTS_FAILED' }
           dotnet run --project tools/portable/NvencRuntimeHealth.Tests -c Release
           if ($LASTEXITCODE -ne 0) { throw 'NVENC_MARKER_REGRESSION' }
+      - name: Capture candidate remains gated until complete acceptance
+        shell: powershell
+        run: |
+          node --test patches/sunshine/tests/runtime-manifest.test.mjs patches/sunshine/tests/packaging-gates.test.mjs tools/portable/verify-capture-candidate.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'CAPTURE_ACCEPTANCE_GATE_REGRESSION' }
       - name: Build Bootstrap
         shell: powershell
         run: |

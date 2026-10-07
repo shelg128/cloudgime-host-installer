@@ -39,6 +39,10 @@ A profile-only invocation of the **installed** helper ran actual probes: selecte
 
 Do not force NVENC on Intel/AMD-only machines, software on a healthy hardware encoder, 720×1570 on every display, or H.264 Baseline on every device. Existing actual-probe selection is preserved. The RMX5367 Baseline/720×1570/30/5000 profile remains an experimental acceptance reference, not a global policy. Error-free internet or freeze<1% for every device is not claimed.
 
+## Capture dependency follow-up — 7 October 2026
+
+See `CAPTURE-RECOVERY-REQUALIFICATION.md`: the existing September29 capture-only patch is now preserved under `patches/sunshine` in this release worktree. A fresh targeted physical test eliminated periodic full encoder teardown with3–12ms capture-object recovery, but residual freeze remains and production acceptance is still blocked. The archived runtime was tested temporarily and restored; the PC-02 installed baseline above is unchanged. This work is based on the permanent stability commit and does not silently merge the separate startup-impact candidate.
+
 ## Not promoted / still open
 
 - Deadline recovery, copy budgets, sync isolation, recorder and quarantined capture orchestration remain QA experiments.

@@ -340,6 +340,12 @@ Write-Host "[BUILD] Menyiapkan payload NSIS host..." -ForegroundColor Cyan
 if ($LASTEXITCODE -ne 0) { throw 'Recovery runtime identity gate failed; rebuild both Host and streamer.' }
 & node (Join-Path $portableRoot 'verify-display-runtime.mjs') verify (Join-Path $BundleRoot 'moonlight\server\display-prepare-helper.exe') (Join-Path $portableRoot 'DisplayPrepareHelper')
 if ($LASTEXITCODE -ne 0) { throw 'Display runtime identity gate failed; rebuild the bundle.' }
+foreach($runtime in @('sunshine','sunshine-legacy')) {
+    $candidateRuntime = Join-Path $BundleRoot $runtime
+    if(Test-Path $candidateRuntime) {
+        Invoke-Checked "node" @((Join-Path $portableRoot 'verify-capture-candidate.mjs'), $candidateRuntime)
+    }
+}
 Invoke-Checked $preparePayloadCmd $prepareArgs
 
 Write-Host "[BUILD] Membuat installer offline host..." -ForegroundColor Cyan

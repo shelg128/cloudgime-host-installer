@@ -17,6 +17,7 @@ foreach($p in @($RawBundleRoot,$AppRoot)){if(-not(Test-Path $p -PathType Contain
 if((Get-FileHash $SentinelInstallerPath -Algorithm SHA256).Hash-ne$SentinelInstallerSha256){throw 'SENTINEL_HASH_MISMATCH'}
 if(-not$InternalUnsignedCandidate-and(Get-AuthenticodeSignature $SentinelInstallerPath).Status-ne'Valid'){throw 'SIGNED_SENTINEL_REQUIRED'}
 if(-not$FixtureOnly){
+ foreach($runtime in @('sunshine','sunshine-legacy')){ $p=Join-Path $RawBundleRoot $runtime;if(Test-Path $p){& node (Join-Path $PSScriptRoot 'verify-capture-candidate.mjs') $p;if($LASTEXITCODE-ne0){throw 'UNACCEPTED_CAPTURE_RUNTIME'}} }
  $helper=Join-Path $RawBundleRoot 'moonlight\server\display-prepare-helper.exe'
  & node (Join-Path $PSScriptRoot 'verify-encoder-runtime.mjs') verify $helper (Join-Path $PSScriptRoot 'DisplayPrepareHelper')
  if($LASTEXITCODE-ne0){throw 'RELEASE_ENCODER_SOURCE_OR_BINARY_MISMATCH'}

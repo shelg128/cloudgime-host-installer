@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/LizardByte/Sunshine.git",
+  "revision": "86188d47a7463b0f73b35de18a628353adeaa20e",
+  "files": {
+    "display.h": "7ba5f3289c8880887fd2c5ad5d354579bc5ef5842b1640a79982fc1b322c1234",
+    "display_base.cpp": "92565dfb5c72d4b31489d537d6add37f4777a2cec1e98394c2d60a37e0c412b0",
+    "display_ram.cpp": "29bc1335d368988bbc450d51331436db0c2d97c4a3c5daae6455d5da1eb2b7d1",
+    "display_vram.cpp": "2c11e58046190b8e5bf457e29d5f4c7c6188c1e4a8ba58e33918cca34b96fdd9"
+  }
+}

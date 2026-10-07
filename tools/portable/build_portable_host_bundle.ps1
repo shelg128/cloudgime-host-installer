@@ -393,6 +393,9 @@ function Copy-SunshineRuntime {
         [Parameter(Mandatory = $false)][string]$ManagedSunshineSharedSource = ""
     )
 
+    $captureCandidateVerifier=Join-Path $PSScriptRoot 'verify-capture-candidate.mjs'
+    & node $captureCandidateVerifier $SourceRoot
+    if($LASTEXITCODE-ne0){throw 'UNACCEPTED_CAPTURE_SOURCE'}
     [System.IO.Directory]::CreateDirectory($DestinationRoot) | Out-Null
     foreach ($directoryName in @("assets", "scripts", "tools")) {
         $sourceDir = Join-Path $SourceRoot $directoryName
@@ -408,6 +411,8 @@ function Copy-SunshineRuntime {
         Copy-Item $file.FullName (Join-Path $DestinationRoot $file.Name) -Force
     }
 
+    & node $captureCandidateVerifier $DestinationRoot
+    if($LASTEXITCODE-ne0){throw 'UNACCEPTED_COPIED_CAPTURE'}
     [System.IO.Directory]::CreateDirectory((Join-Path $DestinationRoot "config")) | Out-Null
     [System.IO.Directory]::CreateDirectory((Join-Path $DestinationRoot "config\credentials")) | Out-Null
     $bundleRoot = Split-Path -Parent $DestinationRoot
