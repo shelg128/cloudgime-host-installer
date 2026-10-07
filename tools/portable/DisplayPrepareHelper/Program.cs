@@ -297,6 +297,9 @@ internal sealed class HostCapabilityProfile
     [JsonPropertyName("selected_runtime_fingerprint")]
     public string? SelectedRuntimeFingerprint { get; set; }
 
+    [JsonPropertyName("nvenc_log_policy_version")]
+    public int NvencLogPolicyVersion { get; set; }
+
     [JsonPropertyName("selected_encoder")]
     public string SelectedEncoder { get; set; } = "auto";
 
@@ -1324,34 +1327,8 @@ internal static partial class Program
         return null;
     }
 
-    private static bool TryParseSunshineLogTimestamp(string line, out DateTimeOffset loggedAt)
-    {
-        loggedAt = default;
-        if (string.IsNullOrWhiteSpace(line) || line[0] != '[')
-        {
-            return false;
-        }
-
-        var endIndex = line.IndexOf(']');
-        if (endIndex <= 1)
-        {
-            return false;
-        }
-
-        var timestampText = line[1..endIndex];
-        if (!DateTime.TryParseExact(
-                timestampText,
-                "yyyy:MM:dd:HH:mm:ss",
-                CultureInfo.InvariantCulture,
-                DateTimeStyles.AssumeLocal,
-                out var parsed))
-        {
-            return false;
-        }
-
-        loggedAt = new DateTimeOffset(parsed);
-        return true;
-    }
+    private static bool TryParseSunshineLogTimestamp(string line, out DateTimeOffset loggedAt) =>
+        NvencLogEvidence.TryTimestamp(line, out loggedAt);
 
     private static string? ClassifyRuntimeOperationalFailure(
         string line,
@@ -1515,6 +1492,7 @@ internal static partial class Program
             SelectedRuntimeVersion = selectedRuntimeVersion,
             SelectedRuntimeFingerprint = selectedRuntimeFingerprint,
             SelectedEncoder = selectedEncoder,
+            NvencLogPolicyVersion = NvencLogEvidence.PolicyVersion,
             SelectedCapture = selectedCapture,
             SelectedCaptureReason = selectedCaptureReason,
             SelectedAudioSinkName = selectedAudioSinkName,
@@ -1654,6 +1632,11 @@ internal static partial class Program
         IReadOnlyCollection<HostAudioEndpointInfo> audioEndpoints,
         bool forceNvenc)
     {
+        if (cachedProfile.NvencLogPolicyVersion != NvencLogEvidence.PolicyVersion)
+        {
+            return false;
+        }
+
         if (string.IsNullOrWhiteSpace(cachedProfile.SelectedRuntimeDirectory) ||
             string.IsNullOrWhiteSpace(cachedProfile.ConfigPath) ||
             string.IsNullOrWhiteSpace(cachedProfile.SelectedEncoder) ||
@@ -1665,6 +1648,27 @@ internal static partial class Program
         var selectedRuntime = runtimes.FirstOrDefault(runtime =>
             runtime.RelativeDirectory.Equals(cachedProfile.SelectedRuntimeDirectory, StringComparison.OrdinalIgnoreCase));
         if (selectedRuntime is null || !File.Exists(selectedRuntime.ConfigPath))
+        {
+            return false;
+        }
+
+        // A cache hit must not mask a later unrecovered NVENC failure.
+        // Force a real re-probe, never label the encoder healthy here.
+        if (cachedProfile.SelectedEncoder.Equals("nvenc", StringComparison.OrdinalIgnoreCase) &&
+            TryDetectRecentSunshineNvencFailure(selectedRuntime.ConfigPath, out _))
+        {
+            return false;
+        }
+
+        // Only re-probe a software cache when its recorded NVENC rejection came
+        // from this log policy and that evidence no longer blocks. Do not retry
+        // unsupported hardware, driver/API failures, or unrelated probe errors.
+        if (cachedProfile.SelectedEncoder.Equals("software", StringComparison.OrdinalIgnoreCase) &&
+            cachedProfile.EncoderProbes.Any(probe =>
+                probe.RuntimeKey.Equals(selectedRuntime.Key, StringComparison.OrdinalIgnoreCase) &&
+                probe.EncoderKey.Equals("nvenc", StringComparison.OrdinalIgnoreCase) && !probe.Ok &&
+                probe.Detail.StartsWith("sunshine_runtime_nvenc_recent_failure ", StringComparison.Ordinal)) &&
+            !TryDetectRecentSunshineNvencFailure(selectedRuntime.ConfigPath, out _))
         {
             return false;
         }
@@ -2807,33 +2811,19 @@ internal static partial class Program
                 return false;
             }
 
-            var text = ReadTextFileShared(logPath);
+            var text = NvencLogEvidence.ReadTail(logPath);
             if (string.IsNullOrWhiteSpace(text))
             {
                 return false;
             }
 
-            var tail = text.Length > 160_000 ? text[^160_000..] : text;
-            if (!tail.Contains("nvenc", StringComparison.OrdinalIgnoreCase) &&
-                !tail.Contains("NvEnc", StringComparison.OrdinalIgnoreCase))
+            var failure = NvencLogEvidence.LatestUnrecoveredFailure(text);
+            if (string.IsNullOrWhiteSpace(failure))
             {
                 return false;
             }
 
-            var failures = ExtractMatchingLines(
-                tail,
-                "encode wait timeout",
-                "NVENC returned empty packet",
-                "Could not encode video packet",
-                "Failed to create encoder D3D11 device",
-                "Could not open codec [h264_nvenc]",
-                "Failed to create encoder [h264_nvenc]");
-            if (string.IsNullOrWhiteSpace(failures))
-            {
-                return false;
-            }
-
-            detail = $"sunshine_runtime_nvenc_recent_failure {CompactProcessOutput(failures)}";
+            detail = $"sunshine_runtime_nvenc_recent_failure {CompactProcessOutput(failure)}";
             return true;
         }
         catch (Exception ex)
