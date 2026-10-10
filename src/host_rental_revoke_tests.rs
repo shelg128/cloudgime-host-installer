@@ -1,4 +1,6 @@
 use super::*;
+#[path = "host_abort_sibling_tests.rs"]
+mod abort_sibling;
 use crate::app::{
     AndroidNativeHostBindingRecord, AndroidNativeRentalBindingRecord,
     AndroidNativeTrustBootstrapRecord,

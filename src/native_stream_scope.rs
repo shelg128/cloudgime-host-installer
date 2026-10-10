@@ -103,6 +103,27 @@ impl NativeStreamRegistry {
         entry.revoked = true;
         Ok(0)
     }
+    pub(crate) async fn revoke_verified_root(&self, session_id: &str) -> Result<usize, String> {
+        if session_id.is_empty() || session_id.len() > 256 {
+            return Err("native_scope_binding_invalid".into());
+        }
+        {
+            let mut sessions = self.sessions.lock().await;
+            if !sessions.contains_key(session_id) && sessions.len() >= CAPACITY {
+                return Err("native_scope_capacity_reached".into());
+            }
+            let entry = sessions.entry(session_id.into()).or_default();
+            // Mark denial under the same lock as begin(). No late connection
+            // can register between the empty check and tombstone publication.
+            entry.revoked = true;
+            if !entry.registered {
+                if !entry.connections.is_empty() { return Err("native_scope_inconsistent".into()); }
+                return Ok(0);
+            }
+        }
+        self.stop(session_id).await
+    }
+
     pub(crate) async fn stop(&self, session_id: &str) -> Result<usize, String> {
         if session_id.is_empty() || session_id.len() > 256 {
             return Err("native_scope_binding_invalid".into());

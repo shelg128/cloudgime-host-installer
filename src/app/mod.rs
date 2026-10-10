@@ -298,6 +298,10 @@ pub struct AndroidNativeSessionLifecycleStateRecord {
     pub session_id: String,
     pub user_id: UserId,
     pub rental_binding: Option<AndroidNativeRentalBindingRecord>,
+    // Every handoff was issued for this same canonical root/claim by the
+    // authenticated tunnel API. Retain these identities after token expiry so
+    // an aborted prepare can revoke its root using the consumed sibling ID.
+    pub(crate) issued_rental_handoffs: std::collections::HashSet<String>,
     pub trust_bootstrap_status: String,
     pub session_status: String,
     pub hidden_state_status: String,
@@ -634,7 +638,8 @@ impl App {
             // optional IDs may initially be absent. Handoff + claim + native ID
             // must always match; populated IDs are never overwritten.
             if state.session_id != command.native_session_id
-                || binding.handoff_binding_id != command.handoff_binding_id
+                || (binding.handoff_binding_id != command.handoff_binding_id
+                    && !state.issued_rental_handoffs.contains(&command.handoff_binding_id))
                 || binding.claim_id != command.claim_id
                 || binding.prepare_operation_id.is_some() != binding.rental_session_id.is_some()
                 || binding
@@ -664,8 +669,11 @@ impl App {
         // unknown session is treated as stopped, and no cleanup receipt is made.
         self.invalidate_android_native_session_artifacts(&command.native_session_id)
             .await;
+        // The authority above also covers a prelogin root whose ticket was
+        // issued but never opened. Deny it atomically and verify no live scopes;
+        // do not treat an unknown active scope as stopped.
         crate::native_stream_scope::NATIVE_STREAM_SCOPES
-            .stop(&command.native_session_id)
+            .revoke_verified_root(&command.native_session_id)
             .await
             .map_err(|_| "HOST_REVOKE_STREAM_TERMINATION_UNVERIFIED")
     }
@@ -732,6 +740,7 @@ impl App {
                 token_id: record.token_id.clone(),
                 session_id: record.session_id.clone(),
                 user_id,
+                issued_rental_handoffs: rental_binding.as_ref().map(|b| b.handoff_binding_id.clone()).into_iter().collect(),
                 rental_binding,
                 trust_bootstrap_status: if record.trust_bootstrap.paired {
                     "paired_material_reused".to_string()
@@ -768,9 +777,9 @@ impl App {
         {
             return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
         }
-        let lifecycle = self.inner.android_native_session_lifecycle.read().await;
+        let mut lifecycle = self.inner.android_native_session_lifecycle.write().await;
         let root = lifecycle
-            .get(root_session_id)
+            .get_mut(root_session_id)
             .ok_or(AppError::AndroidNativeSessionInactive)?;
         let canonical = root
             .rental_binding
@@ -846,6 +855,10 @@ impl App {
             return Err(AppError::AndroidNativeStreamTicketExpired);
         }
         drop(tickets);
+        if !root.issued_rental_handoffs.contains(&rental_binding.handoff_binding_id)
+            && root.issued_rental_handoffs.len() >= 64
+        { return Err(AppError::AndroidNativeTicketCapacity); }
+        let issued_handoff = rental_binding.handoff_binding_id.clone();
         let record = AndroidNativeLaunchTokenRecord {
             token_id: root.token_id.clone(),
             launch_token: format!("mlnatlaunch_{}", Uuid::new_v4().to_simple()),
@@ -880,6 +893,7 @@ impl App {
         {
             return Err(AppError::AndroidNativeDeviceLimit);
         }
+        root.issued_rental_handoffs.insert(issued_handoff);
         tokens.insert(record.launch_token.clone(), record.clone());
         Ok(record)
     }
