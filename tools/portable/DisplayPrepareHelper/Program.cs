@@ -652,7 +652,7 @@ internal sealed record DisplaySnapshot(
     };
 }
 
-internal static class Program
+internal static partial class Program
 {
     private enum HostIdleNormalizeStatus
     {
@@ -796,9 +796,25 @@ internal static class Program
 
     private static int Main(string[] args)
     {
+        if (args.Length == 1 && args[0] == "--display-runtime-contract") {
+            Console.WriteLine("{\"schema\":1,\"contract\":\"cloudgime-managed-display-ccd-v1\",\"persistentModeCatalog\":true,\"exactCcdMode\":true,\"boundedStabilityCheck\":true,\"authenticatedStateBroker\":true}");
+            return 0;
+        }
         EnableProcessDpiAwareness();
+        if (args.Length > 0 && args[0] == "--broker-worker") return RunBrokerTaskWorker(args);
+        if (args.Length > 0 && args[0] == "--state-broker") return RunBrokerChild(args);
         Console.OutputEncoding = System.Text.Encoding.UTF8;
-        var result = Run(args);
+        HelperResult result;
+        if (args.Length > 0 && args[0] == "--broker") {
+            try { result = RunScheduledBroker(args); } catch (Exception error) {
+                Console.Error.WriteLine("Display broker failure: " + error.GetType().Name +
+                    (error is System.ComponentModel.Win32Exception nativeError ? " win32=" + nativeError.NativeErrorCode : "") +
+                    " stage=" + error.Message);
+                result = Failure(error is System.ComponentModel.Win32Exception win32
+                    ? "display_broker_failed_win32_" + win32.NativeErrorCode + "_" + (error.Data["stage"] as string ?? "unknown")
+                    : "display_broker_failed_" + error.GetType().Name.ToLowerInvariant());
+            }
+        } else result = Run(args);
         Console.WriteLine(JsonSerializer.Serialize(result, JsonOptions));
         return result.Ok ? 0 : 1;
     }
@@ -3358,6 +3374,8 @@ internal static class Program
 
     private static SunshineCaptureConfigApplyResult TryApplySunshineStreamCaptureConfigForBundle(string bundleRoot, DisplaySnapshot streamDisplay)
     {
+        if (_stateBroker != null) return BrokerRequest<SunshineCaptureConfigApplyResult>("capture", streamDisplay)
+            ?? throw new InvalidOperationException("Capture config response missing.");
         try
         {
             var captureDisplay = DisplayLooksLikeMttVdd(streamDisplay) || IsParsecDisplay(streamDisplay)
@@ -5126,6 +5144,18 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
     private static bool ShouldAllowRequestedStreamFallback(StreamDisplayPreference displayPreference) =>
         NormalizeStreamDisplayMode(displayPreference.Mode) is "auto";
 
+    private static HelperResult? VerifyAppliedDisplayStability(DisplaySnapshot display)
+    {
+        var clock = Stopwatch.StartNew();
+        var stable = DisplayModeStability.Verify(display.Width, display.Height, () => {
+            try {
+                var mode = GetCurrentMode(display.DeviceName, allowRegistryFallback: false);
+                return ((int)mode.dmPelsWidth, (int)mode.dmPelsHeight);
+            } catch { return null; }
+        }, Thread.Sleep, () => clock.ElapsedMilliseconds);
+        return stable ? null : Failure("display_mode_changed_after_apply");
+    }
+
     private static HelperResult PrepareDisplay(Options options)
     {
         var displayPreference = ReadStreamDisplayPreference(options.BundleRoot);
@@ -5338,6 +5368,9 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
                 TemperedRemoteProcesses = temperedRemoteProcesses,
                 DisabledDisplayClassDevices = disabledDisplayClassDevices,
             });
+
+            if (requestedMode != null && displayOrCaptureChanged &&
+                VerifyAppliedDisplayStability(streamDisplay) is { } unstable) return unstable;
 
             if (!displayOrCaptureChanged)
             {
@@ -5613,6 +5646,7 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
             state.AppliedVdd = streamDisplay.ToSavedState();
         }
         WriteState(state);
+        if (changed && VerifyAppliedDisplayStability(streamDisplay) is { } unstable) return unstable;
         var reportedAppliedMode = BuildReportedAppliedMode(streamDisplay, requested, exactModeFallback);
 
         return new HelperResult
@@ -5814,7 +5848,7 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
                 ShowSystemCursor();
             }
 
-            File.Delete(StatePath);
+            DeleteState();
 
             return new HelperResult
             {
@@ -6678,11 +6712,40 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
         {
             if (string.Equals(screen.DeviceName, display.DeviceName, StringComparison.OrdinalIgnoreCase))
             {
-                return screen.WorkingArea;
+                if (ScreenBoundsMatchDisplaySnapshot(screen.Bounds, display))
+                {
+                    return screen.WorkingArea;
+                }
+
+                return null;
             }
         }
 
         return null;
+    }
+
+    private static bool ScreenBoundsMatchDisplaySnapshot(Rectangle bounds, DisplaySnapshot display)
+    {
+        if (display.Width <= 0 || display.Height <= 0 || bounds.Width <= 0 || bounds.Height <= 0)
+        {
+            return false;
+        }
+
+        const int tolerancePx = 48;
+        var directSizeMatch =
+            Math.Abs(bounds.Width - display.Width) <= tolerancePx &&
+            Math.Abs(bounds.Height - display.Height) <= tolerancePx;
+        var rotatedSizeMatch =
+            Math.Abs(bounds.Width - display.Height) <= tolerancePx &&
+            Math.Abs(bounds.Height - display.Width) <= tolerancePx;
+
+        if (!directSizeMatch && !rotatedSizeMatch)
+        {
+            return false;
+        }
+
+        return Math.Abs(bounds.Left - display.PositionX) <= tolerancePx &&
+               Math.Abs(bounds.Top - display.PositionY) <= tolerancePx;
     }
 
     private static (nint Handle, Rectangle Rect)? TryGetWindowMoveCandidate(
@@ -6840,15 +6903,27 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
 
     private static void WriteState(PrepareStateFile state)
     {
+        if (_stateBroker != null) { BrokerRequest<JsonElement>("write", state); return; }
         Directory.CreateDirectory(Path.GetDirectoryName(StatePath)!);
         state.Helper["updated_at"] = DateTimeOffset.UtcNow.ToString("O");
-        File.WriteAllText(StatePath, JsonSerializer.Serialize(state, JsonOptions));
+        var temp = StatePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try {
+            File.WriteAllText(temp, JsonSerializer.Serialize(state, JsonOptions));
+            if (File.Exists(StatePath)) File.Replace(temp, StatePath, null);
+            else File.Move(temp, StatePath);
+        } finally { if (File.Exists(temp)) File.Delete(temp); }
     }
 
-    private static PrepareStateFile? ReadState() =>
-        File.Exists(StatePath)
+    private static PrepareStateFile? ReadState() => _stateBroker != null
+        ? BrokerRequest<PrepareStateFile>("read")
+        : File.Exists(StatePath)
             ? JsonSerializer.Deserialize<PrepareStateFile>(File.ReadAllText(StatePath), JsonOptions)
             : null;
+
+    private static void DeleteState() {
+        if (_stateBroker != null) { BrokerRequest<JsonElement>("delete"); return; }
+        File.Delete(StatePath);
+    }
 
     private static PrepareStateFile CreateInitialState(List<DisplaySnapshot> displays, string sessionToken)
     {
@@ -7239,7 +7314,7 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
         }
 
         var normalizedFps = fps >= 30 ? Math.Min(120, fps) : 60;
-        if (!configureMttVdd)
+        if (_stateBroker != null || !configureMttVdd)
         {
             return new SavedDisplayState
             {
@@ -7410,21 +7485,12 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
 
         var resolutions = EnsureChild(root, "resolutions", ref changed);
         var desiredModes = BuildCloudgimeVddModes(requestedWidth, requestedHeight, requestedFps);
-        var currentModeKeys = resolutions.Elements("resolution")
-            .Select(node => $"{ParseIntElement(node, "width")}x{ParseIntElement(node, "height")}@{ParseIntElement(node, "refresh_rate")}")
-            .ToList();
-        var desiredModeKeys = desiredModes
-            .Select(mode => $"{mode.Width}x{mode.Height}@{mode.Fps}")
-            .ToList();
-        if (!currentModeKeys.SequenceEqual(desiredModeKeys))
-        {
-            resolutions.ReplaceNodes(desiredModes.Select(mode =>
-                new XElement("resolution",
-                    new XElement("width", mode.Width),
-                    new XElement("height", mode.Height),
-                    new XElement("refresh_rate", mode.Fps))));
-            changed = true;
-        }
+        // Retain all previously registered devices and both orientations. Returning
+        // to a saved profile must not rewrite EDID or reload the VDD driver.
+        changed |= DisplayModeCatalog.Merge(resolutions, desiredModes);
+        if (requestedWidth >= 320 && requestedHeight >= 180 && requestedFps >= 30)
+            changed |= DisplayModeCatalog.AddDeviceOrientations(resolutions,
+                requestedWidth & ~1, requestedHeight & ~1, Math.Min(120, requestedFps));
 
         var options = EnsureChild(root, "options", ref changed);
         changed |= SetElementValue(options, "CustomEdid", "false");
@@ -8665,6 +8731,13 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
 
     private static DisplayModeApplyResult SetExactDisplayMode(DisplaySnapshot display, SavedDisplayState requestedMode)
     {
+        if (DisplayLooksLikeMttVdd(display)) {
+            int refresh = requestedMode.Frequency >= 30 ? (int)Math.Round(requestedMode.Frequency)
+                : display.Frequency >= 30 ? display.Frequency : 60;
+            if (!DisplayConfigModeSetter.ApplyExact(display.DeviceName, requestedMode.Width, requestedMode.Height, refresh))
+                throw new InvalidOperationException("managed_display_exact_mode_rejected");
+            return new DisplayModeApplyResult(true, false, false);
+        }
         var mode = GetCurrentMode(display.DeviceName, allowRegistryFallback: true);
         var preferNativeSurfaceFallback = ShouldPreferNativeSurfaceFallback(display, requestedMode);
 
@@ -8693,7 +8766,9 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
             return null;
         }
 
-        if (!preferNativeSurfaceFallback && tryRequestedModes() is { } exactResult)
+        // First try the registered native dimensions, including portrait. DDX
+        // needs the portrait surface itself, not a landscape fallback/rotation.
+        if (tryRequestedModes() is { } exactResult)
         {
             return exactResult;
         }

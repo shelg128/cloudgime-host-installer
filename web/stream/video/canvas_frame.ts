@@ -142,7 +142,7 @@ export class CanvasRgbaFrameDrawPipe extends BaseCanvasFrameDrawPipe implements 
     }
 
     submitRawFrame(frame: RgbaVideoFrame): void {
-        this.currentFrame = new ImageData(frame.buffer, frame.width, frame.height)
+        this.currentFrame = new ImageData(new Uint8ClampedArray(frame.buffer), frame.width, frame.height)
 
         this.onFrameSubmitted()
     }

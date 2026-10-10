@@ -475,6 +475,7 @@ const STREAM_AUTO_RECONNECT_MAX_ATTEMPTS = 3
 const STREAM_AUTO_RECONNECT_DELAY_MS = 1_000
 const STARTUP_RECOVERY_MAX_ATTEMPTS = 3
 const STREAM_AUTO_RECONNECT_FLAG_KEY = "ML_STREAM_AUTO_RECONNECT"
+const MOBILE_AUTO_RECONNECT_OPT_IN_KEY = "ML_MOBILE_AUTO_RECONNECT"
 const ANDROID_BRIDGE_IDLE_TIMEOUT_MS = 2600
 const ANDROID_BRIDGE_HIDE_TIMEOUT_MS = 4800
 const TOUCH_DEBUG_HISTORY_LIMIT = 8
@@ -489,6 +490,11 @@ function isStreamAutoReconnectEnabled() {
     } catch {
         return true
     }
+}
+
+function isMobileAutoReconnectOptedIn(): boolean {
+    // Mobile sessions keep the current peer connection. Reconnect is manual.
+    return false
 }
 
 function normalizeQuickPadAutoApplyMode(raw: unknown): QuickPadAutoApplyMode {
@@ -1921,6 +1927,7 @@ const STREAM_CHROME_ICON_IDS = new Set<StreamChromeIconId>([
 ])
 
 const STREAM_DESKTOP_RELATIVE_MOUSE_OPT_IN_STORAGE_KEY = "ML_DESKTOP_RELATIVE_MOUSE_OPT_IN"
+const STREAM_MOBILE_INPUT_BEHAVIOR_VERSION_KEY = "mlStreamMobileInputBehaviorV2"
 
 function normalizeStoredStreamInputConfig(raw?: Partial<StreamInputConfig> | null): StreamInputConfig {
     const defaults = defaultStreamInputConfig()
@@ -1985,16 +1992,34 @@ function persistDesktopRelativeMouseOptIn(enabled: boolean) {
 }
 
 function shouldMigrateLegacyMobileTouchMode(config: StreamInputConfig): boolean {
+    try {
+        if (window.localStorage.getItem(STREAM_MOBILE_INPUT_BEHAVIOR_VERSION_KEY) == "1") {
+            return false
+        }
+    } catch {
+        // Continue with the safe legacy-profile check when storage is unavailable.
+    }
+
     return (
         config.touchMode === "pointAndDrag"
         || config.mouseMode === "pointAndDrag"
-        || (config.touchMode === "mouseRelative" && config.mouseMode !== "relative")
+        || (config.mouseMode === "relative" && config.touchMode === "mouseRelative")
     )
         && config.mouseScrollMode === "highres"
+        && Math.abs(config.touchSensitivity - STREAM_TOUCH_SENSITIVITY_DEFAULT) < 0.0001
+        && config.touchLongPressMs === STREAM_TOUCH_LONG_PRESS_DEFAULT_MS
         && config.twoFingerRightClick === true
         && config.controllerConfig.invertAB === false
         && config.controllerConfig.invertXY === false
         && config.controllerConfig.sendIntervalOverride == null
+}
+
+function markMobileInputBehaviorVersion() {
+    try {
+        window.localStorage.setItem(STREAM_MOBILE_INPUT_BEHAVIOR_VERSION_KEY, "1")
+    } catch {
+        // Ignore storage failures; the next load will retry the migration check.
+    }
 }
 
 function loadStoredStreamInputConfig(): StreamInputConfig {
@@ -2173,16 +2198,10 @@ function getConnectionRouteUpdate(line: string): ConnectionRouteUpdate | null {
     if (line.startsWith("Trying WebRTC transport") || line.startsWith("Using transport: webrtc")) {
         return {
             state: "negotiating",
-            detail: "Trying to establish a direct WebRTC path."
+            detail: "Connecting the WebRTC route selected in the lobby."
         }
     }
     if (line.startsWith("Trying direct WebRTC path") || line.startsWith("Retrying direct WebRTC path")) {
-        return {
-            state: "negotiating",
-            detail: line
-        }
-    }
-    if (line.startsWith("Retrying WebRTC with TURN relay fallback")) {
         return {
             state: "negotiating",
             detail: line
@@ -2873,12 +2892,15 @@ class ViewerApp implements Component {
             && window.matchMedia("(pointer: fine)").matches
         if (!hasStoredInputConfig) {
             if (isMobileUi) {
+                // Mobile browsers use laptop-like trackpad semantics by default.
+                // A tap keeps the current remote cursor position; movement sends deltas.
                 this.inputConfig.mouseMode = "relative"
                 this.inputConfig.touchMode = "mouseRelative"
             } else if (hasFinePointer) {
                 this.inputConfig.mouseMode = "follow"
             }
         } else if (isMobileUi && shouldMigrateLegacyMobileTouchMode(this.inputConfig)) {
+            // Keep older mobile profiles in trackpad mode.
             this.inputConfig.mouseMode = "relative"
             this.inputConfig.touchMode = "mouseRelative"
             persistStoredStreamInputConfig(this.inputConfig)
@@ -2895,6 +2917,9 @@ class ViewerApp implements Component {
             this.inputConfig.mouseMode = "relative"
             this.inputConfig.touchMode = "mouseRelative"
             persistStoredStreamInputConfig(this.inputConfig)
+        }
+        if (isMobileUi) {
+            markMobileInputBehaviorVersion()
         }
         this.applyDeviceUiProfileClasses()
         this.div.classList.add("stream-viewer-root")
@@ -3054,6 +3079,8 @@ class ViewerApp implements Component {
         this.touchDebugOverlay.classList.add("touch-debug-overlay")
         this.mobileNativeCursor.hidden = true
         this.mobileNativeCursor.classList.add("stream-native-cursor")
+        this.mobileNativeCursor.dataset.visible = "false"
+        this.mobileNativeCursor.dataset.pressed = "false"
         this.mobileNativeCursor.setAttribute("aria-hidden", "true")
         this.touchDebugHeader.classList.add("touch-debug-header")
         this.touchDebugTitle.classList.add("touch-debug-title")
@@ -3121,7 +3148,10 @@ class ViewerApp implements Component {
         stopPropagationOn(this.touchDebugOverlay)
         this.div.appendChild(this.routeBadge)
         this.div.appendChild(this.mobileOrientationPrompt)
-        this.div.appendChild(this.mobileNativeCursor)
+        // Keep the fixed overlay in the viewport coordinate space used by
+        // AbsoluteFollow. Mounting inside a transformed stream container can
+        // offset the local pointer from the coordinates sent to Host.
+        document.body.appendChild(this.mobileNativeCursor)
         this.div.appendChild(this.streamRecoveryFreezeFrame)
         this.div.appendChild(this.streamRecoveryOverlay)
         this.div.appendChild(this.routeInspectorRoot)
@@ -3157,7 +3187,6 @@ class ViewerApp implements Component {
 
         // Configure input
         this.addListeners(document)
-        this.addTouchListeners(this.div)
         this.addListeners(document.getElementById("input") as HTMLDivElement)
 
         document.addEventListener("visibilitychange", this.onVisibilityChangeBound)
@@ -3265,7 +3294,7 @@ class ViewerApp implements Component {
             edge: "right",
         })
 
-        this.setConnectionRoute("negotiating", "Trying to establish a direct WebRTC path.")
+        this.setConnectionRoute("negotiating", "Connecting the WebRTC route selected in the lobby.")
 
         const effectiveBrowserSize = this.getEffectiveDeviceMatchViewportSize(browserSize, settings)
         const effectiveSettings: Settings = {
@@ -3451,6 +3480,10 @@ class ViewerApp implements Component {
             this.dynamicDeviceMatchResizeCooldownUntil = Date.now() + 12000
             this.dynamicDeviceMatchPendingReason = null
         } else if (data.type == "startupTimeout") {
+            if (this.isMobileUiMode() && !isMobileAutoReconnectOptedIn()) {
+                this.stream?.logClientEvent("Suppressing automatic mobile reconnect after startup timeout")
+                return
+            }
             if (!this.stream || this.reconnecting || this.startupTimeoutRecoveryAttempts >= STARTUP_RECOVERY_MAX_ATTEMPTS) {
                 return
             }
@@ -3465,6 +3498,10 @@ class ViewerApp implements Component {
             )
             void this.reconnectStream("startup timeout recovery")
         } else if (data.type == "startupInterrupted") {
+            if (this.isMobileUiMode() && !isMobileAutoReconnectOptedIn()) {
+                this.stream?.logClientEvent("Suppressing automatic mobile reconnect after startup interruption")
+                return
+            }
             if (!this.stream || this.reconnecting || this.startupTimeoutRecoveryAttempts >= STARTUP_RECOVERY_MAX_ATTEMPTS) {
                 return
             }
@@ -3786,6 +3823,9 @@ class ViewerApp implements Component {
         targetOrientation: "portrait" | "landscape",
         targetSize: [number, number]
     ): boolean {
+        if (this.isMobileUiMode() && Number(navigator.maxTouchPoints || 0) > 0) {
+            return false
+        }
         if (!this.isHardDisplayTransitionReady() || !this.stream) {
             return false
         }
@@ -3818,6 +3858,15 @@ class ViewerApp implements Component {
         targetOrientation: "portrait" | "landscape",
         targetSize: [number, number]
     ) {
+        // A mobile browser viewport/orientation change is presentation-only.
+        // Keep the existing WebRTC session alive and let CSS fit the video.
+        if (this.isMobileUiMode() && Number(navigator.maxTouchPoints || 0) > 0) {
+            this.applyDeviceUiProfileClasses()
+            this.syncStreamChromeBounds(true)
+            this.syncMobileNativeCursorViewport()
+            return
+        }
+
         if (!this.stream || this.reconnecting || !this.isHardDisplayTransitionReady()) {
             return
         }
@@ -3931,7 +3980,8 @@ class ViewerApp implements Component {
 
             if (stable || (attempts >= 24 && this.displayTransitionVerifyStableSamples >= 1 && (this.displayTransitionVerifyProgressSamples >= 1 || !!this.getActiveStreamMediaElement()))) {
                 if (this.currentRouteState == "negotiating") {
-                    this.setConnectionRoute(this.routeWasDirectOnce ? "direct" : "relay", this.translate(
+                    const explicitRoute = new URLSearchParams(window.location.search).get("autoRoute")
+                    this.setConnectionRoute(explicitRoute == "relay" ? "relay" : "direct", this.translate(
                         "Stream ready after the display change.",
                         "Stream siap setelah perubahan layar."
                     ))
@@ -4473,6 +4523,13 @@ class ViewerApp implements Component {
 
         const recoveryThresholdMs = inMotionGuardWindow ? 8000 : 12000
         if (stalledMs >= recoveryThresholdMs && Date.now() - this.videoStallLastRecoveryAt >= 15000) {
+            if (this.isMobileUiMode() && !isMobileAutoReconnectOptedIn()) {
+                this.videoStallLastProgressSample = progressSample
+                this.videoStallLastProgressAt = Date.now()
+                this.stream?.logClientEvent("Suppressing automatic mobile reconnect after video stall")
+                void this.refreshVideoStallInboundActivityBaseline(true)
+                return
+            }
             const hadInboundVideoActivity = await observedStream.hasInboundVideoActivitySince(this.videoStallLastInboundActivitySnapshot)
             if (!observationStillCurrent()) return
             if (inMotionGuardWindow && hadInboundVideoActivity && stalledMs < 12000) {
@@ -4600,6 +4657,11 @@ class ViewerApp implements Component {
             `adaptive ${kind} ${direction}:${reason}`
         )
         if (!restartedInPlace) {
+            if (this.isMobileUiMode() && !isMobileAutoReconnectOptedIn()) {
+                this.adaptiveBitrateLastDelivery = null
+                this.stream?.logClientEvent(`Suppressing automatic mobile reconnect after adaptive ${kind} ${direction}; keeping the current session alive`)
+                return
+            }
             this.adaptiveBitrateLastDelivery = "full_reconnect_fallback"
             this.stream?.logClientEvent(`Adaptive ${kind} ${direction} falling back to full reconnect`)
             await this.reconnectStream(`adaptive ${kind} ${direction}:${reason}`)
@@ -4896,6 +4958,9 @@ class ViewerApp implements Component {
     }
 
     private shouldSilentReconnectAfterDeviceMatchResize(trigger: "routeFailure" | "resizeTimeout"): boolean {
+        if (this.isMobileUiMode() && Number(navigator.maxTouchPoints || 0) > 0 && !isMobileAutoReconnectOptedIn()) {
+            return false
+        }
         if (!shouldUseDynamicDeviceMatch(this.getSettings()) || this.reconnecting || !this.stream) {
             return false
         }
@@ -4917,6 +4982,10 @@ class ViewerApp implements Component {
     }
 
     private scheduleSilentDeviceMatchReconnect(trigger: "routeFailure" | "resizeTimeout") {
+        if (this.isMobileUiMode()) {
+            this.stream?.logClientEvent(`Suppressing automatic mobile reconnect after device-match ${trigger}`)
+            return
+        }
         if (!this.shouldSilentReconnectAfterDeviceMatchResize(trigger)) {
             return
         }
@@ -5171,6 +5240,9 @@ class ViewerApp implements Component {
     }
 
     private scheduleFastFullscreenDeviceMatchSync(settings: Settings = this.getSettings()) {
+        if (this.isMobileUiMode() && Number(navigator.maxTouchPoints || 0) > 0) {
+            return
+        }
         this.clearDynamicDeviceMatchFullscreenTimer()
         if (!this.shouldAutoFollowDeviceMatch(settings) || !this.stream || this.reconnecting) {
             return
@@ -5340,6 +5412,9 @@ class ViewerApp implements Component {
         currentSize: [number, number],
         targetSize: [number, number]
     ): boolean {
+        if (this.isMobileUiMode() && Number(navigator.maxTouchPoints || 0) > 0) {
+            return false
+        }
         const currentOrientation = this.getViewportOrientationBucket(currentSize)
         const targetOrientation = this.getViewportOrientationBucket(targetSize)
         if (currentOrientation != targetOrientation) {
@@ -5357,6 +5432,11 @@ class ViewerApp implements Component {
     }
 
     private scheduleDynamicDeviceMatchReconnect(reason: "resize" | "fullscreen" | "connection" | "bootstrap") {
+        // Mobile viewport changes are presentation-only. Keep the active WebRTC
+        // session and let CSS fit the video instead of reconnecting it.
+        if (this.isMobileUiMode() && Number(navigator.maxTouchPoints || 0) > 0) {
+            return
+        }
         const settings = this.getSettings()
         if (!this.shouldAutoFollowDeviceMatch(settings) || !this.stream || this.reconnecting) {
             return
@@ -5798,9 +5878,11 @@ class ViewerApp implements Component {
         this.clearSilentDeviceMatchReconnectTimer()
         this.setStreamRecoveryOverlayVisible(false)
 
-        if (!isStreamAutoReconnectEnabled()) {
+        if (!isStreamAutoReconnectEnabled() || (this.isMobileUiMode() && !isMobileAutoReconnectOptedIn())) {
             this.lastRecoveryArmed = false
-            this.lastRecoveryEvent = "Auto reconnect disabled"
+            this.lastRecoveryEvent = this.isMobileUiMode() && !isMobileAutoReconnectOptedIn()
+                ? "Mobile auto reconnect disabled"
+                : "Auto reconnect disabled"
             this.syncDesktopUtilityDockState()
             return
         }
@@ -10114,7 +10196,38 @@ class ViewerApp implements Component {
         return { code: "generic", closeReason: "reconnect policy:generic", delayStart: false }
     }
 
+    private shouldSuppressAutomaticMobileReconnect(reason: string): boolean {
+        const touchPoints = Number(navigator.maxTouchPoints || 0)
+        const coarsePointer = typeof window.matchMedia == "function" && window.matchMedia("(pointer: coarse)").matches
+        const touchClient = this.isMobileUiMode() || touchPoints > 0 || coarsePointer
+        if (!touchClient || isMobileAutoReconnectOptedIn()) {
+            return false
+        }
+
+        const lower = String(reason ?? "").toLowerCase()
+        const explicitUserAction = lower == "unspecified"
+            || lower.startsWith("manual reconnect:")
+            || lower.startsWith("settings change requires reconnect")
+            || lower.startsWith("quick session quality preset")
+        if (explicitUserAction) {
+            return false
+        }
+
+        // Keep the established mobile session in place. Network recovery,
+        // startup watchdogs, resume handling, adaptive changes, and display
+        // matching must not tear down a working touch session automatically.
+        return true
+    }
+
     async reconnectStream(reason = "unspecified") {
+        if (this.shouldSuppressAutomaticMobileReconnect(reason)) {
+            this.lastRecoveryArmed = false
+            this.lastRecoveryEvent = "Mobile auto reconnect disabled"
+            this.stream?.logClientEvent(`Suppressed automatic mobile reconnect reason=${reason}`)
+            this.syncDesktopUtilityDockState()
+            return
+        }
+
         if (this.reconnecting) {
             return
         }
@@ -10208,8 +10321,11 @@ class ViewerApp implements Component {
     }
 
     private isMobileNativeCursorEnabled(): boolean {
-        return this.isAndroidTouchBridgeEnabled()
-            && this.inputConfig.touchMode != "touch"
+        // Keep a visible local pointer on every touch device, including the
+        // normal single-finger touch mode. Tap mode still sends mouse input;
+        // hiding the visual pointer there makes the remote desktop unusable.
+        const touchPoints = Number(navigator.maxTouchPoints || 0)
+        return this.isMobileUiMode() || touchPoints > 0
     }
 
     private isDesktopNativeCursorEnabled(): boolean {
@@ -10235,6 +10351,7 @@ class ViewerApp implements Component {
         this.mobileNativeCursorRenderY = startY
         this.mobileNativeCursorHasPosition = true
         this.updateMobileNativeCursorVisual(true)
+        this.setMobileNativeCursorVisible(true)
     }
 
     private clearMobileNativeCursorHideTimer() {
@@ -10255,6 +10372,15 @@ class ViewerApp implements Component {
     private setMobileNativeCursorVisible(visible: boolean) {
         this.mobileNativeCursorVisible = visible
         this.mobileNativeCursor.hidden = !visible
+        if (visible) {
+            this.mobileNativeCursor.removeAttribute("hidden")
+        } else {
+            this.mobileNativeCursor.setAttribute("hidden", "")
+        }
+        this.mobileNativeCursor.style.display = visible ? "block" : "none"
+        this.mobileNativeCursor.style.visibility = visible ? "visible" : "hidden"
+        this.mobileNativeCursor.style.opacity = visible ? "1" : "0"
+        this.mobileNativeCursor.style.pointerEvents = "none"
         this.mobileNativeCursor.dataset.visible = visible ? "true" : "false"
     }
 
@@ -10370,10 +10496,8 @@ class ViewerApp implements Component {
         this.mobileNativeCursorLastTouchSampleAt = 0
         this.clearMobileNativeCursorHideTimer()
         if (!force && this.mobileNativeCursorVisible) {
-            this.mobileNativeCursorHideTimer = window.setTimeout(() => {
-                this.mobileNativeCursorHideTimer = null
-                this.setMobileNativeCursorVisible(false)
-            }, 1600)
+            // Keep the virtual pointer visible between touches so the user can
+            // always see the remote mouse position on a touch device.
             return
         }
         this.setMobileNativeCursorVisible(false)
@@ -10520,19 +10644,16 @@ class ViewerApp implements Component {
             ? (this.mobileNativeCursorHasPosition
                 ? this.clampMobileNativeCursorPosition(this.mobileNativeCursorTargetX, this.mobileNativeCursorTargetY)
                 : this.getDefaultMobileNativeCursorPosition())
-            : this.predictMobileNativeCursorTarget(touch.clientX, touch.clientY)
+            // AbsoluteFollow must render exactly where the same touch point is
+            // sent to Host. Do not add prediction or smoothing in this mode.
+            : this.clampMobileNativeCursorPosition(touch.clientX, touch.clientY)
         this.mobileNativeCursorTargetX = startX
         this.mobileNativeCursorTargetY = startY
-        if (!this.mobileNativeCursorHasPosition) {
-            this.mobileNativeCursorRenderX = startX
-            this.mobileNativeCursorRenderY = startY
-            this.mobileNativeCursorHasPosition = true
-            this.updateMobileNativeCursorVisual(true)
-        } else if (!this.mobileNativeCursorVisible) {
-            this.updateMobileNativeCursorVisual()
-            this.queueMobileNativeCursorAnimation()
-        }
+        this.mobileNativeCursorRenderX = startX
+        this.mobileNativeCursorRenderY = startY
+        this.mobileNativeCursorHasPosition = true
         this.setMobileNativeCursorVisible(true)
+        this.updateMobileNativeCursorVisual(true)
     }
 
     private updateMobileNativeCursorFromTouch(touch: Touch) {
@@ -10573,8 +10694,12 @@ class ViewerApp implements Component {
 
         const relativeMode = this.isRelativeMobileNativeCursorMode()
         const [targetX, targetY] = relativeMode
-            ? [this.mobileNativeCursorTargetX, this.mobileNativeCursorTargetY]
-            : this.predictMobileNativeCursorTarget(touch.clientX, touch.clientY)
+            ? this.clampMobileNativeCursorPosition(
+                this.mobileNativeCursorTargetX + (touchDeltaX * this.inputConfig.touchSensitivity),
+                this.mobileNativeCursorTargetY + (touchDeltaY * this.inputConfig.touchSensitivity)
+            )
+            // Keep visual cursor and Host AbsoluteFollow mapping 1:1.
+            : this.clampMobileNativeCursorPosition(touch.clientX, touch.clientY)
         this.mobileNativeCursorTargetX = targetX
         this.mobileNativeCursorTargetY = targetY
         if (!this.mobileNativeCursorHasPosition) {
@@ -10582,11 +10707,29 @@ class ViewerApp implements Component {
             this.mobileNativeCursorRenderY = targetY
             this.mobileNativeCursorHasPosition = true
         }
+        this.setMobileNativeCursorVisible(true)
+        if (relativeMode) {
+            this.cancelMobileNativeCursorAnimation()
+            this.mobileNativeCursorRenderX = targetX
+            this.mobileNativeCursorRenderY = targetY
+            this.updateMobileNativeCursorVisual(true)
+        } else {
+            // AbsoluteFollow sends client coordinates directly to Host, so the
+            // preview must not lag behind with animation interpolation.
+            this.cancelMobileNativeCursorAnimation()
+            this.mobileNativeCursorRenderX = targetX
+            this.mobileNativeCursorRenderY = targetY
+            this.updateMobileNativeCursorVisual(true)
+        }
 
         this.mobileNativeCursorPressed = true
         this.mobileNativeCursor.dataset.pressed = "true"
         this.setMobileNativeCursorVisible(true)
         if (relativeMode) {
+            this.cancelMobileNativeCursorAnimation()
+            this.mobileNativeCursorRenderX = this.mobileNativeCursorTargetX
+            this.mobileNativeCursorRenderY = this.mobileNativeCursorTargetY
+            this.updateMobileNativeCursorVisual()
             return
         }
         const distance = Math.hypot(
@@ -15533,9 +15676,12 @@ class ViewerApp implements Component {
         }
 
         const aggressiveResumeReconnect = this.isMobileResumeAutoReconnectEnabled()
+        const touchPoints = Number(navigator.maxTouchPoints || 0)
+        const coarsePointer = typeof window.matchMedia == "function" && window.matchMedia("(pointer: coarse)").matches
+        const automaticReconnectAllowed = !(this.isMobileUiMode() || touchPoints > 0 || coarsePointer) || isMobileAutoReconnectOptedIn()
         // Tab focus, elapsed background time, or an online event alone must
         // not tear down a usable peer connection. Recover only a failed route.
-        const shouldReconnect = this.currentRouteState == "failed"
+        const shouldReconnect = automaticReconnectAllowed && this.currentRouteState == "failed"
 
         this.pushTouchDebugLine("resume", `reason=${reason} hidden=${hiddenDurationMs}ms reconnect=${shouldReconnect ? "yes" : "no"} route=${this.currentRouteState} aggressive=${aggressiveResumeReconnect ? "yes" : "no"}`)
         if (shouldReconnect && this.touchDebugAutoSnapshotEnabled) {
@@ -15756,7 +15902,7 @@ class ViewerApp implements Component {
         this.onUserInteraction()
 
         event.preventDefault()
-        if (this.isMobileNativeCursorEnabled() && (event.touches?.length ?? 0) >= 2) {
+        if (this.isMobileNativeCursorEnabled()) {
             this.syncHostCursorToVisibleMobileCursor()
         }
         this.stream?.getInput().onTouchStart(event, this.resolveActiveStreamRect())
@@ -16428,6 +16574,7 @@ class ViewerApp implements Component {
         void this.destroyMicSidecar(false)
         this.quickPadOverlay.unmount(document.body)
         this.androidBridgeRoot.remove()
+        this.mobileNativeCursor.remove()
         parent.classList.remove("stream-page-root")
         parent.removeChild(this.div)
     }

@@ -6,7 +6,7 @@ const sourceCandidates = [
     path.join(
         repoRoot,
         "..",
-        "android native app",
+        "02 CLOUDGIME STREAM ANDROID",
         "app",
         "src",
         "main",

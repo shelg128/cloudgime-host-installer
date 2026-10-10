@@ -11,12 +11,13 @@ param(
     [string]$FrpSourceRoot = "",
     [string]$SunshineSourceRoot = "",
     [string]$LegacySunshineSourceRoot = "",
+    [string]$SentinelInstallerPath = "",
     [int]$LocalWebPort = 0,
     [int]$SunshineHttpPort = 0,
     [int]$WebRtcBasePort = 40000,
     [int]$WebRtcBlockSize = 50,
     [string]$UrlPathPrefix = "/stream",
-    [string]$TurnHost = "64.120.92.154",
+    [string]$TurnHost = "104.234.174.86",
     [int]$TurnPort = 3478,
     [string]$TurnUsername = "mlturn",
     [string]$TurnCredential = "Shelgy678789",
@@ -27,6 +28,8 @@ param(
     [ValidateSet("production", "staging", "development", "canary")][string]$DeploymentEnvironment = "production",
     [string]$PromotionGroup = "default",
     [switch]$DisableTurn,
+    [switch]$Universal,
+    [switch]$SkipHostControlBuild,
     [switch]$Zip
 )
 
@@ -135,6 +138,15 @@ $SunshinePassword = Resolve-SecretOverride -CurrentValue $SunshinePassword -EnvN
 
 if (-not (Test-SunshineRuntimeRoot $LegacySunshineSourceRoot)) {
     $LegacySunshineSourceRoot = ""
+}
+
+# Release gate shared by every PC identity: never package a stale/unvalidated capture binary.
+$captureRuntimeVerifier = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\patches\sunshine\verify-runtime.mjs"))
+& node $captureRuntimeVerifier $SunshineSourceRoot
+if ($LASTEXITCODE -ne 0) { throw "Capture runtime has not passed source/hash/live validation: $SunshineSourceRoot" }
+if (-not [string]::IsNullOrWhiteSpace($LegacySunshineSourceRoot)) {
+    & node $captureRuntimeVerifier $LegacySunshineSourceRoot
+    if ($LASTEXITCODE -ne 0) { throw "Legacy capture runtime is unvalidated; remove it or rebuild with the current patch." }
 }
 
 $BundleProcessManagerExe = Join-Path $PSScriptRoot "..\..\runtime\tools\bundle-process-manager.exe"
@@ -406,6 +418,9 @@ function Copy-SunshineRuntime {
         }
         Copy-Item $file.FullName (Join-Path $DestinationRoot $file.Name) -Force
     }
+
+    & node $captureRuntimeVerifier $DestinationRoot
+    if ($LASTEXITCODE -ne 0) { throw "Copied capture runtime failed verification: $DestinationRoot" }
 
     [System.IO.Directory]::CreateDirectory((Join-Path $DestinationRoot "config")) | Out-Null
     [System.IO.Directory]::CreateDirectory((Join-Path $DestinationRoot "config\credentials")) | Out-Null
@@ -720,14 +735,14 @@ function New-MoonlightConfigJson {
             bind_address = "127.0.0.1:${LocalWebPort}"
             certificate = $null
             url_path_prefix = $UrlPathPrefix
-            session_cookie_secure = $true
+            session_cookie_secure = if ($Universal) { $false } else { $true }
             session_cookie_expiration = [ordered]@{
                 secs = 86400
                 nanos = 0
             }
-            first_login_create_admin = $false
-            first_login_assign_global_hosts = $false
-            default_user_id = 4081573497
+            first_login_create_admin = if ($Universal) { $true } else { $false }
+            first_login_assign_global_hosts = if ($Universal) { $true } else { $false }
+            default_user_id = if ($Universal) { $null } else { 4081573497 }
             forwarded_header = $null
         }
         moonlight = [ordered]@{
@@ -1345,6 +1360,9 @@ Write-Host "[OK] Firewall rules ensured for $HostLabel (UDP $WebRtcMinPort-$WebR
 [System.IO.Directory]::CreateDirectory($OutputDir) | Out-Null
 
 $normalizedHostSlug = $HostSlug.Trim().ToLowerInvariant()
+if ($Universal -and [string]::IsNullOrWhiteSpace($normalizedHostSlug)) {
+    $normalizedHostSlug = "cloudgime-host"
+}
 if (-not [string]::IsNullOrWhiteSpace($normalizedHostSlug)) {
     if ($normalizedHostSlug.Contains(".")) {
         throw "HostSlug must be a single label without dots."
@@ -1356,20 +1374,44 @@ if (-not [string]::IsNullOrWhiteSpace($normalizedHostSlug)) {
 } else {
     $hostLabel = "$HostPrefix$PcNumber"
 }
-$hostname = "$hostLabel.$BaseDomain"
-$publicUrl = "https://$hostname$UrlPathPrefix/"
-$proxyName = "moonlight-$hostLabel"
+if ($Universal) {
+    # The activation license assigns the PC identity, route, and production ports later.
+    $hostname = ""
+    $publicUrl = "https://cloudgime.my.id/stream/"
+    $proxyName = "moonlight-cloudgime-host"
+    $webRtcMinPort = $WebRtcBasePort
+    $webRtcMaxPort = $webRtcMinPort + $WebRtcBlockSize - 1
+} else {
+    $hostname = "$hostLabel.$BaseDomain"
+    $publicUrl = "https://$hostname$UrlPathPrefix/"
+    $proxyName = "moonlight-$hostLabel"
+    $webRtcMinPort = $WebRtcBasePort + (($PcNumber - 1) * $WebRtcBlockSize)
+    $webRtcMaxPort = $webRtcMinPort + $WebRtcBlockSize - 1
+}
 $bundleRoot = Join-Path $OutputDir $hostLabel
+$sentinelInstallerDefault = Join-Path $PSScriptRoot "..\..\..\04 CLOUDRENT WEBSITE DAN BACKEND\cloudrental sentinel\sentinel-launcher\release\Sentinel Launcher Setup 2.29.0.exe"
+$resolvedSentinelInstallerPath = if ([string]::IsNullOrWhiteSpace($SentinelInstallerPath)) {
+    [System.IO.Path]::GetFullPath($sentinelInstallerDefault)
+} else {
+    [System.IO.Path]::GetFullPath($SentinelInstallerPath)
+}
+if ($Universal -and -not (Test-Path -LiteralPath $resolvedSentinelInstallerPath)) {
+    throw "Sentinel Launcher prerequisite was not found: $resolvedSentinelInstallerPath"
+}
 $moonlightBundle = Join-Path $bundleRoot "moonlight"
 $moonlightSystemBundle = Join-Path $moonlightBundle "system"
 $frpBundle = Join-Path $bundleRoot "frp"
 $sunshineBundle = Join-Path $bundleRoot "sunshine"
-$webRtcMinPort = $WebRtcBasePort + (($PcNumber - 1) * $WebRtcBlockSize)
-$webRtcMaxPort = $webRtcMinPort + $WebRtcBlockSize - 1
 
 if ([string]::IsNullOrWhiteSpace($SunshinePassword)) {
-    Write-Warning "SunshinePassword was empty. Builder will fall back to a predictable host-label password. Prefer ML_SUNSHINE_PASSWORD or an explicit parameter."
-    $SunshinePassword = "$hostLabel-login"
+    $randomBytes = New-Object byte[] 32
+    $randomGenerator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $randomGenerator.GetBytes($randomBytes)
+    } finally {
+        $randomGenerator.Dispose()
+    }
+    $SunshinePassword = [Convert]::ToBase64String($randomBytes)
 }
 
 $releaseChannel = Get-GitValue -Arguments @("branch", "--show-current") -Fallback "unknown"
@@ -1414,7 +1456,10 @@ if (Test-Path $DisplayPrepareHelperProject) {
         -p:PublishSingleFile=true `
         -p:EnableCompressionInSingleFile=true `
         -o $DisplayPrepareHelperPublishRoot | Out-Host
-}
+    if ($LASTEXITCODE -ne 0) { throw "Display helper build failed; refusing stale binary." }
+    & node (Join-Path $PSScriptRoot 'verify-display-runtime.mjs') record $DisplayPrepareHelperExe (Split-Path $DisplayPrepareHelperProject)
+    if ($LASTEXITCODE -ne 0) { throw "Display helper contract verification failed." }
+} else { throw "Display helper source is required for every Host bundle." }
 if (Test-Path $HostKeepAwakeAgentProject) {
     dotnet publish $HostKeepAwakeAgentProject `
         -c Release `
@@ -1427,12 +1472,20 @@ if (Test-Path $HostKeepAwakeAgentProject) {
 if (Test-Path $HostControlTauriPublishScript) {
     Push-Location $HostControlTauriRoot
     try {
-        npm run tauri build -- --no-bundle | Out-Host
+        if (-not $SkipHostControlBuild) {
+            npm run tauri build -- --no-bundle | Out-Host
+        } else {
+            Write-Host "[BUILD] SkipHostControlBuild aktif; memakai Host Control release yang sudah tersedia." -ForegroundColor Yellow
+        }
     } finally {
         Pop-Location
     }
 
-    & $HostControlTauriPublishScript --bundle-root $bundleRoot | Out-Host
+    if ($SkipHostControlBuild) {
+        & $HostControlTauriPublishScript --bundle-root $bundleRoot --skip-host-control-build | Out-Host
+    } else {
+        & $HostControlTauriPublishScript --bundle-root $bundleRoot | Out-Host
+    }
 }
 $webServerSourceExe = Resolve-WebServerBinaryPath `
     -RepoRoot $RepoRoot `
@@ -1441,6 +1494,8 @@ Write-Host "[BUILD] Bundling web-server from: $webServerSourceExe" -ForegroundCo
 Copy-Item $webServerSourceExe (Join-Path $moonlightBundle "web-server.exe") -Force
 if (Test-Path (Join-Path $MoonlightSourceRoot "host_supervisor.exe")) {
     Copy-Item (Join-Path $MoonlightSourceRoot "host_supervisor.exe") (Join-Path $moonlightSystemBundle "cloudgime-runtime-agent.exe") -Force
+    # CLI entrypoint and installed service must be the same supervisor build.
+    Copy-Item (Join-Path $MoonlightSourceRoot "host_supervisor.exe") (Join-Path $bundleRoot "host-supervisor.exe") -Force
 }
 if (Test-Path (Join-Path $MoonlightSourceRoot "host_installer.exe")) {
     Copy-Item (Join-Path $MoonlightSourceRoot "host_installer.exe") (Join-Path $bundleRoot "host-installer.exe") -Force
@@ -1476,6 +1531,7 @@ Copy-DirectoryContents -Source (Join-Path $MoonlightSourceRoot "static") -Destin
 [System.IO.Directory]::CreateDirectory((Join-Path $moonlightBundle "server")) | Out-Null
 if (Test-Path $DisplayPrepareHelperExe) {
     Copy-Item $DisplayPrepareHelperExe (Join-Path $moonlightBundle "server\\display-prepare-helper.exe") -Force
+    Copy-Item ($DisplayPrepareHelperExe + '.display-contract.json') (Join-Path $moonlightBundle 'server\display-prepare-helper.exe.display-contract.json') -Force
 }
 
 Remove-Item (Join-Path $moonlightSystemBundle "launch-runtime-agent-hidden.vbs") -Force -ErrorAction SilentlyContinue
@@ -1484,7 +1540,7 @@ $moonlightConfig = New-MoonlightConfigJson `
     -UrlPathPrefix $UrlPathPrefix `
     -LocalWebPort $LocalWebPort `
     -SunshineHttpPort $SunshineHttpPort `
-    -PairDeviceName "$hostLabel-web" `
+    -PairDeviceName $(if ($Universal) { "Cloudgime Host" } else { "$hostLabel-web" }) `
     -WebRtcMinPort $webRtcMinPort `
     -WebRtcMaxPort $webRtcMaxPort `
     -DisableTurn ([bool]$DisableTurn) `
@@ -1496,14 +1552,22 @@ $moonlightConfig = New-MoonlightConfigJson `
     -WebRtcNat1To1CandidateType $WebRtcNat1To1CandidateType
 Write-Utf8NoBom -Path (Join-Path $moonlightBundle "server\config.json") -Content ($moonlightConfig + [Environment]::NewLine)
 
-$managedPairSeed = Get-ManagedSharedPairSeed -SeedPath $ManagedSharedPairInfoPath -SunshineHttpPort $SunshineHttpPort
+$managedPairSeed = if ($Universal) { $null } else { Get-ManagedSharedPairSeed -SeedPath $ManagedSharedPairInfoPath -SunshineHttpPort $SunshineHttpPort }
 $managedPairInfo = $null
 if ($managedPairSeed -and $managedPairSeed.hosts.Count -gt 0) {
     $managedPairInfo = $managedPairSeed.hosts[0].pair_info
     Write-Utf8NoBom -Path (Join-Path $moonlightBundle "server\shared_pair_info.json") -Content (($managedPairSeed | ConvertTo-Json -Depth 20) + [Environment]::NewLine)
 }
 
-$moonlightData = New-MoonlightDataJson -SunshineHttpPort $SunshineHttpPort -HostName "This PC" -PairInfo $managedPairInfo
+$moonlightData = if ($Universal) {
+    (@{
+        version = "2"
+        users = @{}
+        hosts = @{}
+    } | ConvertTo-Json -Depth 20)
+} else {
+    New-MoonlightDataJson -SunshineHttpPort $SunshineHttpPort -HostName "This PC" -PairInfo $managedPairInfo
+}
 Write-Utf8NoBom -Path (Join-Path $moonlightBundle "server\data.json") -Content ($moonlightData + [Environment]::NewLine)
 Write-Utf8NoBom -Path (Join-Path $moonlightBundle "server\release_info.json") -Content ((New-ReleaseInfoJson -DeploymentEnvironment $DeploymentEnvironment -ReleaseChannel $releaseChannel -SourceBranch $sourceBranch -SourceCommit $sourceCommit -SourceCommitShort $sourceCommitShort -SourceDirty ([bool]$sourceDirty) -BuildProfile "release" -BuiltAtUnixMs $builtAtUnixMs) + [Environment]::NewLine)
 Write-Utf8NoBom -Path (Join-Path $moonlightBundle "server\promotion_policy.json") -Content ((New-PromotionPolicyJson -DeploymentEnvironment $DeploymentEnvironment -BundleName $hostLabel -PromotionGroup $PromotionGroup) + [Environment]::NewLine)
@@ -1516,7 +1580,7 @@ Copy-SunshineRuntime `
     -SunshineHttpPort $SunshineHttpPort `
     -SunshineLoginName $SunshineUsername `
     -SunshineLoginSecret $SunshinePassword `
-    -ManagedSunshineSharedSource $ManagedSunshineSharedRoot
+    -ManagedSunshineSharedSource $(if ($Universal) { "" } else { $ManagedSunshineSharedRoot })
 
 if (-not [string]::IsNullOrWhiteSpace($LegacySunshineSourceRoot) -and (Test-Path $LegacySunshineSourceRoot)) {
     $legacyBundleRoot = Join-Path $bundleRoot "sunshine-legacy"
@@ -1526,7 +1590,7 @@ if (-not [string]::IsNullOrWhiteSpace($LegacySunshineSourceRoot) -and (Test-Path
         -SunshineHttpPort $SunshineHttpPort `
         -SunshineLoginName $SunshineUsername `
         -SunshineLoginSecret $SunshinePassword `
-        -ManagedSunshineSharedSource $ManagedSunshineSharedRoot
+        -ManagedSunshineSharedSource $(if ($Universal) { "" } else { $ManagedSunshineSharedRoot })
     Reset-LegacySunshineRuntimeMetadata -RuntimeRoot $legacyBundleRoot
 }
 
@@ -1938,11 +2002,55 @@ Write-Utf8NoBom -Path (Join-Path $bundleRoot "stop-all.bat") -Content $stopAllBa
 
 Write-Utf8NoBom -Path (Join-Path $bundleRoot "ensure-firewall.ps1") -Content (New-EnsureFirewallPs1 -HostLabel $hostLabel -WebRtcMinPort $webRtcMinPort -WebRtcMaxPort $webRtcMaxPort)
 Write-Utf8NoBom -Path (Join-Path $bundleRoot "verify-startup.ps1") -Content (New-VerifyStartupPs1 -LocalWebPort $LocalWebPort -UrlPathPrefix $UrlPathPrefix)
+$autoPairScript = Join-Path $PSScriptRoot 'auto-pair-host.ps1'
+if (-not (Test-Path -LiteralPath $autoPairScript)) {
+    throw 'auto-pair-host.ps1 was not found beside the bundle builder.'
+}
+Copy-Item -LiteralPath $autoPairScript -Destination (Join-Path $bundleRoot 'auto-pair-host.ps1') -Force
+
+$sentinelDependency = $null
+if ($Universal) {
+    $sentinelBundleDir = Join-Path $bundleRoot 'sentinel'
+    [System.IO.Directory]::CreateDirectory($sentinelBundleDir) | Out-Null
+    $sentinelBundleInstaller = Join-Path $sentinelBundleDir 'SentinelLauncherSetup.exe'
+    Copy-Item -LiteralPath $resolvedSentinelInstallerPath -Destination $sentinelBundleInstaller -Force
+    $sentinelHash = (Get-FileHash -LiteralPath $sentinelBundleInstaller -Algorithm SHA256).Hash
+    $sentinelDependency = [ordered]@{
+        required = $true
+        productName = 'Sentinel Launcher'
+        version = '2.29.0'
+        installerRelativePath = 'sentinel\SentinelLauncherSetup.exe'
+        sha256 = $sentinelHash
+        installMode = 'silent-if-missing'
+    }
+    Write-Utf8NoBom -Path (Join-Path $sentinelBundleDir 'README.txt') -Content @(
+        'Sentinel Launcher is a required native billing/access-gate dependency.',
+        'CloudgimeHostSetup installs this release once when Sentinel is not already installed.',
+        'The CloudRental activation license supplies the PC/device binding after Host activation.',
+        'Do not copy Sentinel user data, device tokens, or runtime state from another PC.'
+    )
+}
 
 Write-Utf8NoBom -Path (Join-Path $bundleRoot "start-all.bat") -Content (New-StartAllBat -PublicUrl $publicUrl -LocalWebPort $LocalWebPort -SunshineHttpPort $SunshineHttpPort -DisableTurn ([bool]$DisableTurn))
-Write-Utf8NoBom -Path (Join-Path $bundleRoot "PUBLIC_URL.txt") -Content ($publicUrl + [Environment]::NewLine)
-Write-Utf8NoBom -Path (Join-Path $bundleRoot "README.txt") -Content (New-ReadmeText -PublicUrl $publicUrl -SunshineHttpPort $SunshineHttpPort -WebRtcMinPort $webRtcMinPort -WebRtcMaxPort $webRtcMaxPort -HostLabel $hostLabel -DisableTurn ([bool]$DisableTurn))
-Write-Utf8NoBom -Path (Join-Path $bundleRoot "SETUP.txt") -Content (New-SetupText -HostLabel $hostLabel -PublicUrl $publicUrl -SunshineHttpPort $SunshineHttpPort -WebRtcMinPort $webRtcMinPort -WebRtcMaxPort $webRtcMaxPort -DisableTurn ([bool]$DisableTurn))
+$publicUrlText = if ($Universal) { "Assigned after activation; control plane manages the public route." } else { $publicUrl }
+Write-Utf8NoBom -Path (Join-Path $bundleRoot "PUBLIC_URL.txt") -Content ($publicUrlText + [Environment]::NewLine)
+Write-Utf8NoBom -Path (Join-Path $bundleRoot "README.txt") -Content (New-ReadmeText -PublicUrl $publicUrlText -SunshineHttpPort $SunshineHttpPort -WebRtcMinPort $webRtcMinPort -WebRtcMaxPort $webRtcMaxPort -HostLabel $hostLabel -DisableTurn ([bool]$DisableTurn))
+Write-Utf8NoBom -Path (Join-Path $bundleRoot "SETUP.txt") -Content (New-SetupText -HostLabel $hostLabel -PublicUrl $publicUrlText -SunshineHttpPort $SunshineHttpPort -WebRtcMinPort $webRtcMinPort -WebRtcMaxPort $webRtcMaxPort -DisableTurn ([bool]$DisableTurn))
+$bundleManifest = [ordered]@{
+    schemaVersion = 1
+    bundleMode = if ($Universal) { "universal" } else { "pc-bound" }
+    activationRequired = $true
+    identitySource = "CloudRental activation license"
+    pcIdentityAssignedAfterInstall = [bool]$Universal
+    publicRouteAssignedAfterActivation = [bool]$Universal
+    localWebPort = $LocalWebPort
+    sunshineHttpPort = $SunshineHttpPort
+    webRtcUdpRange = [ordered]@{ min = $webRtcMinPort; max = $webRtcMaxPort }
+    turnFallbackEnabled = -not [bool]$DisableTurn
+    sentinel = $sentinelDependency
+    generatedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
+}
+Write-Utf8NoBom -Path (Join-Path $bundleRoot "cloudgime-host-bundle.json") -Content (($bundleManifest | ConvertTo-Json -Depth 10) + [Environment]::NewLine)
 Write-Utf8NoBom -Path (Join-Path $bundleRoot "HOST_RUNTIME_LOGIN.txt") -Content ("Local host runtime credentials are intentionally not written to disk.`r`nUse your secure deployment secret source to manage local runtime admin credentials.`r`n")
 
 if ($Zip) {

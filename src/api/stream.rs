@@ -2266,59 +2266,43 @@ async fn run_blocking_host_failure_recovery(
 }
 
 #[cfg(windows)]
-async fn taskkill_image(image_name: &str) -> Result<(), String> {
-    let status = Command::new("taskkill")
-        .args(["/IM", image_name, "/T", "/F"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .map_err(|err| format!("failed to stop {image_name}: {err}"))?;
-
-    if !status.success() {
-        return Err(format!(
-            "taskkill returned non-zero status for {image_name}: {status}"
-        ));
-    }
-
-    Ok(())
+async fn control_capture_service(action: crate::runtime_service::Action) -> Result<bool, String> {
+    let root = current_bundle_root().ok_or("failed to determine bundle root")?;
+    spawn_blocking(move || {
+        crate::runtime_service::transition(
+            &root,
+            action,
+            Duration::from_secs(35),
+            append_host_stream_trace,
+        )
+    })
+    .await
+    .map_err(|e| format!("capture service worker failed: {e}"))?
 }
 
 #[cfg(windows)]
-async fn control_windows_service(action: &str, service_name: &str) -> Result<(), String> {
-    let output = Command::new("sc.exe")
-        .args([action, service_name])
-        .output()
-        .await
-        .map_err(|err| format!("failed to run sc.exe {action} {service_name}: {err}"))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{stdout} {stderr}").to_ascii_lowercase();
-    let acceptable = match action.to_ascii_lowercase().as_str() {
-        "stop" => {
-            combined.contains("1062")
-                || combined.contains("service has not been started")
-                || combined.contains("not been started")
+async fn stop_capture_runtime_gracefully(address: &str, port: u16) -> Result<(), String> {
+    let managed = control_capture_service(crate::runtime_service::Action::Stop).await?;
+    if !managed {
+        for (pid, image) in list_bundle_runtime_processes().await? {
+            let name = image
+                .file_name()
+                .map(|x| x.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            if name == "sunshinesvc.exe" {
+                return Err(
+                    "unregistered SCM wrapper still running; manual repair required".into(),
+                );
+            }
+            if name == "sunshine.exe" {
+                append_host_stream_trace(&format!(
+                    "LEGACY_CAPTURE_FORCED_STOP planned=true pid={pid}"
+                ));
+                taskkill_pid(pid).await?;
+            }
         }
-        "start" => combined.contains("1056") || combined.contains("already running"),
-        _ => false,
-    };
-
-    if acceptable {
-        return Ok(());
     }
-
-    Err(format!(
-        "sc.exe {action} {service_name} returned {}: {} {}",
-        output.status,
-        sanitize_trace_value(&stdout),
-        sanitize_trace_value(&stderr)
-    ))
+    wait_for_host_tcp_closed(address, port, Duration::from_secs(12)).await
 }
 
 #[cfg(windows)]
@@ -2738,26 +2722,7 @@ async fn restart_bundle_sunshine_with_policy(
 
     cleanup_bundle_stream_processes("bundle_restart").await;
 
-    for pass in 0..3 {
-        for image_name in [
-            "sunshinesvc.exe",
-            "sunshine.exe",
-            "streamer.exe",
-            "mic_sidecar.exe",
-        ] {
-            if let Err(err) = taskkill_image(image_name).await {
-                append_host_stream_trace(&format!(
-                    "LEGACY_RUNTIME_REFRESH stage=restart_sunshine_cleanup pass={} image={} error={}",
-                    pass + 1,
-                    sanitize_trace_value(image_name),
-                    sanitize_trace_value(&err)
-                ));
-            }
-        }
-
-        cleanup_bundle_stream_processes("bundle_restart").await;
-        sleep(Duration::from_millis(500)).await;
-    }
+    stop_capture_runtime_gracefully(control_address, http_port).await?;
 
     if let Err(err) =
         wait_for_host_tcp_closed(control_address, http_port, Duration::from_secs(12)).await
@@ -2857,28 +2822,7 @@ async fn refresh_bundle_capture_runtime_with_prepared_display(
     let bundle_root =
         current_bundle_root().ok_or_else(|| "failed to determine bundle root".to_string())?;
 
-    for pass in 0..3 {
-        for image_name in ["sunshinesvc.exe", "sunshine.exe"] {
-            if let Err(err) = taskkill_image(image_name).await {
-                append_host_stream_trace(&format!(
-                    "SUNSHINE_CAPTURE_RUNTIME_STOP token={} pass={} image={} error={}",
-                    session_token,
-                    pass + 1,
-                    sanitize_trace_value(image_name),
-                    sanitize_trace_value(&err)
-                ));
-            }
-        }
-
-        if wait_for_host_tcp_closed(control_address, http_port, Duration::from_millis(1200))
-            .await
-            .is_ok()
-        {
-            break;
-        }
-
-        sleep(Duration::from_millis(400)).await;
-    }
+    stop_capture_runtime_gracefully(control_address, http_port).await?;
 
     wait_for_host_tcp_closed(control_address, http_port, Duration::from_secs(12))
         .await
@@ -2968,40 +2912,7 @@ async fn restart_sunshine_capture_service_only(
         http_port
     ));
 
-    if let Err(err) = control_windows_service("stop", "CloudgimeRuntime-Host").await {
-        append_host_stream_trace(&format!(
-            "SUNSHINE_CAPTURE_SERVICE_ONLY_REFRESH token={} stage=service_stop_warning error={}",
-            session_token,
-            sanitize_trace_value(&err)
-        ));
-    }
-
-    for pass in 0..3 {
-        for image_name in ["sunshinesvc.exe", "sunshine.exe"] {
-            if let Err(err) = taskkill_image(image_name).await {
-                append_host_stream_trace(&format!(
-                    "SUNSHINE_CAPTURE_SERVICE_ONLY_REFRESH token={} stage=taskkill_warning pass={} image={} error={}",
-                    session_token,
-                    pass + 1,
-                    sanitize_trace_value(image_name),
-                    sanitize_trace_value(&err)
-                ));
-            }
-        }
-
-        if wait_for_host_tcp_closed(control_address, http_port, Duration::from_millis(900))
-            .await
-            .is_ok()
-        {
-            break;
-        }
-
-        sleep(Duration::from_millis(350)).await;
-    }
-
-    wait_for_host_tcp_closed(control_address, http_port, Duration::from_secs(10))
-        .await
-        .map_err(|err| format!("Sunshine capture service did not stop cleanly: {err}"))?;
+    stop_capture_runtime_gracefully(control_address, http_port).await?;
 
     if let Some(requested_mode) = requested_mode {
         append_host_stream_trace(&format!(
@@ -3032,7 +2943,7 @@ async fn restart_sunshine_capture_service_only(
                 }
             }
             Err(err) => {
-                let _ = control_windows_service("start", "CloudgimeRuntime-Host").await;
+                let _ = control_capture_service(crate::runtime_service::Action::Start).await;
                 return Err(format!(
                     "failed to prepare display before Sunshine service restart: {err}"
                 ));
@@ -3040,7 +2951,10 @@ async fn restart_sunshine_capture_service_only(
         }
     }
 
-    control_windows_service("start", "CloudgimeRuntime-Host").await?;
+    if !control_capture_service(crate::runtime_service::Action::Start).await? {
+        let root = current_bundle_root().ok_or("failed to determine bundle root")?;
+        start_bundle_runtime_detached(&root).await?;
+    }
     wait_for_host_tcp_ready(control_address, http_port, Duration::from_secs(35))
         .await
         .map_err(|err| {
@@ -3076,28 +2990,7 @@ async fn restart_capture_runtime_for_output_change(
         http_port
     ));
 
-    for pass in 0..3 {
-        for image_name in ["sunshinesvc.exe", "sunshine.exe"] {
-            if let Err(err) = taskkill_image(image_name).await {
-                append_host_stream_trace(&format!(
-                    "SUNSHINE_CAPTURE_OUTPUT_REFRESH_STOP token={} pass={} image={} error={}",
-                    session_token,
-                    pass + 1,
-                    sanitize_trace_value(image_name),
-                    sanitize_trace_value(&err)
-                ));
-            }
-        }
-
-        if wait_for_host_tcp_closed(control_address, http_port, Duration::from_millis(900))
-            .await
-            .is_ok()
-        {
-            break;
-        }
-
-        sleep(Duration::from_millis(350)).await;
-    }
+    stop_capture_runtime_gracefully(control_address, http_port).await?;
 
     if let Ok(supervisor_path) = get_host_supervisor_path()
         && supervisor_path.exists()
@@ -3797,28 +3690,9 @@ fn describe_mic_sidecar_server_message(message: &MicSidecarServerMessage) -> Str
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct DynamicDisplayAppliedMode {
-    width: u32,
-    height: u32,
-    frequency: u32,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct DynamicDisplayResult {
-    ok: bool,
-    changed: bool,
-    restored: bool,
-    skipped: bool,
-    reason: String,
-    applied: Option<DynamicDisplayAppliedMode>,
-    sunshine_capture_changed: bool,
-    sunshine_capture_target_changed: bool,
-    sunshine_capture_display: Option<String>,
-    sunshine_capture_config_path: Option<String>,
-}
+#[path = "display_helper_contract.rs"]
+mod display_helper_contract;
+use display_helper_contract::{DynamicDisplayResult, parse_display_helper_result};
 
 async fn force_kill_child(child: &Arc<Mutex<Child>>, label: &str) {
     let mut child = child.lock().await;
@@ -4602,6 +4476,34 @@ pub(super) async fn run_display_helper_command(
     timeout_duration: Duration,
     helper_action: Option<&str>,
 ) -> Result<HelperCommandOutput, String> {
+    // Mutations from the SYSTEM service use a private, per-child state broker.
+    // Do not retry privileged mutations in a different desktop after broker failure.
+    if helper_should_prefer_active_user_session()
+        && matches!(helper_action, Some("prepare" | "resize" | "restore" | "project-display"))
+    {
+        let session = enumerate_interactive_user_session_candidates()
+            .into_iter().find(|id| *id != 0)
+            .ok_or_else(|| "no interactive user session for display broker".to_string())?;
+        let mut command = Command::new(helper_path);
+        command.arg("--broker").arg(session.to_string()).args(helper_arguments)
+            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        command.kill_on_drop(true);
+        apply_background_spawn_flags(&mut command);
+        let output = timeout(timeout_duration.max(Duration::from_secs(100)), command.output()).await
+            .map_err(|_| "display state broker timed out".to_string())?
+            .map_err(|_| "display state broker launch failed".to_string())?;
+        let reason = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok()
+            .and_then(|v| v.get("reason").and_then(|s| s.as_str()).map(str::to_owned))
+            .filter(|s| s.len() <= 120 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or_else(|| "unclassified".to_string());
+        append_host_stream_trace(&format!("DISPLAY_BROKER_RESULT action={} session={} exit_code={} reason={}",
+            helper_action.unwrap_or("unknown"), session, output.status.code().unwrap_or(1), reason));
+        return Ok(HelperCommandOutput {
+            stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            exit_code: output.status.code().unwrap_or(1),
+        });
+    }
     if helper_should_prefer_active_user_session() {
         let helper_action = helper_action.unwrap_or("command");
         append_host_stream_trace(&format!(
@@ -4748,57 +4650,7 @@ async fn run_display_prepare_helper(arguments: &[String]) -> Result<DynamicDispl
     )
     .await?;
 
-    let stdout = output.stdout;
-    let stderr = output.stderr;
-
-    if !stdout.is_empty()
-        && let Ok(result) = serde_json::from_str::<DynamicDisplayResult>(&stdout)
-    {
-        if result.ok {
-            return Ok(result);
-        }
-
-        return Err(if !result.reason.trim().is_empty() {
-            result.reason.clone()
-        } else if !stderr.is_empty() {
-            stderr
-        } else {
-            format!(
-                "display prepare helper exited with status {}",
-                output.exit_code
-            )
-        });
-    }
-
-    if output.exit_code != 0 {
-        return Err(if stderr.is_empty() {
-            format!(
-                "display prepare helper exited with status {}",
-                output.exit_code
-            )
-        } else {
-            format!(
-                "display prepare helper exited with status {}: {stderr}",
-                output.exit_code
-            )
-        });
-    }
-
-    let result = serde_json::from_str::<DynamicDisplayResult>(&stdout).map_err(|err| {
-        format!(
-            "failed to parse display prepare helper output: {err}; stdout={stdout}; stderr={stderr}"
-        )
-    })?;
-
-    if !result.ok {
-        return Err(if result.reason.is_empty() {
-            "display prepare helper reported failure".to_string()
-        } else {
-            result.reason.clone()
-        });
-    }
-
-    Ok(result)
+    parse_display_helper_result(&helper_action, output.exit_code, &output.stdout)
 }
 
 #[cfg(not(windows))]
@@ -8200,6 +8052,8 @@ pub async fn start_host(
                 ipc_sender.send(ServerIpcMessage::Stop),
             )
             .await;
+            let graceful_exit = scope.wait_owned_children_exit(Duration::from_secs(3)).await;
+            append_host_stream_trace(&format!("NATIVE_CHILD_GRACEFUL_STOP token={} exited={}", dynamic_display_session_token, graceful_exit));
             if let Err(error) = scope.stop_owned_children().await {
                 warn!("[Native scope]: child exit unverified: {error}");
             }

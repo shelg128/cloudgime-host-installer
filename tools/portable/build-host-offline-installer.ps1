@@ -6,6 +6,7 @@ param(
     [string]$KeeperTunnelProject = "",
     [string]$KeeperTunnelExe = "",
     [switch]$SyncInstalledRuntime,
+    [switch]$Universal,
     [switch]$SkipBundleBuild
 )
 
@@ -25,7 +26,7 @@ if ([string]::IsNullOrWhiteSpace($InstalledRoot)) {
 $InstalledRoot = [System.IO.Path]::GetFullPath($InstalledRoot)
 
 if ([string]::IsNullOrWhiteSpace($BundleRoot)) {
-    $BundleRoot = Join-Path $RepoRoot "export\mon1"
+    $BundleRoot = Join-Path $RepoRoot $(if ($Universal) { "export\cloudgime-host" } else { "export\mon1" })
 }
 $BundleRoot = [System.IO.Path]::GetFullPath($BundleRoot)
 
@@ -308,12 +309,16 @@ if ([string]::IsNullOrWhiteSpace($KeeperTunnelProject)) {
 
 if (-not $SkipBundleBuild) {
     Write-Host "[BUILD] Membuat bundle host final dari source..." -ForegroundColor Cyan
-    Invoke-Checked "powershell" @(
+    $bundleBuildArgs = @(
         "-ExecutionPolicy", "Bypass",
         "-File", $bundleBuilderScript,
         "-PcNumber", "1",
         "-OutputDir", (Join-Path $RepoRoot "export")
     )
+    if ($Universal) {
+        $bundleBuildArgs += "-Universal"
+    }
+    Invoke-Checked "powershell" $bundleBuildArgs
 } else {
     Write-Host "[BUILD] SkipBundleBuild aktif; memvalidasi bundle existing terhadap binary hasil build terbaru..." -ForegroundColor Yellow
 }
@@ -321,12 +326,29 @@ if (-not $SkipBundleBuild) {
 if (-not (Test-Path -LiteralPath (Join-Path $BundleRoot "host-installer.exe"))) {
     throw "Bundle host tidak ditemukan atau belum lengkap: $BundleRoot"
 }
+if ($Universal) {
+    $manifestPath = Join-Path $BundleRoot "cloudgime-host-bundle.json"
+    if (-not (Test-Path -LiteralPath $manifestPath)) {
+        throw "Universal bundle manifest tidak ditemukan: $manifestPath"
+    }
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if ($manifest.bundleMode -ne "universal" -or -not [bool]$manifest.pcIdentityAssignedAfterInstall) {
+        throw "Bundle yang dipilih bukan universal: $BundleRoot"
+    }
+}
 
 Assert-SameBinary $webServerSourceExe (Join-Path $BundleRoot "moonlight\web-server.exe") "web-server.exe bundle"
 Assert-SameBinary $streamerSourceExe (Join-Path $BundleRoot "moonlight\streamer.exe") "streamer.exe bundle"
 Assert-SameBinary $micSidecarSourceExe (Join-Path $BundleRoot "moonlight\mic_sidecar.exe") "mic_sidecar.exe bundle"
 Assert-SameBinary $hostInstallerSourceExe (Join-Path $BundleRoot "host-installer.exe") "host-installer.exe bundle"
 Assert-SameBinary $hostSupervisorSourceExe (Join-Path $BundleRoot "moonlight\system\cloudgime-runtime-agent.exe") "cloudgime-runtime-agent.exe bundle"
+Assert-SameBinary $hostSupervisorSourceExe (Join-Path $BundleRoot "host-supervisor.exe") "host-supervisor.exe root bundle"
+
+$captureVerifier = Join-Path $RepoRoot "patches\sunshine\verify-runtime.mjs"
+Invoke-Checked "node" @($captureVerifier, (Join-Path $BundleRoot "sunshine"))
+if (Test-Path -LiteralPath (Join-Path $BundleRoot "sunshine-legacy")) {
+    Invoke-Checked "node" @($captureVerifier, (Join-Path $BundleRoot "sunshine-legacy"))
+}
 
 $prepareArgs = @("--bundle-root", $BundleRoot)
 if (-not [string]::IsNullOrWhiteSpace($KeeperTunnelProject)) {
@@ -336,6 +358,9 @@ if (-not [string]::IsNullOrWhiteSpace($KeeperTunnelProject)) {
 }
 
 Write-Host "[BUILD] Menyiapkan payload NSIS host..." -ForegroundColor Cyan
+# A prebuilt/SkipBundleBuild payload must carry the same display contract as source.
+& node (Join-Path $portableRoot 'verify-display-runtime.mjs') verify (Join-Path $BundleRoot 'moonlight\server\display-prepare-helper.exe') (Join-Path $portableRoot 'DisplayPrepareHelper')
+if ($LASTEXITCODE -ne 0) { throw 'Display runtime identity gate failed; rebuild the bundle.' }
 Invoke-Checked $preparePayloadCmd $prepareArgs
 
 Write-Host "[BUILD] Membuat installer offline host..." -ForegroundColor Cyan

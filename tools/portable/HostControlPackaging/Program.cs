@@ -56,7 +56,14 @@ internal static class Program
         var msiRoot = Path.Combine(tauriTargetRoot, "release", "bundle", "msi");
         var tauriExePath = Path.Combine(tauriTargetRoot, "release", "hostcontrolapptauri.exe");
         var bundleRoot = NormalizeFullPath(args.GetValue("bundle-root") ?? Path.Combine(repoRoot, "export", "mon1"));
-        BuildTauriApp(hostControlRoot);
+        if (!args.HasFlag("skip-host-control-build"))
+        {
+            BuildTauriApp(hostControlRoot);
+        }
+        else
+        {
+            Console.WriteLine("Skipping Host Control build; using the existing release executable.");
+        }
         var bootstrapExe = PublishBootstrap(portableRoot);
         var emergencyUninstallerExe = PublishEmergencyUninstaller(portableRoot);
         var launcherExe = PublishLauncher(portableRoot);
@@ -78,7 +85,10 @@ internal static class Program
         CopyFileWithRetry(emergencyUninstallerExe, Path.Combine(releaseRoot, "uninstaller-cloudgime.exe"));
         CopyOptionalFile(appInstallerPath, Path.Combine(releaseRoot, "cloudgime-host-control.msi"));
 
-        CopyManagedBundleSeed(portableRoot, releaseRoot);
+        if (!IsUniversalBundle(bundleRoot))
+        {
+            CopyManagedBundleSeed(portableRoot, releaseRoot);
+        }
 
         if (!Directory.Exists(bundleRoot))
         {
@@ -94,6 +104,7 @@ internal static class Program
         RemoveStalePowerShellFiles(bundleReleaseRoot);
         WriteReleaseWrappers(releaseRoot, bundleReleaseRoot);
         WriteManagedBundleNotes(bundleReleaseRoot);
+        PreserveUniversalBundleManifest(bundleReleaseRoot);
 
         Console.WriteLine($"Release prepared at {releaseRoot}");
         Console.WriteLine($"Executable: {Path.Combine(releaseRoot, "cloudgime-host-control.exe")}");
@@ -162,7 +173,10 @@ internal static class Program
         EnsureFilePresent(bootstrapExe, Path.Combine(appPayload, "cloudgime-host-bootstrap.exe"), "Host bootstrap");
         EnsureFilePresent(emergencyUninstallerPath, Path.Combine(appPayload, "uninstaller-cloudgime.exe"), "Host emergency uninstaller");
 
-        CopyManagedBundleSeed(portableRoot, appPayload);
+        if (!IsUniversalBundle(bundleRoot))
+        {
+            CopyManagedBundleSeed(portableRoot, appPayload);
+        }
         CopyDirectoryContents(bundleRoot, bundlePayload);
         OverlayLatestRuntimeStatic(repoRoot, bundlePayload);
         OverlayDriverSeed(repoRoot, bundlePayload);
@@ -175,6 +189,7 @@ internal static class Program
         StripLegacyFrpArtifacts(bundlePayload);
         RemoveStalePowerShellFiles(bundlePayload);
         WriteManagedBundleNotes(bundlePayload);
+        PreserveUniversalBundleManifest(bundlePayload);
 
         Console.WriteLine($"NSIS payload prepared at {payloadRoot}");
         Console.WriteLine($"App executable: {Path.Combine(appPayload, "cloudgime-host-control.exe")}");
@@ -754,6 +769,65 @@ internal static class Program
         WriteAsciiFile(Path.Combine(bundleRoot, "SETUP.txt"), BuildBundleSetupLines());
     }
 
+    private static void PreserveUniversalBundleManifest(string bundleRoot)
+    {
+        var manifestPath = Path.Combine(bundleRoot, "cloudgime-host-bundle.json");
+        if (!File.Exists(manifestPath))
+        {
+            return;
+        }
+
+        var manifest = JsonNode.Parse(File.ReadAllText(manifestPath))?.AsObject();
+        if (manifest is null || !string.Equals(manifest["bundleMode"]?.GetValue<string>(), "universal", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        WriteAsciiFile(Path.Combine(bundleRoot, "README.txt"), BuildUniversalBundleReadmeLines());
+        WriteAsciiFile(Path.Combine(bundleRoot, "SETUP.txt"), BuildUniversalBundleSetupLines());
+        ResetManagedPublicRouteSeed(bundleRoot);
+    }
+
+    private static string[] BuildUniversalBundleReadmeLines() =>
+    [
+        "Cloudgime Host universal installer bundle",
+        "",
+        "What is included:",
+        "- Cloudgime Host service and stream runtime",
+        "- Host Control for activation, pairing, diagnostics, and updates",
+        "- User-session agent for the interactive Windows desktop",
+        "- Sentinel Billing integration hooks",
+        "",
+        "Install on any supported Windows PC:",
+        "1. Run CloudgimeHostSetup.exe as Administrator.",
+        "2. Open Cloudgime Host Control.",
+        "3. Paste the Always-On Host activation license issued by CloudRental Admin.",
+        "4. Host Control assigns the PC identity, ports, route, and runtime credential.",
+        "5. Verify the Host status is Activated and Ready before accepting rentals.",
+        "",
+        "The installer does not contain a PC identity or a shared pairing key.",
+        "StarDesk remains an optional third-party application opened by the renter.",
+        "Public route and rental ownership are assigned by the control plane after activation."
+    ];
+
+    private static string[] BuildUniversalBundleSetupLines() =>
+    [
+        "CLOUDGIME HOST UNIVERSAL SETUP:",
+        "- Install the same CloudgimeHostSetup.exe on every rental PC.",
+        "- Open Host Control and paste the activation license for this PC.",
+        "- Do not copy host_activation_state.json or runtime credentials from another PC.",
+        "",
+        "ACTIVATION:",
+        "- PC identity and production port assignments come from the CloudRental activation license.",
+        "- The activation license is for the Host installation, not for a renter session.",
+        "- Rental claim and time entitlement are created later by the CloudRental website.",
+        "",
+        "RUNTIME:",
+        "- Host heartbeat and runtime credential recovery run automatically.",
+        "- Sentinel Billing remains the access gate on the PC desktop.",
+        "- Cloudgime does not automate or store StarDesk credentials."
+    ];
+
     private static string[] BuildReleaseLauncherLines() =>
     [
         "@echo off",
@@ -958,6 +1032,28 @@ internal static class Program
             {
                 File.Delete(stalePath);
             }
+        }
+    }
+
+    private static bool IsUniversalBundle(string bundleRoot)
+    {
+        var manifestPath = Path.Combine(bundleRoot, "cloudgime-host-bundle.json");
+        if (!File.Exists(manifestPath))
+        {
+            return false;
+        }
+
+        try
+        {
+            var manifest = JsonNode.Parse(File.ReadAllText(manifestPath))?.AsObject();
+            return string.Equals(
+                manifest?["bundleMode"]?.GetValue<string>(),
+                "universal",
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
         }
     }
 

@@ -1,0 +1,6 @@
+const {test}=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');
+const text=fs.readFileSync(path.join(__dirname,'../streamer/src/main.rs'),'utf8');
+const resize=text.slice(text.indexOf('    async fn resize_stream('),text.indexOf('    async fn mark_video_flow_ready_if_pending'));
+test('resize renegotiates upstream, never rewrites metadata as proof',()=>{assert.match(resize,/start_stream_locked\(next\)/);assert.doesNotMatch(resize,/sender\.setup_video|setup\.video = Some\(next_setup\)|request_idr_frame/);assert.match(resize,/stream_setup\.lock\(\)\.await\.video/)});
+test('resize, clarity and start share a reconfiguration transaction lock',()=>{for(const name of ['resize_stream','update_clarity','start_stream']){const x=text.slice(text.indexOf('    async fn '+name+'('));const body=x.slice(0,x.indexOf('\n    async fn ',5)>0?x.indexOf('\n    async fn ',5):undefined);assert.match(body,/live_clarity_update_lock\.lock\(\)\.await/);}assert.match(resize,/start_stream_locked\(current\)/)});
+test('clarity internal retries do not recursively acquire the same lock',()=>{const x=text.slice(text.indexOf('    async fn update_clarity('),text.indexOf('    // Start Moonlight Stream'));assert.doesNotMatch(x,/self\.start_stream\(/);assert.match(x,/self\.start_stream_locked\(next_settings/)});

@@ -184,9 +184,15 @@ struct RepairCredentials {
 }
 
 fn validate_scoped_secret(value: &str, prefix: &str, name: &str) -> Result<()> {
-    if !value.starts_with(prefix) || value.len() < 32 || value.len() > 256
-        || !value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    { bail!("repair response {name} format is invalid") }
+    if !value.starts_with(prefix)
+        || value.len() < 32
+        || value.len() > 256
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        bail!("repair response {name} format is invalid")
+    }
     Ok(())
 }
 
@@ -211,24 +217,39 @@ fn validate_repair_response(
     if body["runtimeToken"].as_str() != Some(runtime_token) {
         bail!("repair response runtime token is not canonical");
     }
-    let components = body.get("componentCredentials")
+    let components = body
+        .get("componentCredentials")
         .ok_or_else(|| anyhow!("repair response component credentials missing"))?;
-    let host_component = components.get("host_app")
+    let host_component = components
+        .get("host_app")
         .ok_or_else(|| anyhow!("repair response Host credential missing"))?;
-    if host_component.get("applicationActivationId").and_then(Value::as_str) != Some(state.host_id.as_str())
-        || host_component.get("runtimeToken").and_then(Value::as_str) != Some(runtime_token) {
+    if host_component
+        .get("applicationActivationId")
+        .and_then(Value::as_str)
+        != Some(state.host_id.as_str())
+        || host_component.get("runtimeToken").and_then(Value::as_str) != Some(runtime_token)
+    {
         bail!("repair response Host component binding mismatch");
     }
-    let sentinel = components.get("sentinel")
+    let sentinel = components
+        .get("sentinel")
         .ok_or_else(|| anyhow!("repair response Sentinel credential missing"))?;
-    let sentinel_activation_id = sentinel.get("applicationActivationId").and_then(Value::as_str)
+    let sentinel_activation_id = sentinel
+        .get("applicationActivationId")
+        .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("repair response Sentinel activation missing"))?;
-    let sentinel_runtime_credential = sentinel.get("runtimeCredentialRef").and_then(Value::as_str)
+    let sentinel_runtime_credential = sentinel
+        .get("runtimeCredentialRef")
+        .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("repair response Sentinel runtime credential missing"))?;
     if sentinel_activation_id != expected_sentinel_activation_id {
         bail!("repair response Sentinel activation binding mismatch");
     }
-    validate_scoped_secret(sentinel_runtime_credential, "cred_sentinel_", "Sentinel runtime credential")?;
+    validate_scoped_secret(
+        sentinel_runtime_credential,
+        "cred_sentinel_",
+        "Sentinel runtime credential",
+    )?;
     if required("renewalCredential")? != renewal.renewal_credential {
         bail!("repair response changed the stable renewal credential");
     }
@@ -322,11 +343,10 @@ pub fn repair_once(bundle_root: &Path, api_base_url: &str) -> Result<()> {
         .join("moonlight")
         .join("server")
         .join("host_activation_state.json");
-    let old_state_bytes = fs::read(&state_path).context("failed to read host activation state for repair")?;
-    let state: HostActivationStateFile = serde_json::from_slice(
-        &old_state_bytes,
-    )
-    .context("host activation state is not valid JSON")?;
+    let old_state_bytes =
+        fs::read(&state_path).context("failed to read host activation state for repair")?;
+    let state: HostActivationStateFile = serde_json::from_slice(&old_state_bytes)
+        .context("host activation state is not valid JSON")?;
     if state.machine_identity.trim().is_empty()
         || state.install_instance_id.trim().is_empty()
         || state.host_id.is_empty()
@@ -352,25 +372,39 @@ pub fn repair_once(bundle_root: &Path, api_base_url: &str) -> Result<()> {
         read_dpapi_secret(&envelope_path).context("failed to read host_app credential envelope")?;
     let mut envelope: Value = serde_json::from_slice(&envelope_bytes)
         .context("host_app credential envelope is not valid JSON")?;
-    if !envelope.is_object() { bail!("host_app credential envelope must be an object") }
+    if !envelope.is_object() {
+        bail!("host_app credential envelope must be an object")
+    }
     select_runtime_credential(&envelope, "host_app")?;
     let manifest: Value = serde_json::from_slice(&fs::read(root.join("manifest.json"))?)
         .context("Universal Node manifest is not valid JSON")?;
-    let sentinel_activation_id = manifest.get("components").and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("Universal Node components missing"))?.iter()
-        .filter(|component| component.get("componentType").and_then(Value::as_str) == Some("sentinel"))
-        .map(|component| component.get("applicationActivationId").and_then(Value::as_str).unwrap_or_default())
+    let sentinel_activation_id = manifest
+        .get("components")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Universal Node components missing"))?
+        .iter()
+        .filter(|component| {
+            component.get("componentType").and_then(Value::as_str) == Some("sentinel")
+        })
+        .map(|component| {
+            component
+                .get("applicationActivationId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+        })
         .collect::<Vec<_>>();
     if sentinel_activation_id.len() != 1 || sentinel_activation_id[0].is_empty() {
         bail!("Universal Node Sentinel binding is missing or ambiguous");
     }
     let sentinel_activation_id = sentinel_activation_id[0].to_string();
     let sentinel_path = root.join("sentinel.credential.dpapi");
-    let sentinel_bytes = read_dpapi_secret(&sentinel_path)
-        .context("failed to read Sentinel credential envelope")?;
+    let sentinel_bytes =
+        read_dpapi_secret(&sentinel_path).context("failed to read Sentinel credential envelope")?;
     let mut sentinel_envelope: Value = serde_json::from_slice(&sentinel_bytes)
         .context("Sentinel credential envelope is not valid JSON")?;
-    if !sentinel_envelope.is_object() { bail!("Sentinel credential envelope must be an object") }
+    if !sentinel_envelope.is_object() {
+        bail!("Sentinel credential envelope must be an object")
+    }
     select_runtime_credential(&sentinel_envelope, "sentinel")?;
 
     // Persist before network I/O, including on retry. Never send a newly-created
@@ -407,7 +441,8 @@ pub fn repair_once(bundle_root: &Path, api_base_url: &str) -> Result<()> {
             status.as_u16()
         );
     }
-    let credentials = validate_repair_response(&body, &state, &renewal_state, &sentinel_activation_id)?;
+    let credentials =
+        validate_repair_response(&body, &state, &renewal_state, &sentinel_activation_id)?;
 
     // Rotate both Universal Node runtime credentials. Device tokens, setup
     // license, machine identity and activation IDs remain stable.
@@ -416,13 +451,18 @@ pub fn repair_once(bundle_root: &Path, api_base_url: &str) -> Result<()> {
         value["runtimeToken"] = Value::String(token.to_string());
     };
     update_envelope(&mut envelope, &credentials.host_runtime_token);
-    update_envelope(&mut sentinel_envelope, &credentials.sentinel_runtime_credential);
+    update_envelope(
+        &mut sentinel_envelope,
+        &credentials.sentinel_runtime_credential,
+    );
     let old_host = envelope_bytes;
     let old_sentinel = sentinel_bytes;
     write_dpapi_secret(&envelope_path, &serde_json::to_vec(&envelope)?)?;
-    if let Err(error) = write_dpapi_secret(&sentinel_path, &serde_json::to_vec(&sentinel_envelope)?) {
+    if let Err(error) = write_dpapi_secret(&sentinel_path, &serde_json::to_vec(&sentinel_envelope)?)
+    {
         let _ = write_dpapi_secret(&envelope_path, &old_host);
-        return Err(error).context("failed to rotate Sentinel credential; Host credential rolled back");
+        return Err(error)
+            .context("failed to rotate Sentinel credential; Host credential rolled back");
     }
 
     // The node must prove liveness again before streams can hand off.
@@ -434,7 +474,8 @@ pub fn repair_once(bundle_root: &Path, api_base_url: &str) -> Result<()> {
     if let Err(error) = write_restricted_json(&state_path, &state_value) {
         let _ = write_dpapi_secret(&envelope_path, &old_host);
         let _ = write_dpapi_secret(&sentinel_path, &old_sentinel);
-        return Err(error).context("failed to update readiness cache; component credentials rolled back");
+        return Err(error)
+            .context("failed to update readiness cache; component credentials rolled back");
     }
 
     // Commit the local operation last. Any failure leaves the server operation
@@ -444,7 +485,9 @@ pub fn repair_once(bundle_root: &Path, api_base_url: &str) -> Result<()> {
         let _ = write_dpapi_secret(&envelope_path, &old_host);
         let _ = write_dpapi_secret(&sentinel_path, &old_sentinel);
         let _ = fs::write(&state_path, &old_state_bytes);
-        return Err(error).context("failed to commit repair journal; component credentials and state rolled back");
+        return Err(error).context(
+            "failed to commit repair journal; component credentials and state rolled back",
+        );
     }
     Ok(())
 }
@@ -465,28 +508,40 @@ fn provisioning_root(bundle_root: &Path) -> std::path::PathBuf {
 
 #[path = "universal_host_binding.rs"]
 mod universal_host_binding;
-pub use universal_host_binding::{UniversalHostBinding, CONTROL_PLANE as NODE_CONTROL_PLANE};
+pub use universal_host_binding::{CONTROL_PLANE as NODE_CONTROL_PLANE, UniversalHostBinding};
 
 // Loading an existing Node must never call load_or_create_machine_identity.
 pub fn universal_manifest_exists(bundle_root: &Path) -> bool {
     let root = provisioning_root(bundle_root);
-    ["manifest.json", "machine-identity.dpapi", RENEWAL_CREDENTIAL_FILE]
-        .iter().any(|name| root.join(name).exists())
+    [
+        "manifest.json",
+        "machine-identity.dpapi",
+        RENEWAL_CREDENTIAL_FILE,
+    ]
+    .iter()
+    .any(|name| root.join(name).exists())
 }
 
 pub fn read_universal_host_binding(bundle_root: &Path) -> Result<UniversalHostBinding> {
     let root = provisioning_root(bundle_root);
     let manifest_path = root.join("manifest.json");
     let metadata = fs::metadata(&manifest_path).context("NODE_MANIFEST_MISSING")?;
-    if !metadata.is_file() || metadata.len() > 65536 { bail!("NODE_MANIFEST_INVALID") }
+    if !metadata.is_file() || metadata.len() > 65536 {
+        bail!("NODE_MANIFEST_INVALID")
+    }
     let raw = fs::read(&manifest_path)?;
     let manifest: Value = serde_json::from_slice(&raw).context("NODE_MANIFEST_INVALID")?;
     let mut identity_bytes = read_dpapi_secret(&root.join("machine-identity.dpapi"))
         .context("NODE_IDENTITY_UNAVAILABLE")?;
     let identity = serde_json::from_slice::<Value>(&identity_bytes);
     identity_bytes.fill(0);
-    let binding = universal_host_binding::parse_manifest(&manifest, &identity.context("NODE_IDENTITY_INVALID")?)?;
-    if fs::read(&manifest_path)? != raw { bail!("NODE_MANIFEST_CHANGED") }
+    let binding = universal_host_binding::parse_manifest(
+        &manifest,
+        &identity.context("NODE_IDENTITY_INVALID")?,
+    )?;
+    if fs::read(&manifest_path)? != raw {
+        bail!("NODE_MANIFEST_CHANGED")
+    }
     Ok(binding)
 }
 
@@ -980,7 +1035,7 @@ fn write_restricted_json(path: &Path, value: &Value) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn write_dpapi_secret(path: &Path, plaintext: &[u8]) -> Result<()> {
+pub(crate) fn write_dpapi_secret(path: &Path, plaintext: &[u8]) -> Result<()> {
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::{
         Foundation::LocalFree,
@@ -1174,7 +1229,10 @@ mod credential_tests {
     #[test]
     fn legacy_sentinel_credential_ref_is_repairable_but_not_a_host_runtime_token() {
         let value = serde_json::json!({"componentType":"sentinel", "credentialRef":"legacy-sentinel-reference"});
-        assert_eq!(select_runtime_credential(&value, "sentinel").unwrap(), "legacy-sentinel-reference");
+        assert_eq!(
+            select_runtime_credential(&value, "sentinel").unwrap(),
+            "legacy-sentinel-reference"
+        );
         assert!(select_runtime_credential(&value, "host_app").is_err());
     }
     #[test]
@@ -1277,13 +1335,18 @@ mod credential_tests {
                 "installInstanceId": "install-fixture"
             }
         });
-        let credentials = validate_repair_response(
-            &response, &host, &renewal, "act-sentinel-fixture"
-        ).unwrap();
+        let credentials =
+            validate_repair_response(&response, &host, &renewal, "act-sentinel-fixture").unwrap();
         assert_eq!(credentials.generation, 3);
-        assert_eq!(credentials.host_runtime_token, "cgha_fixture_runtime_token_abcdefghijklmnopqrstuvwxyz");
+        assert_eq!(
+            credentials.host_runtime_token,
+            "cgha_fixture_runtime_token_abcdefghijklmnopqrstuvwxyz"
+        );
         assert_eq!(credentials.sentinel_activation_id, "act-sentinel-fixture");
-        assert_eq!(credentials.sentinel_runtime_credential, "cred_sentinel_fixture_runtime_abcdefghijklmnopqrstuvwxyz");
+        assert_eq!(
+            credentials.sentinel_runtime_credential,
+            "cred_sentinel_fixture_runtime_abcdefghijklmnopqrstuvwxyz"
+        );
         for (path, bad) in [
             ("hostId", "other-host"),
             ("sentinelPcId", "22"),
@@ -1294,19 +1357,30 @@ mod credential_tests {
             let mut changed = response.clone();
             changed[path] = Value::String(bad.into());
             assert!(
-                validate_repair_response(&changed, &host, &renewal, "act-sentinel-fixture").is_err(),
+                validate_repair_response(&changed, &host, &renewal, "act-sentinel-fixture")
+                    .is_err(),
                 "{path}"
             );
         }
         let mut wrong_binding = response.clone();
         wrong_binding["binding"]["machineIdentity"] = Value::String("other-machine".into());
-        assert!(validate_repair_response(&wrong_binding, &host, &renewal, "act-sentinel-fixture").is_err());
+        assert!(
+            validate_repair_response(&wrong_binding, &host, &renewal, "act-sentinel-fixture")
+                .is_err()
+        );
         let mut wrong_generation = response.clone();
         wrong_generation["repairGeneration"] = Value::Number(4.into());
-        assert!(validate_repair_response(&wrong_generation, &host, &renewal, "act-sentinel-fixture").is_err());
+        assert!(
+            validate_repair_response(&wrong_generation, &host, &renewal, "act-sentinel-fixture")
+                .is_err()
+        );
         let mut wrong_sentinel = response.clone();
-        wrong_sentinel["componentCredentials"]["sentinel"]["applicationActivationId"] = Value::String("other-sentinel".into());
-        assert!(validate_repair_response(&wrong_sentinel, &host, &renewal, "act-sentinel-fixture").is_err());
+        wrong_sentinel["componentCredentials"]["sentinel"]["applicationActivationId"] =
+            Value::String("other-sentinel".into());
+        assert!(
+            validate_repair_response(&wrong_sentinel, &host, &renewal, "act-sentinel-fixture")
+                .is_err()
+        );
     }
 
     #[test]
@@ -1359,7 +1433,7 @@ mod credential_tests {
 }
 
 #[cfg(windows)]
-fn read_dpapi_secret(path: &Path) -> Result<Vec<u8>> {
+pub(crate) fn read_dpapi_secret(path: &Path) -> Result<Vec<u8>> {
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::{
         Foundation::LocalFree,
@@ -1388,12 +1462,12 @@ fn read_dpapi_secret(path: &Path) -> Result<Vec<u8>> {
 }
 
 #[cfg(not(windows))]
-fn read_dpapi_secret(_path: &Path) -> Result<Vec<u8>> {
+pub(crate) fn read_dpapi_secret(_path: &Path) -> Result<Vec<u8>> {
     Err(anyhow!("DPAPI provisioning is supported only on Windows"))
 }
 
 #[cfg(not(windows))]
-fn write_dpapi_secret(_path: &Path, _plaintext: &[u8]) -> Result<()> {
+pub(crate) fn write_dpapi_secret(_path: &Path, _plaintext: &[u8]) -> Result<()> {
     Err(anyhow!("DPAPI provisioning is supported only on Windows"))
 }
 

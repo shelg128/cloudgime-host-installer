@@ -115,13 +115,15 @@ body.stream .stream-native-cursor {
     position: fixed;
     top: 0;
     left: 0;
-    width: 24px;
-    height: 24px;
+    width: 32px;
+    height: 32px;
     pointer-events: none;
     opacity: 0;
-    z-index: calc(var(--stream-z-quickpad, 3150) - 10);
+    z-index: 10000 !important;
     will-change: transform, opacity;
-    transition: opacity 220ms ease;
+    transition: opacity 140ms ease;
+    transform-origin: 0 0;
+    contain: layout style paint;
     filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.38));
 }
 
@@ -156,9 +158,7 @@ body.stream .stream-native-cursor::after {
 }
 
 html.stream .stream-native-cursor[data-visible="true"],
-body.stream .stream-native-cursor[data-visible="true"] {
-    opacity: 1;
-}
+body.stream .stream-native-cursor[data-visible="true"] {`r`n    display: block !important;`r`n    visibility: visible !important;`r`n    opacity: 1 !important;`r`n    z-index: 2147483647 !important;`r`n}
 
 html.stream .stream-native-cursor[data-pressed="true"]::after,
 body.stream .stream-native-cursor[data-pressed="true"]::after {
@@ -167,10 +167,7 @@ body.stream .stream-native-cursor[data-pressed="true"]::after {
     border-color: rgba(123, 214, 183, 0.68);
 }
 
-html.stream .stream-native-cursor,
-body.stream .stream-native-cursor {
-    display: none !important;
-}
+
 
 html.stream-blank-canvas .video-stream,
 body.stream-blank-canvas .video-stream,

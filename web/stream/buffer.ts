@@ -8,15 +8,17 @@ export class ByteBuffer {
     private position: number = 0
     private limit: number = 0
     private littleEndian: boolean
-    private buffer: Uint8Array
+    private buffer: Uint8Array<ArrayBuffer>
 
     constructor(length?: number, littleEndian?: boolean)
-    constructor(buffer: Uint8Array, littleEndian?: boolean)
-    constructor(value?: number | Uint8Array, littleEndian?: boolean) {
+    constructor(buffer: Uint8Array<ArrayBufferLike>, littleEndian?: boolean)
+    constructor(value?: number | Uint8Array<ArrayBufferLike>, littleEndian?: boolean) {
         this.littleEndian = littleEndian ?? false
 
         if (value instanceof Uint8Array) {
-            this.buffer = value
+            // Clone incoming views so browser APIs receive a real ArrayBuffer,
+            // not a possibly SharedArrayBuffer-backed view.
+            this.buffer = new Uint8Array(value)
             this.limit = value.length
         } else {
             this.buffer = new Uint8Array(value ?? 0)
@@ -231,7 +233,7 @@ export class ByteBuffer {
         return this.position
     }
 
-    getRemainingBuffer(): Uint8Array {
+    getRemainingBuffer(): Uint8Array<ArrayBuffer> {
         return this.buffer.slice(this.position, this.limit)
     }
 }

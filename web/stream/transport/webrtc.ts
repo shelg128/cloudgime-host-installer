@@ -1,3 +1,4 @@
+import { candidateAllowed, filterRouteSdp, readExplicitStreamRoute } from "../route_policy.js";
 import { StreamSignalingMessage, TransportChannelId } from "../../api_bindings.js";
 import { Logger } from "../log.js";
 import { StatValue } from "../stats.js";
@@ -318,7 +319,7 @@ export class WebRTCTransport implements Transport {
     private microphoneLevelContext: AudioContext | null = null
     private microphoneLevelSource: MediaStreamAudioSourceNode | null = null
     private microphoneLevelAnalyser: AnalyserNode | null = null
-    private microphoneLevelData: Uint8Array | null = null
+    private microphoneLevelData: Uint8Array<ArrayBuffer> | null = null
     private lastMicrophoneOutboundSnapshot: { timestampMs: number, bytesSent: number | null } | null = null
     private lastMicrophoneOutboundStats: TransportMicrophoneOutboundStats = { ...DEFAULT_MICROPHONE_OUTBOUND_STATS }
 
@@ -353,7 +354,7 @@ export class WebRTCTransport implements Transport {
                     continue
                 }
 
-                await this.peer.setRemoteDescription(remoteDescription)
+                await this.peer.setRemoteDescription({ ...remoteDescription, sdp: filterRouteSdp(readExplicitStreamRoute(), remoteDescription.sdp ?? "") })
 
                 if (remoteDescription.type == "offer") {
                     await this.peer.setLocalDescription()
@@ -1049,6 +1050,7 @@ export class WebRTCTransport implements Transport {
         if (event.candidate) {
             const candidate = event.candidate.toJSON()
             const candidateText = candidate.candidate ?? ""
+            if (!candidateAllowed(readExplicitStreamRoute(), candidateText)) return
             const candidateType = this.parseCandidateType(candidateText)
             const candidateAddress = getCandidateAddress(candidate)
             this.localIceCandidateCount += 1
@@ -1153,6 +1155,7 @@ export class WebRTCTransport implements Transport {
     }
 
     private async addIceCandidate(candidate: RTCIceCandidateInit, skipPublicHostDefer = false) {
+        if (!candidateAllowed(readExplicitStreamRoute(), candidate.candidate ?? "")) return
         this.logger?.debug(`Received ice candidate: ${candidate.candidate}`)
 
         const address = getCandidateAddress(candidate)
@@ -1260,7 +1263,17 @@ export class WebRTCTransport implements Transport {
         this.recoveryActivityExtensions = 0
     }
 
+    private isMobileTouchClient(): boolean {
+        const touchPoints = Number(navigator.maxTouchPoints || 0)
+        const coarsePointer = typeof window.matchMedia == "function"
+            && window.matchMedia("(pointer: coarse)").matches
+        return touchPoints > 0 || coarsePointer
+    }
     private armRecoveryTimeout(reason: "failed" | "disconnected") {
+        if (this.isMobileTouchClient()) {
+            this.logger?.debug(`Keeping mobile WebRTC peer alive after ${reason}; reconnect is manual`)
+            return
+        }
         if (!this.peer || this.closeRequested || !this.wasConnected) {
             return
         }

@@ -53,6 +53,16 @@ internal static class Program
         "duplicate recovery",
         "capture host belum bisa disegarkan"
     ];
+    private static readonly string[] TransientStreamStartupHints =
+    [
+        "capture_prestart_runtime_refresh",
+        "capture_prestart_runtime_ready",
+        "start_stream",
+        "golden_path",
+        "display_prepare",
+        "stream display",
+        "stream_start"
+    ];
     private static readonly string[] MttVddControllerHints =
     [
         "virtual display driver",
@@ -557,6 +567,15 @@ internal static class Program
             return new HostHealthAssessment(true, "ready", "host_ready", HostSelfHealAction.None);
         }
 
+        if (IsTransientStreamStartup(snapshot))
+        {
+            return new HostHealthAssessment(
+                false,
+                "stream_startup_grace",
+                $"stream_startup_grace:{FirstNonEmpty(snapshot.LifecycleReason, snapshot.LifecyclePhase)}",
+                HostSelfHealAction.None);
+        }
+
         if (snapshot.WithinStartupGrace
             && (snapshot.LocalHttpReady
                 || snapshot.SunshineReady
@@ -623,6 +642,36 @@ internal static class Program
         }
 
         return new HostHealthAssessment(false, "runtime_not_ready", "runtime_not_ready", HostSelfHealAction.RestartRuntime);
+    }
+
+    private static bool IsTransientStreamStartup(HostHealthSnapshot snapshot)
+    {
+        var phase = snapshot.LifecyclePhase ?? string.Empty;
+        if (!string.Equals(phase, "starting", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(phase, "recovering", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (snapshot.HostServiceState != "running" || !snapshot.LocalHttpReady)
+        {
+            return false;
+        }
+
+        if (snapshot.Supervisor.UpdatedAtUnixMs is not long updatedAt
+            || snapshot.ObservedAtUnixMs - updatedAt > (long)RecentlyActiveStreamWindow.TotalMilliseconds)
+        {
+            return false;
+        }
+
+        var reason = FirstNonEmpty(snapshot.LifecycleReason, snapshot.Supervisor.LastFailureRecoveryReason);
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            return false;
+        }
+
+        var normalized = reason.Trim().ToLowerInvariant();
+        return TransientStreamStartupHints.Any(hint => normalized.Contains(hint, StringComparison.Ordinal));
     }
 
     private static HostSelfHealAction ChooseEffectiveAction(

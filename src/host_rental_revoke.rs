@@ -1,5 +1,6 @@
-//! Backend-authenticated revocation only. NOT an OS-cleanup receipt producer.
-//! Polling never ACKs commands or releases a PC. The worker is disabled by default.
+//! Backend-authenticated revocation and exact-bound HOST receipt.
+//! This receipt covers registered CloudGime streams; Sentinel independently
+//! proves renter process/data cleanup. Only the backend releases the claim.
 use crate::{
     app::App,
     provisioning::{self, UniversalHostBinding},
@@ -10,6 +11,7 @@ use openssl::{hash::MessageDigest, pkey::PKey, sign::Signer};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    fs,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -259,6 +261,44 @@ async fn poll(
     parsed
 }
 
+// Ported from Universal Release: preserve the deployed cleanup protocol in
+// streaming candidates. Never call this before exact-scope revocation succeeds.
+async fn send_receipt(client:&reqwest::Client,root:&Path,pinned:&Context,verified:&VerifiedRevokeCommand)->Result<(),&'static str>{
+    let c=verified.command();let mut id=c.digest()?;id[6]=(id[6]&0x0f)|0x40;id[8]=(id[8]&0x3f)|0x80;
+    let receipt_id=uuid::Uuid::from_bytes(id[..16].try_into().map_err(|_|"HOST_RECEIPT_ID_FAILED")?).to_hyphenated().to_string();
+    let fresh=serde_json::json!({"schemaVersion":1,"source":"HOST","receiptId":receipt_id,
+      "operationId":c.operation_id,"sessionId":c.session_id,"prepareOperationId":c.prepare_operation_id,
+      "handoffBindingId":c.handoff_binding_id,"nativeSessionId":c.native_session_id,"claimId":c.claim_id,
+      "pcId":c.pc_id,"userId":c.user_id,"applicationActivationId":c.application_activation_id,
+      "commandId":c.command_id,"challenge":c.challenge,"observedAt":Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis,true),
+      "proof":{"streamTerminated":true,"activeRentalStreams":0,"inspectionDigest":hex::encode(c.digest()?)}});
+    let receipt_path=root.join("moonlight").join("server").join("cleanup-receipts").join(format!("{}.dpapi",c.operation_id));
+    let receipt:serde_json::Value=if receipt_path.exists(){
+      serde_json::from_slice(&provisioning::read_dpapi_secret(&receipt_path).map_err(|_|"HOST_RECEIPT_STORAGE_INVALID")?)
+        .map_err(|_|"HOST_RECEIPT_STORAGE_INVALID")?
+    }else{
+      fs::create_dir_all(receipt_path.parent().ok_or("HOST_RECEIPT_PATH_INVALID")?).map_err(|_|"HOST_RECEIPT_STORAGE_FAILED")?;
+      provisioning::write_dpapi_secret(&receipt_path,&serde_json::to_vec(&fresh).map_err(|_|"HOST_RECEIPT_ENCODING_FAILED")?)
+        .map_err(|_|"HOST_RECEIPT_STORAGE_FAILED")?; fresh.clone()
+    };
+    for key in ["operationId","sessionId","prepareOperationId","handoffBindingId","nativeSessionId","claimId","pcId","userId","applicationActivationId","commandId","challenge","proof"]{
+      if receipt.get(key)!=fresh.get(key){return Err("HOST_RECEIPT_REPLAY_CONFLICT")}
+    }
+    let current=context(root)?;if current.binding!=pinned.binding||current.credential!=pinned.credential{return Err("HOST_RECEIPT_BINDING_CHANGED")}
+    let endpoint=format!("{}/api/v1/host/rental-cleanup-receipt",provisioning::NODE_CONTROL_PLANE);
+    let mut response=client.post(&endpoint).bearer_auth(&pinned.credential).json(&receipt).send().await.map_err(|_|"HOST_RECEIPT_NETWORK_UNAVAILABLE")?;
+    if response.status()!=reqwest::StatusCode::OK||response.url().as_str()!=endpoint{return Err("HOST_RECEIPT_REJECTED")}
+    let mut bytes=Vec::new();
+    while let Some(chunk)=response.chunk().await.map_err(|_|"HOST_RECEIPT_RESPONSE_INVALID")? {
+        if bytes.len()+chunk.len()>MAX_BODY{return Err("HOST_RECEIPT_RESPONSE_SIZE")}
+        bytes.extend_from_slice(&chunk);
+    }
+    let v:serde_json::Value=serde_json::from_slice(&bytes).map_err(|_|"HOST_RECEIPT_RESPONSE_INVALID")?;
+    if v.get("ok")!=Some(&serde_json::Value::Bool(true))||v.get("operationId").and_then(|x|x.as_str())!=Some(c.operation_id.as_str())
+      ||v.get("cleanupComplete").and_then(|x|x.as_bool()).is_none()||v.get("claimReleased").and_then(|x|x.as_bool()).is_none(){return Err("HOST_RECEIPT_RESPONSE_INVALID")}
+    let current=context(root)?;if current.binding!=pinned.binding||current.credential!=pinned.credential{return Err("HOST_RECEIPT_BINDING_CHANGED")} Ok(())
+}
+
 pub(crate) struct RevokeWorker(Option<tokio::task::JoinHandle<()>>);
 impl Drop for RevokeWorker {
     fn drop(&mut self) {
@@ -296,10 +336,9 @@ async fn run(app: Data<App>, root: PathBuf) -> Result<(), &'static str> {
                     last_poll_state = Some("HOST_REVOKE_POLL_AUTHENTICATED");
                 }
                 for command in commands {
-                    // No receipt is sent here: owned-child exit is not complete
-                    // Sunshine/native-direct/alternative-remote cleanup evidence.
-                    if let Err(code) = app.revoke_backend_rental_stream(&command).await {
-                        log::warn!("{code}");
+                    match app.revoke_backend_rental_stream(&command).await {
+                        Ok(_) => if let Err(code) = send_receipt(&client, &root, &pinned, &command).await { log::warn!("{code}"); },
+                        Err(code) => log::warn!("{code}"),
                     }
                 }
             }

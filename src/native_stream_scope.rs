@@ -190,6 +190,27 @@ impl NativeStreamScope {
     // Caller holds this permit from BEFORE spawning until ownership is attached.
     // stop() marks cancellation first, then waits for the permit before inspecting
     // children. A cancelled launch cannot be reported stopped while unregistered.
+    /// Bounded grace after Stop; revoke cancels it immediately and ownership is retained.
+    pub(crate) async fn wait_owned_children_exit(&self, max_wait: Duration) -> bool {
+        if self.is_cancelled() { return false; }
+        let observe = async {
+            loop {
+                let children = self.children.lock().await.clone();
+                let mut all_exited = true;
+                for child in children {
+                    if !matches!(child.lock().await.try_wait(), Ok(Some(_))) { all_exited = false; }
+                }
+                if all_exited { return true; }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = self.cancelled() => false,
+            result = timeout(max_wait, observe) => result.unwrap_or(false),
+        }
+    }
+
     pub(crate) async fn stop_owned_children(&self) -> Result<usize, String> {
         self.cancelled.send_replace(true);
         let count = timeout(STOP_TIMEOUT, self.stop_children())

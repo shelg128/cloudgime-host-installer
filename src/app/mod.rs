@@ -28,6 +28,7 @@ use crate::app::{
     user::{Admin, AuthenticatedUser, Role, User, UserId},
 };
 
+mod claim_revoke;
 pub mod auth;
 pub mod host;
 pub mod password;
@@ -982,9 +983,14 @@ impl App {
 
         let now = unix_time_ms_now();
         let stream_ticket = format!("mlnatstream_{}", Uuid::new_v4().to_simple());
-        let expires_at_unix_ms = launch_record.stream_authority_expires_at_unix_ms
-            .map_or(now + STREAM_TICKET_TTL_MS, |cap| cap.min(now + STREAM_TICKET_TTL_MS));
-        if expires_at_unix_ms <= now { return Err(AppError::AndroidNativeStreamTicketExpired); }
+        let expires_at_unix_ms = launch_record
+            .stream_authority_expires_at_unix_ms
+            .map_or(now + STREAM_TICKET_TTL_MS, |cap| {
+                cap.min(now + STREAM_TICKET_TTL_MS)
+            });
+        if expires_at_unix_ms <= now {
+            return Err(AppError::AndroidNativeStreamTicketExpired);
+        }
         let record = AndroidNativeStreamTicketRecord {
             stream_ticket: stream_ticket.clone(),
             authority_expires_at_unix_ms: launch_record.stream_authority_expires_at_unix_ms,
@@ -1171,29 +1177,44 @@ impl App {
         let lifecycle = self.inner.android_native_session_lifecycle.read().await;
         let mut tickets = self.inner.android_native_stream_tickets.write().await;
         tickets.retain(|_, value| value.expires_at_unix_ms > now);
-        let parent = tickets.get(parent_ticket).cloned()
+        let parent = tickets
+            .get(parent_ticket)
+            .cloned()
             .ok_or(AppError::AndroidNativeStreamTicketNotFound)?;
-        let binding = parent.rental_binding.as_ref()
+        let binding = parent
+            .rental_binding
+            .as_ref()
             .ok_or(AppError::AndroidNativeStreamTicketBindingMismatch)?;
         if parent.consumed_at_unix_ms.is_some() {
             return Err(AppError::AndroidNativeStreamTicketConsumed);
         }
-        if expected_claim_id.is_empty() || expected_claim_id.trim() != expected_claim_id
+        if expected_claim_id.is_empty()
+            || expected_claim_id.trim() != expected_claim_id
             || expected_claim_id.chars().any(char::is_control)
-            || parent.host_id != host_id || parent.app_id != app_id
+            || parent.host_id != host_id
+            || parent.app_id != app_id
             || binding.claim_id != expected_claim_id
         {
             return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
         }
-        if !native_binding_active(&lifecycle, &parent.session_id, &parent.token_id, parent.user_id) {
+        if !native_binding_active(
+            &lifecycle,
+            &parent.session_id,
+            &parent.token_id,
+            parent.user_id,
+        ) {
             return Err(AppError::AndroidNativeSessionInactive);
         }
-        let state = lifecycle.get(&parent.session_id)
+        let state = lifecycle
+            .get(&parent.session_id)
             .ok_or(AppError::AndroidNativeSessionInactive)?;
         if state.rental_binding.as_ref() != Some(binding) {
             return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
         }
-        let siblings = tickets.values().filter(|ticket| ticket.session_id == parent.session_id).count();
+        let siblings = tickets
+            .values()
+            .filter(|ticket| ticket.session_id == parent.session_id)
+            .count();
         if siblings >= MAX_ROOT_TICKET_CAPABILITIES || tickets.len() >= 4096 {
             return Err(AppError::AndroidNativeTicketCapacity);
         }
@@ -1257,8 +1278,11 @@ impl App {
             host_id: source.host_id,
             app_id: source.app_id,
             issued_at_unix_ms: now,
-            expires_at_unix_ms: source.authority_expires_at_unix_ms
-                .map_or(now + STREAM_TICKET_TTL_MS, |cap| cap.min(now + STREAM_TICKET_TTL_MS)),
+            expires_at_unix_ms: source
+                .authority_expires_at_unix_ms
+                .map_or(now + STREAM_TICKET_TTL_MS, |cap| {
+                    cap.min(now + STREAM_TICKET_TTL_MS)
+                }),
             consumed_at_unix_ms: None,
             rental_binding: source.rental_binding.clone(),
         };

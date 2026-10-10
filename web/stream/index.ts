@@ -1,3 +1,4 @@
+import { readExplicitStreamRoute, routeIceConfiguration } from "./route_policy.js";
 import { Api } from "../api.js"
 import { App, ConnectionStatus, DisplayModePhase, GeneralClientMessage, GeneralServerMessage, HostMouseEmulationMode, StreamCapabilities, StreamClientMessage, StreamServerMessage, TransportChannelId, VideoFlowPhase } from "../api_bindings.js"
 import { showErrorPopup } from "../component/error.js"
@@ -71,40 +72,7 @@ export function shouldUseDynamicDeviceMatch(settings: Settings): boolean {
 }
 
 function detectStreamModuleBuildLabel(): string {
-    const extractVersion = (source: string): string | null => {
-        const match = source.match(/(?:\d{8})?(q\d+)/i) ?? source.match(/[?&]v=([^&]+)/i)
-        return match?.[1]?.toLowerCase() ?? null
-    }
-
-    const versionSources: string[] = []
-
-    if (typeof import.meta?.url == "string" && import.meta.url.length > 0) {
-        versionSources.push(import.meta.url)
-    }
-
-    if (typeof performance != "undefined" && typeof performance.getEntriesByType == "function") {
-        const resourceEntries = performance.getEntriesByType("resource")
-        for (const entry of resourceEntries) {
-            if ("name" in entry && typeof entry.name == "string" && /\/stream(\/|\.js)/i.test(entry.name)) {
-                versionSources.push(entry.name)
-            }
-        }
-    }
-
-    for (const script of Array.from(document.scripts)) {
-        if (script.src) {
-            versionSources.push(script.src)
-        }
-    }
-
-    for (const source of versionSources) {
-        const version = extractVersion(source)
-        if (version) {
-            return version
-        }
-    }
-
-    return "unknown"
+    return "20260902-web-stream-010"
 }
 
 function roundStreamDimension(value: number, minimum: number): number {
@@ -131,7 +99,26 @@ function sizesEqual(a: [number, number], b: [number, number]): boolean {
 function isTouchMobileLikeClient(): boolean {
     const touchPoints = Number(navigator.maxTouchPoints || 0)
     const userAgent = String(navigator.userAgent || "")
-    return touchPoints > 0 && /(Android|iPhone|iPad|Mobile)/i.test(userAgent)
+    const coarsePointer = typeof window !== "undefined"
+        && typeof window.matchMedia === "function"
+        && window.matchMedia("(pointer: coarse)").matches
+    return touchPoints > 0 && (/(Android|iPhone|iPad|Mobile)/i.test(userAgent) || coarsePointer)
+}
+
+export function clampMobileWebRtcSize(size: [number, number]): [number, number] {
+    if (!isTouchMobileLikeClient()) {
+        return size
+    }
+
+    const width = Math.max(1, Number(size[0]) || 1)
+    const height = Math.max(1, Number(size[1]) || 1)
+    const longEdge = Math.max(width, height)
+    const shortEdge = Math.min(width, height)
+    const scale = Math.min(1, 1920 / longEdge, 1080 / shortEdge)
+    const rounded = (value: number) => Math.max(8, Math.round((value * scale) / 8) * 8)
+    return width >= height
+        ? [rounded(width), rounded(height)]
+        : [rounded(width), rounded(height)]
 }
 
 function shouldPreferCanvasRendererOnTouchMobile(): boolean {
@@ -927,7 +914,7 @@ export class Stream implements Component {
     }
 
     async startConnection() {
-        const configuredTransport = this.getConfiguredTransport()
+        const configuredTransport = readExplicitStreamRoute() ? "webrtc" : this.getConfiguredTransport()
         this.debugLog(`Using transport: ${configuredTransport}`)
 
         const shutdownReason = configuredTransport == "websocket"
@@ -942,12 +929,9 @@ export class Stream implements Component {
         }
 
         if (shutdownReason == "failednoconnect" && configuredTransport == "webrtc") {
-            const icePlan = this.iceServers ? this.createWebRtcIcePlan(this.iceServers) : null
-            const failedMessage = icePlan?.hasTurnServers
-                ? "Failed to establish a WebRTC connection. Direct path was retried 3 times and TURN relay fallback also failed."
-                : WEBSOCKET_RELAY_ENABLED
-                    ? "Failed to establish a direct WebRTC connection. WebSocket relay fallback is disabled unless you explicitly choose it in the settings."
-                    : "Failed to establish a direct WebRTC connection. This build is locked to WebRTC-only, and no TURN relay server is available for fallback."
+            const failedMessage = readExplicitStreamRoute() == "relay"
+                ? "Koneksi Relay VPS tidak tersedia."
+                : "Koneksi Direct tidak tersedia. Kembali ke lobby untuk Coba Relay VPS."
 
             this.debugLog(failedMessage, { type: "fatalDescription" })
         } else if (shutdownReason == "failed" && configuredTransport == "webrtc") {
@@ -1118,113 +1102,41 @@ export class Stream implements Component {
         return true
     }
 
-    private getIceServerUrls(server: RTCIceServer): Array<string> {
-        if (Array.isArray(server.urls)) {
-            return server.urls
-        }
-        if (typeof server.urls == "string") {
-            return [server.urls]
-        }
-
-        return []
-    }
-
-    private isTurnIceUrl(url: string): boolean {
-        return /^turns?:/i.test(url)
-    }
-
-    private createWebRtcIcePlan(iceServers: Array<RTCIceServer>): {
-        directIceServers: Array<RTCIceServer>
-        fullIceServers: Array<RTCIceServer>
-        hasTurnServers: boolean
-    } {
-        const directIceServers: Array<RTCIceServer> = []
-        let hasTurnServers = false
-
-        for (const server of iceServers) {
-            const urls = this.getIceServerUrls(server)
-            if (urls.length == 0) {
-                continue
-            }
-
-            const directUrls = urls.filter((url) => !this.isTurnIceUrl(url))
-            if (directUrls.length != urls.length) {
-                hasTurnServers = true
-            }
-            if (directUrls.length == 0) {
-                continue
-            }
-
-            directIceServers.push({
-                ...server,
-                urls: directUrls
-            })
-        }
-
-        return {
-            directIceServers,
-            fullIceServers: iceServers,
-            hasTurnServers
-        }
-    }
-
     private async tryConfiguredWebRTCTransport(): Promise<TransportShutdown> {
-        if (!this.iceServers) {
-            this.debugLog(`Failed to try WebRTC Transport: no ice servers available`)
+        if (!this.iceServers) return "failednoconnect"
+        const route = readExplicitStreamRoute()
+        if (!route) {
+            this.debugLog("Pilih Direct P2P atau Relay VPS di web/lobby.", { type: "fatalDescription" })
             return "failednoconnect"
         }
-
-        const icePlan = this.createWebRtcIcePlan(this.iceServers)
-        const maxDirectAttempts = icePlan.directIceServers.length > 0 ? 3 : 0
-
-        if (maxDirectAttempts > 0) {
-            const directUrls = icePlan.directIceServers
-                .map((server) => this.getIceServerUrls(server))
-                .reduce((list: Array<string>, urls) => list.concat(urls), [])
-
-            this.debugLog(`WebRTC connection plan: try direct path up to ${maxDirectAttempts} times${icePlan.hasTurnServers ? ", then allow TURN relay fallback." : "."}`)
-            this.debugLog(`Direct-only ICE servers for initial attempts: ${createPrettyList(directUrls)}`)
+        const configuration = routeIceConfiguration(this.iceServers, route)
+        if (route == "relay" && configuration.iceServers?.length == 0) {
+            this.debugLog("Koneksi Relay VPS tidak tersedia.", { type: "fatalDescription" })
+            return "failednoconnect"
         }
-
-        for (let attempt = 1; attempt <= maxDirectAttempts; attempt++) {
-            this.debugLog(`${attempt == 1 ? "Trying" : "Retrying"} direct WebRTC path (attempt ${attempt}/${maxDirectAttempts})`)
-
-            const result = await this.tryWebRTCTransport(icePlan.directIceServers)
-            if (result != "failednoconnect") {
-                return result
-            }
+        const attempts = route == "direct" ? 3 : 1
+        this.debugLog(`Explicit route: ${route}. No automatic fallback.`)
+        for (let attempt = 1; attempt <= attempts; attempt++) {
+            const result = await this.tryWebRTCTransport(configuration.iceServers ?? [], configuration.iceTransportPolicy)
+            if (result != "failednoconnect") return result
         }
-
-        if (icePlan.hasTurnServers) {
-            this.debugLog(`Retrying WebRTC with TURN relay fallback after ${maxDirectAttempts} failed direct attempts.`)
-            return await this.tryWebRTCTransport(icePlan.fullIceServers)
-        }
-
-        if (maxDirectAttempts == 0) {
-            this.debugLog("No direct-only ICE servers were available. Trying the configured WebRTC ICE server list as-is.")
-            return await this.tryWebRTCTransport(icePlan.fullIceServers)
-        }
-
         return "failednoconnect"
     }
 
-    private async tryWebRTCTransport(iceServers: Array<RTCIceServer>): Promise<TransportShutdown> {
+    private async tryWebRTCTransport(iceServers: Array<RTCIceServer>, iceTransportPolicy: RTCIceTransportPolicy = "all"): Promise<TransportShutdown> {
         this.debugLog("Trying WebRTC transport")
 
         this.sendWsMessage({
             SetTransport: "WebRTC"
         })
 
-        if (!iceServers || iceServers.length == 0) {
-            this.debugLog(`Failed to try WebRTC Transport: no ice servers available`)
-            return "failednoconnect"
-        }
 
         const transport = new WebRTCTransport(this.logger)
         transport.onsendmessage = (message) => this.sendWsMessage({ WebRtc: message })
 
         await transport.initPeer({
-            iceServers
+            iceServers,
+            iceTransportPolicy
         })
         this.setTransport(transport)
 
@@ -1446,14 +1358,16 @@ export class Stream implements Component {
     }
     private buildStartStreamMessage(videoCodecSupport: VideoCodecSupport, settings: Settings = this.settings): StreamClientMessage {
         const packetSize = getSafeStartPacketSize(settings)
-        const hostMouseEmulation = this.getHostMouseEmulationMode()
+        // A touch client uses one absolute coordinate space for the visual cursor and Host input.
+        const hostMouseEmulation = isTouchMobileLikeClient() ? "relativeNative" : this.getHostMouseEmulationMode()
+        const requestedSize = clampMobileWebRtcSize(this.streamerSize)
         return {
             StartStream: {
                 bitrate: settings.bitrate,
                 packet_size: packetSize,
                 fps: settings.fps,
-                width: this.streamerSize[0],
-                height: this.streamerSize[1],
+                width: requestedSize[0],
+                height: requestedSize[1],
                 adaptive_bitrate: settings.adaptiveBitrate !== false,
                 adaptive_fps: settings.adaptiveBitrate !== false,
                 host_mouse_emulation: hostMouseEmulation,
@@ -1521,6 +1435,7 @@ export class Stream implements Component {
     }
 
     private getHostMouseEmulationMode(): HostMouseEmulationMode {
+        if (isTouchMobileLikeClient()) return "relativeNative"
         const inputConfig = this.input.getConfig()
         const isRelativeMouse = inputConfig.mouseMode == "relative"
 

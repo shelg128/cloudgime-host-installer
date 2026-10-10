@@ -1,3 +1,4 @@
+import { candidateAllowed, filterRouteSdp, readExplicitStreamRoute, routeIceConfiguration } from "./route_policy.js";
 import { LogMessageType, MicSidecarClientMessage, MicSidecarServerMessage, StreamSignalingMessage } from "../api_bindings.js"
 import {
     TransportMicrophoneDevice,
@@ -132,7 +133,7 @@ export class MicSidecarClient {
     private microphoneLevelContext: AudioContext | null = null
     private microphoneLevelSource: MediaStreamAudioSourceNode | null = null
     private microphoneLevelAnalyser: AnalyserNode | null = null
-    private microphoneLevelData: Uint8Array | null = null
+    private microphoneLevelData: Uint8Array<ArrayBuffer> | null = null
     private lastOutboundSnapshot: { timestampMs: number, bytesSent: number | null } | null = null
     private lastOutboundStats: TransportMicrophoneOutboundStats = { ...DEFAULT_OUTBOUND }
     private lastRouteDiagnostics: TransportMicrophoneRouteDiagnostics | null = null
@@ -669,6 +670,8 @@ export class MicSidecarClient {
     }
 
     private async handleSignalMessage(message: MicSidecarServerMessage) {
+        if ("WebRtc" in message && "AddIceCandidate" in message.WebRtc
+            && !candidateAllowed(readExplicitStreamRoute(), message.WebRtc.AddIceCandidate.candidate)) return
         if ("DebugLog" in message) {
             this.log(message.DebugLog.message, message.DebugLog.ty ?? null)
             return
@@ -694,7 +697,7 @@ export class MicSidecarClient {
             const description = signal.Description
             await this.peer.setRemoteDescription({
                 type: description.ty as RTCSdpType,
-                sdp: description.sdp
+                sdp: filterRouteSdp(readExplicitStreamRoute(), description.sdp)
             })
             await this.tryDequeueRemoteIceCandidates()
         } else if ("AddIceCandidate" in signal) {
@@ -973,8 +976,12 @@ export class MicSidecarClient {
                 }
             }
 
+            const route = readExplicitStreamRoute()
+            if (!route) throw new Error("explicit_route_required")
+            const configuration = routeIceConfiguration(iceServers, route)
+            if (route == "relay" && !configuration.iceServers?.length) throw new Error("relay_unavailable")
             const peer = new RTCPeerConnection({
-                iceServers,
+                ...configuration,
                 iceCandidatePoolSize: 2
             })
             this.peer = peer
@@ -986,6 +993,7 @@ export class MicSidecarClient {
                 }
 
                 const candidate = event.candidate.toJSON()
+                if (!candidateAllowed(route, candidate.candidate ?? "")) return
                 this.sendSignal({
                     AddIceCandidate: {
                         candidate: candidate.candidate ?? "",

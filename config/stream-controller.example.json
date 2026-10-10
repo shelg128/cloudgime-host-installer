@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "sentinel_prelogin": {
+      "host_app_id": 1379015545,
+      "sunshine_profile": "CloudGime Sentinel Login",
+      "command": "sentinel"
+    },
+    "desktop_rental": {
+      "host_app_id": 881448767,
+      "sunshine_profile": "Desktop",
+      "command": "desktop"
+    },
+    "steam_rental": {
+      "host_app_id": 1093255277,
+      "sunshine_profile": "Steam Big Picture",
+      "command": "steam"
+    }
+  }
+}

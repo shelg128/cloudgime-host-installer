@@ -66,7 +66,10 @@ async fn tunnel_requires_exact_host_runtime_bearer_and_strict_rental_binding() {
         "streamProfile":"sentinel_prelogin","rootNativeSessionId":"android-native-root",
         "rentalBinding":{"handoffBindingId":uuid::Uuid::new_v4().to_string(),"claimId":"claim-1"}
     })).unwrap();
-    assert_eq!(root_payload.root_native_session_id.as_deref(),Some("android-native-root"));
+    assert_eq!(
+        root_payload.root_native_session_id.as_deref(),
+        Some("android-native-root")
+    );
     assert!(serde_json::from_value::<PostAndroidNativeTunnelLaunchTokenRequest>(serde_json::json!({
         "streamProfile":"sentinel_prelogin","rootNativeSessionId":"root","rentalBinding":{"handoffBindingId":uuid::Uuid::new_v4().to_string(),"claimId":"c"},"extra":true
     })).is_err());

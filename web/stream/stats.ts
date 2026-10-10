@@ -274,7 +274,7 @@ export class StreamStats {
     private enabled: boolean = false
     private transport: Transport | null = null
     private statsChannel: DataTransportChannel | null = null
-    private updateIntervalId: number | null = null
+    private updateIntervalId: ReturnType<typeof setInterval> | null = null
     private readonly onRawDataBound = this.onRawData.bind(this)
 
     private videoPipe: Pipe | null = null

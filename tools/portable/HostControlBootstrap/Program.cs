@@ -103,7 +103,12 @@ internal static class Program
         var productName = args.GetValue("product-name") ?? DefaultProductName;
         var appProductName = args.GetValue("app-product-name") ?? DefaultAppProductName;
         var overwriteData = args.HasFlag("overwrite-data");
-        var resetLocalIdentity = args.HasFlag("reset-local-identity") || overwriteData;
+        var universalBundle = IsUniversalBundle(bundleSourceRoot);
+        var resetLocalIdentity = args.HasFlag("reset-local-identity") || overwriteData || universalBundle;
+        if (universalBundle)
+        {
+            overwriteData = true;
+        }
         var launchAfterInstall = args.HasFlag("launch-after-install");
         Log($"install installRoot={installRoot} dataRoot={dataRoot} releaseRoot={releaseRoot} bundleSourceRoot={bundleSourceRoot} overwriteData={overwriteData} resetLocalIdentity={resetLocalIdentity} launchAfterInstall={launchAfterInstall}");
         var activationSnapshot = resetLocalIdentity ? null : CaptureActivationStateSnapshot(dataRoot);
@@ -131,7 +136,7 @@ internal static class Program
 
         if (Directory.Exists(installRoot))
         {
-            Directory.Delete(installRoot, recursive: true);
+            QuarantineDirectoryForFreshInstall(installRoot);
         }
 
         Directory.CreateDirectory(installRoot);
@@ -159,7 +164,7 @@ internal static class Program
         if (Directory.Exists(dataRoot) && overwriteData)
         {
             PrepareExistingBundleForInstall(dataRoot);
-            Directory.Delete(dataRoot, recursive: true);
+            QuarantineDirectoryForFreshInstall(dataRoot);
             freshBundleData = true;
         }
         else if (Directory.Exists(dataRoot))
@@ -176,8 +181,8 @@ internal static class Program
             freshBundleData = true;
         }
 
-        RepairSunshineSharedIfMissing(dataRoot, releaseRoot);
-        RepairPairSeedIfMissing(dataRoot, releaseRoot);
+        RepairSunshineSharedIfMissing(dataRoot, releaseRoot, universalBundle);
+        RepairPairSeedIfMissing(dataRoot, releaseRoot, universalBundle);
 
         AddWindowsDefenderExclusions(installRoot, dataRoot);
 
@@ -739,6 +744,29 @@ internal static class Program
                 || text.Contains("local_http_ready", StringComparison.Ordinal));
     }
 
+    private static bool IsUniversalBundle(string bundleRoot)
+    {
+        var manifestPath = Path.Combine(bundleRoot, "cloudgime-host-bundle.json");
+        if (!File.Exists(manifestPath)) return false;
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(manifestPath));
+            return document.RootElement.TryGetProperty("bundleMode", out var mode)
+                && string.Equals(mode.GetString(), "universal", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
+    private static void QuarantineDirectoryForFreshInstall(string path)
+    {
+        if (!Directory.Exists(path)) return;
+        var parent = Path.GetDirectoryName(path)
+            ?? throw new InvalidOperationException($"Could not resolve parent for fresh install path: {path}");
+        var quarantine = Path.Combine(parent, $"{Path.GetFileName(path)}.previous-{DateTime.UtcNow:yyyyMMdd-HHmmssfff}");
+        Directory.Move(path, quarantine);
+        Log($"fresh-install quarantined previous bundle: {quarantine}");
+    }
+
     private static void PrepareExistingBundleForInstall(string bundleRoot)
     {
         if (!Directory.Exists(bundleRoot))
@@ -1213,8 +1241,13 @@ internal static class Program
             || GetString(state, "InstanceType").Equals("always-on", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static void RepairSunshineSharedIfMissing(string bundleRoot, string releaseRoot)
+    private static void RepairSunshineSharedIfMissing(string bundleRoot, string releaseRoot, bool universalBundle = false)
     {
+        if (universalBundle)
+        {
+            return;
+        }
+
         var managedRoot = Path.Combine(releaseRoot, "managed-sunshine-shared");
         if (!File.Exists(Path.Combine(managedRoot, "sunshine_state.json")))
         {
@@ -1242,8 +1275,13 @@ internal static class Program
         }
     }
 
-    private static void RepairPairSeedIfMissing(string bundleRoot, string releaseRoot)
+    private static void RepairPairSeedIfMissing(string bundleRoot, string releaseRoot, bool universalBundle = false)
     {
+        if (universalBundle)
+        {
+            return;
+        }
+
         var seedPath = Path.Combine(releaseRoot, "managed-shared_pair_info.json");
         if (!File.Exists(seedPath))
         {

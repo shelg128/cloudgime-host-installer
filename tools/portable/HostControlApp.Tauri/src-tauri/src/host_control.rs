@@ -438,6 +438,12 @@ struct RedeemPayload {
     #[serde(deserialize_with = "deserialize_stringish")]
     display_name: String,
     #[serde(deserialize_with = "deserialize_stringish")]
+    sentinel_pc_id: String,
+    #[serde(deserialize_with = "deserialize_stringish")]
+    sentinel_device_id: String,
+    #[serde(deserialize_with = "deserialize_stringish")]
+    keeper_entry_id: String,
+    #[serde(deserialize_with = "deserialize_stringish")]
     control_plane_url: String,
     #[serde(deserialize_with = "deserialize_stringish")]
     activation_record_id: String,
@@ -1072,7 +1078,7 @@ pub async fn redeem_activation_token(
 
     ensure_host_prepared_automatically(&bundle_root)?;
     let activation = load_activation_state(&bundle_root)?;
-    redeem_activation_token_with_state(&bundle_root, activation, token).await
+    redeem_activation_token_with_state(&bundle_root, activation, token, false).await
 }
 
 #[tauri::command]
@@ -1159,8 +1165,23 @@ pub async fn run_headless_claim_from_args(args: &[String]) -> i32 {
             .ok_or_else(|| "--headless-claim-license requires a value.".to_string())?;
         let expected_token_kind =
             read_headless_arg_value(args, "--expected-token-kind").unwrap_or_default();
-        let claim_only = args.iter().any(|arg| arg.eq_ignore_ascii_case("--claim-only"));
-        claim_setup_token_headless(setup_token, expected_token_kind, claim_only).await
+        let claim_only = args
+            .iter()
+            .any(|arg| arg.eq_ignore_ascii_case("--claim-only"));
+        let skip_prepare = args
+            .iter()
+            .any(|arg| arg.eq_ignore_ascii_case("--skip-prepare"));
+        let skip_auto_pair = args
+            .iter()
+            .any(|arg| arg.eq_ignore_ascii_case("--skip-auto-pair"));
+        claim_setup_token_headless(
+            setup_token,
+            expected_token_kind,
+            claim_only,
+            skip_prepare,
+            skip_auto_pair,
+        )
+        .await
     }
     .await;
 
@@ -1228,6 +1249,8 @@ async fn claim_setup_token_headless(
     setup_token: String,
     expected_token_kind: String,
     claim_only: bool,
+    skip_prepare: bool,
+    skip_auto_pair: bool,
 ) -> Result<ActionOutcome, String> {
     reconcile_pending_uninstall_marker().await;
     let bundle_root = resolve_bundle_root()?;
@@ -1237,7 +1260,7 @@ async fn claim_setup_token_headless(
         return Err("Paste a valid Lisensi Aktivasi first.".into());
     }
     let expected_token_kind = normalize_expected_setup_token_kind(&expected_token_kind)?;
-    if !claim_only {
+    if !claim_only && !skip_prepare {
         ensure_host_prepared_automatically(&bundle_root)?;
     }
     prepare_fresh_setup_token_identity(&mut activation);
@@ -1341,7 +1364,9 @@ async fn claim_setup_token_headless(
     save_activation_state(&bundle_root, &activation)?;
     if claim_only {
         return Ok(ActionOutcome {
-            message: "Host license claimed. Runtime service start skipped by headless claim-only mode.".into(),
+            message:
+                "Host license claimed. Runtime service start skipped by headless claim-only mode."
+                    .into(),
             state: build_headless_claim_state(&bundle_root, &activation),
         });
     }
@@ -1362,8 +1387,13 @@ async fn claim_setup_token_headless(
         payload.pc_id.clone(),
         payload.host_id.clone(),
     ]);
-    let mut outcome =
-        redeem_activation_token_with_state(&bundle_root, activation, activation_token).await?;
+    let mut outcome = redeem_activation_token_with_state(
+        &bundle_root,
+        activation,
+        activation_token,
+        skip_auto_pair,
+    )
+    .await?;
     let binding_copy = if binding_label.trim().is_empty() {
         lane_label.clone()
     } else if payload.auto_allocated_binding {
@@ -1507,8 +1537,13 @@ pub async fn claim_setup_token(
         payload.pc_id.clone(),
         payload.host_id.clone(),
     ]);
-    let mut outcome =
-        redeem_activation_token_with_state(&bundle_root, activation, activation_token).await?;
+    let mut outcome = redeem_activation_token_with_state(
+        &bundle_root,
+        activation,
+        activation_token,
+        false,
+    )
+    .await?;
     let binding_copy = if binding_label.trim().is_empty() {
         lane_label.clone()
     } else if payload.auto_allocated_binding {
@@ -1741,6 +1776,7 @@ async fn redeem_activation_token_with_state(
     bundle_root: &Path,
     mut activation: HostActivationStateRecord,
     token: String,
+    skip_auto_pair: bool,
 ) -> Result<ActionOutcome, String> {
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(20))
@@ -1785,6 +1821,15 @@ async fn redeem_activation_token_with_state(
     } else {
         normalize_control_plane(&payload.control_plane_url)?
     };
+    if !payload.sentinel_pc_id.trim().is_empty() {
+        activation.sentinel_pc_id = payload.sentinel_pc_id.trim().into();
+    }
+    if !payload.sentinel_device_id.trim().is_empty() {
+        activation.sentinel_device_id = payload.sentinel_device_id.trim().into();
+    }
+    if !payload.keeper_entry_id.trim().is_empty() {
+        activation.keeper_entry_id = payload.keeper_entry_id.trim().into();
+    }
     activation.runtime_token = payload.runtime_token.trim().into();
     activation.activation_record_id = payload.activation_record_id.trim().into();
     activation.activated_at_utc = payload.activated_at_utc.trim().into();
@@ -1792,12 +1837,76 @@ async fn redeem_activation_token_with_state(
     save_activation_state(bundle_root, &activation)?;
     configure_host_keeper_tunnel(bundle_root, &activation, None)?;
     let service_state = ensure_persistent_host_service(bundle_root)?;
-    let activation_message = build_activation_success_message(bundle_root, service_state);
+    let mut activation_message = build_activation_success_message(bundle_root, service_state);
+    if skip_auto_pair {
+        activation_message.push_str(" Automatic Moonlight/Sunshine pairing deferred by operator.");
+    } else {
+        match run_auto_pair_provisioning(bundle_root) {
+            Ok(summary) => {
+                activation_message.push(' ');
+                activation_message.push_str(&summary);
+            }
+            Err(error) => {
+                activation_message.push_str(" Automatic local pairing is pending: ");
+                activation_message.push_str(&error);
+            }
+        }
+    }
 
     Ok(ActionOutcome {
         message: activation_message,
         state: build_shell_state(true)?,
     })
+}
+
+fn run_auto_pair_provisioning(bundle_root: &Path) -> Result<String, String> {
+    let script_path = bundle_root.join("auto-pair-host.ps1");
+    if !script_path.exists() {
+        return Err("The universal bundle does not include auto-pair-host.ps1.".into());
+    }
+
+    let script_path_text = script_path.to_string_lossy().to_string();
+    let bundle_root_text = bundle_root.to_string_lossy().to_string();
+    let output = run_hidden_command_output(
+        "powershell.exe",
+        &[
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            &script_path_text,
+            "-BundleRoot",
+            &bundle_root_text,
+        ],
+        bundle_root,
+        Duration::from_secs(180),
+    )?;
+    if !output.success {
+        return Err(summarize_command_issue(&join_output(&output)));
+    }
+
+    let payload: Value = serde_json::from_str(output.stdout.trim())
+        .map_err(|_| "The automatic pairing script returned invalid status data.".to_string())?;
+    if !payload.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        return Err("The automatic pairing script did not confirm success.".into());
+    }
+    match payload
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "already_paired" => Ok("Moonlight/Sunshine pairing was already verified.".into()),
+        "paired"
+            if payload
+                .get("appsVerified")
+                .and_then(Value::as_bool)
+                .unwrap_or(false) =>
+        {
+            Ok("Moonlight/Sunshine paired automatically and local apps were verified.".into())
+        }
+        _ => Err("Automatic pairing completed without verified local applications.".into()),
+    }
 }
 
 fn reset_stale_local_activation(activation: &mut HostActivationStateRecord) {
@@ -1857,6 +1966,33 @@ fn prepare_fresh_setup_token_identity(activation: &mut HostActivationStateRecord
     reset_stale_local_activation(activation);
 }
 
+fn evaluate_license_component_bindings(
+    bundle_root: &Path,
+    activation: &HostActivationStateRecord,
+) -> (bool, bool) {
+    let expected_pc = normalize_pc_id_value(&activation.sentinel_pc_id);
+    let expected_device = activation.sentinel_device_id.trim();
+    let expected_keeper = normalize_keeper_entry_id_value(
+        &activation.keeper_entry_id,
+        &normalize_pc_number_value(&activation.sentinel_pc_id),
+    );
+    let keeper_pc = read_host_keeper_pc_id(bundle_root);
+    let keeper_device = read_host_keeper_device_id(bundle_root);
+    let keeper_entry = read_host_keeper_entry_id(
+        bundle_root,
+        &normalize_pc_number_value(&activation.sentinel_pc_id),
+    );
+    let sentinel_binding_ready = !expected_pc.is_empty()
+        && !expected_device.is_empty()
+        && keeper_pc == expected_pc
+        && keeper_device.eq_ignore_ascii_case(expected_device);
+    let keeper_binding_ready = sentinel_binding_ready
+        && !expected_keeper.is_empty()
+        && keeper_entry.eq_ignore_ascii_case(&expected_keeper)
+        && keeper_tunnel_moonlight_online(bundle_root);
+    (sentinel_binding_ready, keeper_binding_ready)
+}
+
 #[tauri::command]
 pub async fn send_heartbeat(session: State<'_, AppSession>) -> Result<ActionOutcome, String> {
     ensure_unlocked(&session)?;
@@ -1878,9 +2014,12 @@ pub async fn send_heartbeat(session: State<'_, AppSession>) -> Result<ActionOutc
     let network = load_network_config(&bundle_root)?;
     let (display_route_ready, display_route_note) =
         evaluate_stream_display_route(&bundle_root, &capability_profile);
+    let (sentinel_binding_ready, keeper_binding_ready) =
+        evaluate_license_component_bindings(&bundle_root, &activation);
     let ready_for_stream = display_route_ready
         && status.local_http_ready
         && status.required_processes_ready
+        && keeper_binding_ready
         && status.lifecycle_phase.eq_ignore_ascii_case("ready");
     let stream_note = if ready_for_stream {
         "ready_for_stream".to_string()
@@ -1915,6 +2054,8 @@ pub async fn send_heartbeat(session: State<'_, AppSession>) -> Result<ActionOutc
             "serviceState": empty_to_none(&service_state),
             "localHttpReady": status.local_http_ready,
             "requiredProcessesReady": status.required_processes_ready,
+            "sentinelBindingReady": sentinel_binding_ready,
+            "keeperBindingReady": keeper_binding_ready,
             "readyForStream": ready_for_stream,
             "note": Some(stream_note),
         }))
@@ -3076,7 +3217,14 @@ fn normalize_local_keeper_url(value: &str) -> String {
     }
 }
 
-fn resolve_host_keeper_local_url(bundle_root: &Path) -> String {
+fn resolve_host_keeper_local_url(
+    bundle_root: &Path,
+    activation: &HostActivationStateRecord,
+) -> String {
+    if activation.host_http_port > 0 {
+        return format!("http://127.0.0.1:{}/stream/", activation.host_http_port);
+    }
+
     load_host_status(bundle_root)
         .ok()
         .map(|status| normalize_local_keeper_url(&status.local_url))
@@ -3313,7 +3461,7 @@ fn write_host_keeper_status(
     bundle_root: &Path,
     activation: &HostActivationStateRecord,
 ) -> Result<(), String> {
-    let local_url = resolve_host_keeper_local_url(bundle_root);
+    let local_url = resolve_host_keeper_local_url(bundle_root, activation);
     let application_activation_id = activation.application_activation_id.trim();
     let application_type = if activation.application_type.trim().is_empty() {
         "CLOUDGIME_HOST"
@@ -3563,7 +3711,8 @@ fn unregister_host_keeper_tunnel_task(bundle_root: &Path) {
 }
 
 fn is_host_keeper_agent_running(bundle_root: &Path) -> bool {
-    let agent_path = escape_powershell_literal(&host_keeper_agent_path(bundle_root).to_string_lossy());
+    let agent_path =
+        escape_powershell_literal(&host_keeper_agent_path(bundle_root).to_string_lossy());
     let script = format!(
         concat!(
             "$ErrorActionPreference = 'SilentlyContinue';",
@@ -3851,9 +4000,7 @@ mod tests {
         let env_file = fs::read_to_string(host_keeper_env_path(&test_root)).unwrap();
         assert!(env_file.contains("CLOUDRENTAL_HOST_HTTP_PORT=18081"));
         assert!(env_file.contains("HOST_STREAM_LOCAL_URL=http://127.0.0.1:18081/stream/"));
-        assert!(env_file.contains(
-            "CLOUDGIME_HOST_STREAM_LOCAL_URL=http://127.0.0.1:18081/stream/"
-        ));
+        assert!(env_file.contains("CLOUDGIME_HOST_STREAM_LOCAL_URL=http://127.0.0.1:18081/stream/"));
 
         fs::remove_dir_all(&test_root).unwrap();
     }
@@ -3863,11 +4010,11 @@ mod tests {
         let test_root = env::temp_dir().join(format!("host-keeper-status-{}", Uuid::new_v4()));
         let mut activation = default_activation_state();
         activation.application_activation_id = "act_host_test".into();
-        activation.application_type = "CLOUDGIME_HOST".into();
-
+        activation.host_http_port = 18081;
         write_host_keeper_status(&test_root, &activation).unwrap();
 
         let raw = fs::read_to_string(host_keeper_status_path(&test_root)).unwrap();
+        assert!(raw.contains("\"localUrl\": \"http://127.0.0.1:18081/stream/\""));
         assert!(raw.contains("\"routeKey\": \"HOST_STREAM_PROXY_ROUTE\""));
         assert!(raw.contains("\"applicationType\": \"CLOUDGIME_HOST\""));
         assert!(raw.contains("\"applicationActivationId\": \"act_host_test\""));

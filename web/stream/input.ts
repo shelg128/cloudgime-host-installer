@@ -110,7 +110,12 @@ declare global {
 function isAndroidTouchClient(): boolean {
     const touchPoints = Number(navigator.maxTouchPoints || 0)
     const userAgent = String(navigator.userAgent || "")
-    return touchPoints > 0 && /Android/i.test(userAgent)
+    // Some Android browsers expose a desktop-style user-agent. Coarse touch
+    // is the reliable signal for the browser trackpad input path.
+    const coarsePointer = typeof window !== "undefined"
+        && typeof window.matchMedia === "function"
+        && window.matchMedia("(pointer: coarse)").matches
+    return touchPoints > 0 && (/Android/i.test(userAgent) || coarsePointer)
 }
 
 function isAndroidNativeMouseBridgeEnabled(): boolean {
@@ -1313,7 +1318,7 @@ export class StreamInput {
 
         const centerX = (touches[0].clientX + touches[1].clientX) / 2
         const centerY = (touches[0].clientY + touches[1].clientY) / 2
-        this.sendMousePositionClientCoordinates(centerX, centerY, rect, true)
+        // Trackpad right-click keeps the existing cursor position.
         this.sendMouseButton(true, StreamMouseButton.RIGHT)
         this.sendMouseButton(false, StreamMouseButton.RIGHT)
 
@@ -1501,8 +1506,7 @@ export class StreamInput {
 
             const time = this.calcTouchTime(touch)
             if (this.touchMouseAction == "default" && !touch.mouseMoved && time >= TOUCH_AS_CLICK_MIN_TIME_MS) {
-                this.sendMousePositionClientCoordinates(touch.originX, touch.originY, rect, true)
-
+                // Trackpad long-press keeps the existing Host cursor position.
                 touch.mouseMoved = true
             }
         }

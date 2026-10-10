@@ -16,7 +16,9 @@ pub fn reconcile_sentinel_profile_file(path: &Path) -> Result<bool> {
     if !changed {
         return Ok(false);
     }
-    let parent = path.parent().ok_or_else(|| anyhow!("apps.json has no parent"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("apps.json has no parent"))?;
     let temp = parent.join(format!(".apps.cloudgime-{}.tmp", uuid::Uuid::new_v4()));
     let encoded = serde_json::to_vec_pretty(&root)?;
     let result = (|| -> Result<()> {
@@ -44,22 +46,39 @@ pub fn reconcile_sentinel_profile_file(path: &Path) -> Result<bool> {
 #[cfg(windows)]
 fn replace_file(source: &Path, destination: &Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
     let from: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let to: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
-    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) } == 0 {
-        return Err(std::io::Error::last_os_error()).with_context(|| format!("failed to replace {}", destination.display()));
+    let to: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    if unsafe {
+        MoveFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to replace {}", destination.display()));
     }
     Ok(())
 }
 
 #[cfg(not(windows))]
 fn replace_file(source: &Path, destination: &Path) -> Result<()> {
-    fs::rename(source, destination).with_context(|| format!("failed to replace {}", destination.display()))
+    fs::rename(source, destination)
+        .with_context(|| format!("failed to replace {}", destination.display()))
 }
 
 pub fn reconcile_sentinel_profile(root: &mut Value) -> Result<bool> {
-    let object = root.as_object_mut().ok_or_else(|| anyhow!("apps root must be an object"))?;
+    let object = root
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("apps root must be an object"))?;
     let apps = object
         .get_mut("apps")
         .and_then(Value::as_array_mut)
@@ -83,7 +102,11 @@ pub fn reconcile_sentinel_profile(root: &mut Value) -> Result<bool> {
         .as_object_mut()
         .ok_or_else(|| anyhow!("Sentinel profile must be an object"))?;
     let mut changed = false;
-    if !app.get("cmd").and_then(Value::as_str).is_some_and(|value| !value.trim().is_empty()) {
+    if !app
+        .get("cmd")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+    {
         changed |= set(app, "cmd", Value::String(default_sentinel_command()));
     }
     if !app
@@ -91,7 +114,11 @@ pub fn reconcile_sentinel_profile(root: &mut Value) -> Result<bool> {
         .and_then(Value::as_str)
         .is_some_and(|value| !value.trim().is_empty())
     {
-        changed |= set(app, "working-dir", Value::String(default_sentinel_working_dir()));
+        changed |= set(
+            app,
+            "working-dir",
+            Value::String(default_sentinel_working_dir()),
+        );
     }
     changed |= set(app, "auto-detach", Value::Bool(true));
     // With auto-detach enabled, Sunshine recognizes the second single-instance
@@ -99,7 +126,10 @@ pub fn reconcile_sentinel_profile(root: &mut Value) -> Result<bool> {
     // remains the captured desktop. wait-all then tracks detached children.
     changed |= set(app, "wait-all", Value::Bool(true));
     if !app.contains_key("image-path") {
-        app.insert("image-path".to_string(), Value::String("desktop.png".to_string()));
+        app.insert(
+            "image-path".to_string(),
+            Value::String("desktop.png".to_string()),
+        );
         changed = true;
     }
     Ok(changed)
@@ -107,20 +137,29 @@ pub fn reconcile_sentinel_profile(root: &mut Value) -> Result<bool> {
 
 fn sentinel_profile() -> Map<String, Value> {
     Map::from_iter([
-        ("name".to_string(), Value::String(SENTINEL_PROFILE_NAME.to_string())),
+        (
+            "name".to_string(),
+            Value::String(SENTINEL_PROFILE_NAME.to_string()),
+        ),
         ("cmd".to_string(), Value::String(default_sentinel_command())),
-        ("working-dir".to_string(), Value::String(default_sentinel_working_dir())),
+        (
+            "working-dir".to_string(),
+            Value::String(default_sentinel_working_dir()),
+        ),
         ("auto-detach".to_string(), Value::Bool(true)),
         ("wait-all".to_string(), Value::Bool(true)),
-        ("image-path".to_string(), Value::String("desktop.png".to_string())),
+        (
+            "image-path".to_string(),
+            Value::String("desktop.png".to_string()),
+        ),
     ])
 }
 
 fn default_sentinel_working_dir() -> String {
     #[cfg(windows)]
     {
-        let program_files = std::env::var("ProgramFiles")
-            .unwrap_or_else(|_| r"C:\Program Files".to_string());
+        let program_files =
+            std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".to_string());
         return Path::new(&program_files)
             .join("Sentinel Launcher")
             .to_string_lossy()
@@ -163,8 +202,14 @@ mod tests {
         });
         assert!(reconcile_sentinel_profile(&mut value).unwrap());
         let sentinel = &value["apps"][1];
-        assert_eq!(sentinel["cmd"], "old", "existing operator path is preserved");
-        assert_eq!(sentinel["working-dir"], "old", "existing working dir is preserved");
+        assert_eq!(
+            sentinel["cmd"], "old",
+            "existing operator path is preserved"
+        );
+        assert_eq!(
+            sentinel["working-dir"], "old",
+            "existing working dir is preserved"
+        );
         assert_eq!(sentinel["auto-detach"], true);
         assert_eq!(sentinel["wait-all"], true);
         assert_eq!(sentinel["image-path"], "custom.png");
@@ -187,7 +232,8 @@ mod tests {
 
     #[test]
     fn file_repair_is_atomic_and_idempotent() {
-        let root = std::env::temp_dir().join(format!("cg-sunshine-profile-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("cg-sunshine-profile-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let path = root.join("apps.json");
         fs::write(&path, br#"{"env":{},"apps":[{"name":"Desktop"}]}"#).unwrap();
@@ -196,11 +242,13 @@ mod tests {
         let parsed: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(parsed["apps"][1]["auto-detach"], true);
         assert_eq!(parsed["apps"][1]["wait-all"], true);
-        assert!(
-            fs::read_dir(&root)
+        assert!(fs::read_dir(&root).unwrap().all(|entry| {
+            !entry
                 .unwrap()
-                .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".apps.cloudgime-"))
-        );
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".apps.cloudgime-")
+        }));
         let _ = fs::remove_dir_all(root);
     }
 }

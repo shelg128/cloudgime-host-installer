@@ -207,14 +207,16 @@ body.stream .stream-native-cursor {
     position: fixed;
     top: 0;
     left: 0;
-    width: 24px;
-    height: 24px;
+    width: 32px;
+    height: 32px;
     pointer-events: none;
     opacity: 0;
-    z-index: calc(var(--stream-z-quickpad, 3150) - 10);
+    z-index: 10000 !important;
     will-change: transform, opacity;
-    transition: opacity 220ms ease;
-    filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.38));
+    transition: opacity 140ms ease;
+    transform-origin: 0 0;
+    contain: layout style paint;
+    filter: drop-shadow(-1px -1px 0 rgba(0, 0, 0, 0.96)) drop-shadow(1px -1px 0 rgba(0, 0, 0, 0.96)) drop-shadow(-1px 1px 0 rgba(0, 0, 0, 0.96)) drop-shadow(1px 1px 0 rgba(0, 0, 0, 0.96)) drop-shadow(0 3px 8px rgba(0, 0, 0, 0.62));
 }
 
 html.stream .stream-native-cursor::before,
@@ -228,8 +230,9 @@ body.stream .stream-native-cursor::before {
         linear-gradient(135deg, rgba(134, 201, 255, 0.16), rgba(134, 201, 255, 0));
     border-radius: 6px;
     box-shadow:
-        inset 0 0 0 1px rgba(18, 30, 48, 0.22),
-        0 0 0 1px rgba(18, 30, 48, 0.16);
+        inset 0 0 0 1px rgba(18, 30, 48, 0.44),
+        0 0 0 2px rgba(0, 0, 0, 0.92),
+        0 0 0 3px rgba(255, 255, 255, 0.34);
 }
 
 html.stream .stream-native-cursor::after,
@@ -241,15 +244,18 @@ body.stream .stream-native-cursor::after {
     width: 16px;
     height: 16px;
     border-radius: 999px;
-    border: 1px solid rgba(168, 208, 228, 0.46);
-    background: radial-gradient(circle, rgba(168, 208, 228, 0.12), rgba(168, 208, 228, 0) 68%);
+    border: 2px solid rgba(0, 0, 0, 0.88);
+    background: radial-gradient(circle, rgba(255, 255, 255, 0.78), rgba(43, 161, 255, 0.30) 48%, rgba(43, 161, 255, 0) 70%);
     opacity: 0.46;
     transition: transform 180ms ease, opacity 180ms ease, border-color 180ms ease;
 }
 
 html.stream .stream-native-cursor[data-visible="true"],
 body.stream .stream-native-cursor[data-visible="true"] {
-    opacity: 1;
+    display: block !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    z-index: 2147483647 !important;
 }
 
 html.stream .stream-native-cursor[data-pressed="true"]::after,
@@ -259,10 +265,7 @@ body.stream .stream-native-cursor[data-pressed="true"]::after {
     border-color: rgba(123, 214, 183, 0.68);
 }
 
-html.stream .stream-native-cursor,
-body.stream .stream-native-cursor {
-    display: none !important;
-}
+
 
 html.stream-blank-canvas .video-stream,
 body.stream-blank-canvas .video-stream,

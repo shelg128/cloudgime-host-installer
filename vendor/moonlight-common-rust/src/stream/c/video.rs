@@ -29,6 +29,9 @@ use crate::stream::{
     },
 };
 
+#[path = "video_timing.rs"]
+mod video_timing;
+
 static GLOBAL_VIDEO_DECODER: Mutex<Option<Box<dyn VideoDecoder + Send + 'static>>> =
     Mutex::new(None);
 
@@ -135,7 +138,7 @@ unsafe fn convert_decode_unit<'a>(
                 (raw.frameHostProcessingLatency / 10) as u64,
             ))
         },
-        timestamp: Duration::from_nanos((raw.presentationTimeUs as u64 * 1_000_000_000) / 90_000),
+        timestamp: video_timing::presentation_timestamp(raw.presentationTimeUs),
         color_space: ColorSpace::from_u8(raw.colorspace).expect("valid Colorspace"),
         hdr_active: raw.hdrActive,
         buffers,
