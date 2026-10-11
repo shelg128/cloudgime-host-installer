@@ -44,6 +44,8 @@ var installableEncoderTests = InstallableEncoderTests.Run();
 var encoderTests = EncoderContractTests.Run();
 var bundleTests = BundleTests.Run();
 var journalTests = IdleJournalTests.Run();
+var matchedUpgradeTests = MatchedUpgradeTests.Run();
+Console.WriteLine($"MATCHED_UPGRADE_FILE_ONLY_ASSERTIONS={matchedUpgradeTests}; PHYSICAL_INSTALLER_QUALIFIED=false");
 var fileTests = FileTransactionTests.Run();
 var transportTests = TransportPolicyTests.Run();
 Console.WriteLine($"ENCODER_INSTALLABLE_BUNDLE_ASSERTIONS={installableEncoderTests}");
