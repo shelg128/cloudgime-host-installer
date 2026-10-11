@@ -1,5 +1,9 @@
 # Permanent stability baseline — 7 October 2026
 
+## Latest scoped network recovery update — 11 October 2026
+
+PC02 now runs broker/helper0c0a7736 and ASAR133d98a4 (behavior f6723e4; evidence f00d854). Host9ed42467, permanent display helperfe69d3 and shell d89d7a93 unchanged. Actual10.448s/25.424s backend route/socket faults recovered the SAME rental/commit/claim without new login, ~3s after network return.60.5s exceeded recovery and invoked official RENTER_LOGOUT3.56s after return, followed by automatic cleanup/release74.984s. Final candidate restart passed with5credential hashes unchanged. No automatic pause/refund: existing server clock remains billing authority until termination. Latest report `05 LAPORAN/20261011-NETWORK-RECOVERY-VERIFIED.md`, baseline `02 HASIL BUILD DAN INSTALLER/NETWORK RECOVERY 20261011/PC02-INSTALLED-BASELINE.json`. PC02 maintenance/no active rental/claim/hold, QA tasks/faults0, pilot disabled. No new signed installer, clean-install, full-link/media/power-loss qualification; older network failure notes below are historical.
+
 ## Restart/network test update — 11 October 2026
 
 PC02 had two real Windows restarts, final broker/helper163b6ce8 (ef72ebb) included; Host9ed42467/displayfe69d3/shell d89d7a93 unchanged. Auto-start/autologin/Sentinel lock and credential preservation passed. Backend-control-plane outage safety lock observed; **active session network resume still failed** (10s interruption leaves login while old billing continues to stale-heartbeat stop). Cleanup-retirement bug repaired in Sentinel, final both QA claims complete; PC02 maintenance/zero claims/holds, pilot off. Use workspace `RESTART NETWORK PATCH 20261011/PC02-INSTALLED-BASELINE.json` and `05 LAPORAN/20261011-RESTART-AND-NETWORK-TEST.md`, not old helper hashes. No Host media/StarDesk settings changes or power-loss test. No implication that network or universal installer acceptance is complete.
