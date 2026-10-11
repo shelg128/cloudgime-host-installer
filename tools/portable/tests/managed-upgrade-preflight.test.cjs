@@ -1,0 +1,7 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+const root=path.join(__dirname,'../HostControlBootstrap');
+const source=fs.readFileSync(path.join(root,'Program.cs'),'utf8');
+test('ordinary Universal install preflight rejects managed state before identity checks and desktop probe',()=>{const body=source.split('private static int ValidateUniversalInstall(')[1].split('private static int Install(')[0];assert(body.indexOf('ManagedNodeUpgradeGuard.RequireUnmanaged')<body.indexOf('ValidateExistingIdentity'));assert(body.indexOf('ManagedNodeUpgradeGuard.RequireUnmanaged')<body.indexOf('RequireNoRentalActivity'));});
+test('direct Universal install also rejects managed state before file replacement',()=>{const body=source.split('private static int Install(')[1].split('private static void StopUniversalHostService')[0];assert(body.indexOf('ManagedNodeUpgradeGuard.RequireUnmanaged')<body.indexOf('Directory.CreateDirectory(installRoot)'));assert(body.indexOf('ManagedNodeUpgradeGuard.RequireUnmanaged')<body.indexOf('UpgradeUniversalFiles('));});
+test('stopped operator journal is explicit guard input and is never deleted by guard',()=>{const s=fs.readFileSync(path.join(root,'ManagedNodeUpgradeGuard.cs'),'utf8');assert(s.includes('operator-emergency/active.json'));assert(s.includes('File.GetAttributes(candidate)'));assert(!s.includes('File.Delete('));assert(!s.includes('StartService'));});

@@ -126,6 +126,7 @@ internal static class Program
 
     private static int ValidateUniversalInstall(ParsedArguments args)
     {
+        ManagedNodeUpgradeGuard.RequireUnmanaged(UniversalMachineBoundary.ProvisioningRoot);
         var bundleRoot = NormalizeFullPath(args.GetValue("bundle-root") ?? throw new InvalidOperationException("BUNDLE_ROOT_REQUIRED"));
         var dataRoot = NormalizeFullPath(args.GetValue("data-root") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Cloudgime", "Host"));
         UniversalBundleContract.RequireInstallable(bundleRoot);
@@ -148,6 +149,7 @@ internal static class Program
         var universal = args.HasFlag("require-universal") || UniversalBundleContract.IsUniversal(bundleSourceRoot);
         if (universal)
         {
+            ManagedNodeUpgradeGuard.RequireUnmanaged(UniversalMachineBoundary.ProvisioningRoot);
             UniversalBundleContract.RequireInstallable(bundleSourceRoot);
             UniversalMachineBoundary.RequireNoRentalActivity();
             UniversalBundleContract.RejectReparse(installRoot);
