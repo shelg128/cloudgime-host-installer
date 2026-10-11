@@ -1,5 +1,9 @@
 # Permanent stability baseline — 7 October 2026
 
+## Restart/network test update — 11 October 2026
+
+PC02 had two real Windows restarts, final broker/helper163b6ce8 (ef72ebb) included; Host9ed42467/displayfe69d3/shell d89d7a93 unchanged. Auto-start/autologin/Sentinel lock and credential preservation passed. Backend-control-plane outage safety lock observed; **active session network resume still failed** (10s interruption leaves login while old billing continues to stale-heartbeat stop). Cleanup-retirement bug repaired in Sentinel, final both QA claims complete; PC02 maintenance/zero claims/holds, pilot off. Use workspace `RESTART NETWORK PATCH 20261011/PC02-INSTALLED-BASELINE.json` and `05 LAPORAN/20261011-RESTART-AND-NETWORK-TEST.md`, not old helper hashes. No Host media/StarDesk settings changes or power-loss test. No implication that network or universal installer acceptance is complete.
+
 ## 11 October 2026 installed-state update (supersedes historical status below)
 
 Canonical Host branch `chatbox/held-abort-revoke-20261011` was committed/pushed (code94fe323, docs2ef0586); PC02 web-server9ed42467 deployed with required OpenSSL DLLs. Original Sunshine, streamer/config and permanent display helperfe69d3 unchanged. Core CloudGime rental qualification now passed real website login/billing/Full Desktop/A→A→B→A managed-profile/expiry/reset/claim release, independent of third-party StarDesk password management (owner explicitly user-managed). PC02 MAINTENANCE, zero active rental/claim/cleanup; the old held abort is COMPLETED. See workspace `05 LAPORAN/20261011-RENTAL-CORE-LIVE-ACCEPTANCE.md` and `02 HASIL BUILD DAN INSTALLER/RENTAL ACCEPTANCE 20261011/PC02-INSTALLED-BASELINE.json`. No signed Universal clean-install or media-quality acceptance is implied; old no-push/helper-only statements below are historical.
