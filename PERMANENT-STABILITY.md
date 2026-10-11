@@ -1,5 +1,9 @@
 # Permanent stability baseline — 7 October 2026
 
+## 11 October 2026 installed-state update (supersedes historical status below)
+
+Canonical Host branch `chatbox/held-abort-revoke-20261011` was committed/pushed (code94fe323, docs2ef0586); PC02 web-server9ed42467 deployed with required OpenSSL DLLs. Original Sunshine, streamer/config and permanent display helperfe69d3 unchanged. Core CloudGime rental qualification now passed real website login/billing/Full Desktop/A→A→B→A managed-profile/expiry/reset/claim release, independent of third-party StarDesk password management (owner explicitly user-managed). PC02 MAINTENANCE, zero active rental/claim/cleanup; the old held abort is COMPLETED. See workspace `05 LAPORAN/20261011-RENTAL-CORE-LIVE-ACCEPTANCE.md` and `02 HASIL BUILD DAN INSTALLER/RENTAL ACCEPTANCE 20261011/PC02-INSTALLED-BASELINE.json`. No signed Universal clean-install or media-quality acceptance is implied; old no-push/helper-only statements below are historical.
+
 ## Canonical release lane
 
 This Universal Release worktree is the integration target for proven Host stability fixes. The original `01 CLOUDGIME HOST` worktree has substantial uncommitted owner work and is deliberately preserved. Do not overwrite it, reset it, or blindly merge the experimental RTP-CLOCK branch. New releases must use this lane's tested packaging/installer gates until the owner changes that source-of-truth decision.
