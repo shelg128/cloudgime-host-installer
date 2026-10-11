@@ -67,6 +67,18 @@ internal static class Program
 
     private static int Run(string[] args)
     {
+        if(args.Length>0&&args[0]=="managed-upgrade-stage")
+        {
+            if(args.Length is not(4 or 5)||args.Length==5&&args[4]!="--silent")throw new InvalidDataException("UPGRADE_COMMAND_INVALID");
+            return ManagedStoppedUpgrade.Stage(args[1],args[2],args[3]);
+        }
+        if(args.Length>0&&args[0]=="managed-upgrade")
+        {
+            if(args.Length<3||args.Length>5)throw new InvalidDataException("UPGRADE_COMMAND_INVALID");
+            var tail=args.Skip(3).Where(x=>x!="--silent").ToArray();
+            if(tail.Length>1)throw new InvalidDataException("UPGRADE_COMMAND_INVALID");
+            return ManagedStoppedUpgrade.Run(args[1],args[2],tail.FirstOrDefault());
+        }
         var parsed = ParsedArguments.Parse(args);
         if ((parsed.Command == "install"
                 || parsed.Command == "repair-state"

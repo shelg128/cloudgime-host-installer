@@ -12,6 +12,7 @@
     <Compile Include="../HostControlBootstrap/UniversalTransportPolicy.cs" Link="UniversalTransportPolicy.cs" />
     <Compile Include="../HostControlBootstrap/UniversalFileTransaction.cs" Link="UniversalFileTransaction.cs" />
     <Compile Include="../HostControlBootstrap/ElectronIdleJournal.cs" Link="ElectronIdleJournal.cs" />
+    <Compile Include="../HostControlBootstrap/ManagedUpgradeTransaction.cs" Link="ManagedUpgradeTransaction.cs" />
     <Compile Include="../HostControlBootstrap/ManagedNodeUpgradeGuard.cs" Link="ManagedNodeUpgradeGuard.cs" />
     <Compile Include="../HostControlBootstrap/UniversalInstallPolicy.cs" Link="UniversalInstallPolicy.cs" />
   </ItemGroup>

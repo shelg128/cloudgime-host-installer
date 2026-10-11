@@ -4,6 +4,9 @@ using CloudgimeHostBootstrap;
 static void Require(bool value, string code) { if (!value) throw new InvalidOperationException(code); }
 static void Throws(Action action, string contains) { try { action(); } catch (Exception e) when (e.Message.Contains(contains, StringComparison.Ordinal)) { return; } throw new InvalidOperationException("EXPECTED_" + contains); }
 
+if(ManagedCrashProcessTests.Worker(args))return;
+ManagedCrashProcessTests.Run();
+
 var activated = new JsonObject { ["ActivationState"]="activated", ["HostId"]="cgslot-pc02", ["ActivationRecordId"]="cgslot-pc02", ["CredentialRef"]="host_app.credential.dpapi" };
 Require(UniversalInstallPolicy.IsActivated(activated), "ACTIVATED_NOT_DETECTED");
 Throws(() => UniversalInstallPolicy.CheckReset(true, true, false), "EXISTING_NODE_IDENTITY");
@@ -40,6 +43,8 @@ Throws(() => AutoLogonTransaction.Configure(new FakeStore(new("1","other","PC",n
 var rollbackFailure = new FakeStore(before) { FailAt = 3, AdditionalFailAt = 5 };
 Throws(() => AutoLogonTransaction.Configure(rollbackFailure,"admin","PC","S-1-5-21-1-2-3-1001","secret"), "AUTOLOGON_ROLLBACK_FAILED");
 Require(rollbackFailure.Value.Enabled == "0", "ROLLBACK_FAILURE_NOT_DISABLED");
+ManagedJournalMigrationTests.Run();
+ManagedTransactionTests.Run();
 ManagedUpgradeGuardTests.Run();
 var installableEncoderTests = InstallableEncoderTests.Run();
 var encoderTests = EncoderContractTests.Run();
