@@ -775,6 +775,7 @@ fn run() -> Result<()> {
             let activation_license = match (activation_license, activation_license_file) {
                 (Some(value), None) if !value.trim().is_empty() => value,
                 (None, Some(path)) => read_activation_license_file(&path)?,
+                (None, None) if provisioning::can_resume_activation(&paths.bundle_root)? => String::new(),
                 (None, None) => {
                     eprint!("Activation license: ");
                     std::io::stdout().flush()?;

@@ -560,17 +560,11 @@ fn validate_component_type(component_type: &str) -> Result<()> {
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow!("target path has no parent"))?;
+    let parent = path.parent().ok_or_else(||anyhow!("target path has no parent"))?;
     fs::create_dir_all(parent)?;
-    let temp = path.with_extension(format!("{}.tmp", std::process::id()));
-    fs::write(&temp, bytes).with_context(|| format!("failed to write {}", temp.display()))?;
-    if let Err(error) = fs::rename(&temp, path) {
-        let _ = fs::remove_file(&temp);
-        return Err(error).with_context(|| format!("failed to replace {}", path.display()));
-    }
-    Ok(())
+    durable_metadata_cache::replace(path, bytes, |temp| {
+        restrict_to_local_system_and_current_user(temp).map_err(|_|std::io::Error::new(std::io::ErrorKind::PermissionDenied,"PROVISIONING_FILE_ACL_FAILED"))
+    }).context("PROVISIONING_DURABLE_WRITE_FAILED")
 }
 
 fn assignment_i32(assignments: &Value, name: &str, field: &str) -> i32 {
@@ -672,28 +666,15 @@ fn write_host_activation_state(
     Ok(())
 }
 
-pub fn provision_once(
-    bundle_root: &Path,
-    api_base_url: &str,
-    request: &ProvisionRequest<'_>,
-) -> Result<()> {
-    if request.activation_license.trim().is_empty() {
-        bail!("activation license is empty");
-    }
-    let endpoint = format!(
-        "{}/api/v1/provisioning/installer/activate",
-        api_base_url.trim_end_matches('/')
-    );
-    let response = reqwest::blocking::Client::new()
-        .post(endpoint)
-        .json(request)
-        .send()
-        .context("installer provisioning request failed")?;
-    let status = response.status();
-    let body: Value = response.json().context("invalid provisioning response")?;
-    if !status.is_success() {
-        bail!("provisioning rejected with HTTP {}", status.as_u16());
-    }
+#[path = "activation_store.rs"]
+mod activation_store;
+#[path = "activation_once.rs"]
+mod activation_once;
+pub fn can_resume_activation(bundle: &Path) -> Result<bool> { activation_once::can_resume(bundle) }
+pub fn provision_once(bundle_root: &Path, api_base_url: &str, request: &ProvisionRequest<'_>) -> Result<()> {
+    activation_once::run(bundle_root, api_base_url, request)
+}
+fn apply_provision_response(bundle_root: &Path, request: &ProvisionRequest<'_>, body: Value) -> Result<()> {
     let manifest: ProvisionResponse = serde_json::from_value(body.clone())
         .context("provisioning response is not a valid manifest")?;
     let readiness_status = manifest.status.as_deref().or_else(|| {
@@ -972,7 +953,7 @@ pub(crate) fn write_dpapi_secret(path: &Path, plaintext: &[u8]) -> Result<()> {
         Foundation::LocalFree,
         Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptProtectData},
     };
-    let mut input = CRYPT_INTEGER_BLOB {
+    let input = CRYPT_INTEGER_BLOB {
         cbData: plaintext.len() as u32,
         pbData: plaintext.as_ptr() as *mut u8,
     };
@@ -1346,12 +1327,16 @@ mod credential_tests {
 
 #[cfg(windows)]
 pub(crate) fn read_dpapi_secret(path: &Path) -> Result<Vec<u8>> {
+    let encrypted = fs::read(path).context("DPAPI_FILE_READ_FAILED")?;
+    decrypt_dpapi(&encrypted)
+}
+#[cfg(windows)]
+fn decrypt_dpapi(encrypted: &[u8]) -> Result<Vec<u8>> {
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::{
         Foundation::LocalFree,
         Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptUnprotectData},
     };
-    let encrypted = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     let input = CRYPT_INTEGER_BLOB {
         cbData: encrypted.len() as u32,
         pbData: encrypted.as_ptr() as *mut u8,
