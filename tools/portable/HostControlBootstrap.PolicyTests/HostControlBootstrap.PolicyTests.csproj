@@ -6,6 +6,13 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+    <Compile Include="../HostControlBootstrap/HeadlessSetupCommands.cs" Link="HeadlessSetupCommands.cs" />
+    <Compile Include="../HostControlBootstrap/HeadlessSetupJournal.cs" Link="HeadlessSetupJournal.cs" />
+    <Compile Include="../HostControlBootstrap/UniversalMachineBoundary.cs" Link="UniversalMachineBoundary.cs" />
+    <Compile Include="../HostControlBootstrap/HeadlessSetupCoordinator.cs" Link="HeadlessSetupCoordinator.cs" />
+    <Compile Include="../HostControlBootstrap/HeadlessSetupProcess.cs" Link="HeadlessSetupProcess.cs" />
+    <Compile Include="../HostControlBootstrap/HeadlessBundleContract.cs" Link="HeadlessBundleContract.cs" />
     <Compile Include="../HostControlBootstrap/UniversalBundleContract.cs" Link="UniversalBundleContract.cs" />
     <Compile Include="../HostControlBootstrap/EncoderBundleContract.cs" Link="EncoderBundleContract.cs" />
     <Compile Include="../HostControlBootstrap/AutoLogonTransaction.cs" Link="AutoLogonTransaction.cs" />

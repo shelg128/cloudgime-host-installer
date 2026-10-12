@@ -50,6 +50,7 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if(HeadlessSetupCommands.Handles(args))return HeadlessSetupCommands.Run(args);
         try
         {
             UniversalInstallPolicy.RejectCommandLineSecrets(args);
