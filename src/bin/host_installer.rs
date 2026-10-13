@@ -2832,8 +2832,12 @@ fn run_first_boot_bridge(bundle_root: &Path) -> Result<()> {
     let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let timestamp=|seconds:u64| chrono::DateTime::<chrono::Utc>::from(UNIX_EPOCH+std::time::Duration::from_secs(seconds)).to_rfc3339();
     let payload=serde_json::json!({"version":1,"operationId":uuid::Uuid::new_v4().to_string(),"sentinelHelper":"host-control/SentinelHelper.exe","sentinelHelperHash":hash(&helper)?,"provisioningRoot":r"C:\\ProgramData\\CloudGime\\Provisioning","operatorSid":sid,"packageHash":hash(&bootstrap)?,"createdAt":timestamp(now),"validUntil":timestamp(now+1200)});
-    fs::write(&plan,serde_json::to_vec(&payload)?)?;
-    let status=Command::new(&bootstrap).args(["installer-first-boot", bundle_root.to_str().ok_or_else(||anyhow!("bundle path invalid"))?, plan.to_str().ok_or_else(||anyhow!("plan path invalid"))?]).status().context("first-boot bridge launch failed")?;
+    let plan_bytes=serde_json::to_vec(&payload)?;
+    fs::write(&plan,&plan_bytes)?;
+    // The bridge validates its own executable hash as PackageHash. Tell the
+    // production installer exactly which bootstrap is authorized for this
+    // operation; no activation credential is ever written into the plan.
+    let status=Command::new(&bootstrap).args(["installer-first-boot", bundle_root.to_str().ok_or_else(||anyhow!("bundle path invalid"))?, plan.to_str().ok_or_else(||anyhow!("plan path invalid"))?,"--silent"]).status().context("first-boot bridge launch failed")?;
     if !status.success(){bail!("first-boot bridge failed")};Ok(())
 }
 

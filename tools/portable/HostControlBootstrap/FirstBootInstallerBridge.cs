@@ -24,6 +24,8 @@ internal static class FirstBootInstallerBridge
         var planDirectory=Path.GetDirectoryName(Path.GetFullPath(planPath))!;var directoryInfo=new DirectoryInfo(planDirectory);if(directoryInfo.LinkTarget is not null)throw new InvalidDataException("FIRST_BOOT_PLAN_REPARSE_DENIED");
         if(!helper.StartsWith(Path.GetFullPath(bundleRoot)+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase)||!File.Exists(helper)
             ||!CryptographicOperations.FixedTimeEquals(Convert.FromHexString(Hash(helper)),Convert.FromHexString(plan.SentinelHelperHash)))throw new InvalidDataException("FIRST_BOOT_HELPER_HASH_INVALID");
+        var bootstrap=System.Reflection.Assembly.GetExecutingAssembly().Location;
+        if(!CryptographicOperations.FixedTimeEquals(Convert.FromHexString(Hash(bootstrap)),Convert.FromHexString(plan.PackageHash)))throw new InvalidDataException("FIRST_BOOT_PACKAGE_HASH_CHANGED");
         var expectedRoot=Path.GetFullPath(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),"CloudGime","Provisioning"));
         if(!string.Equals(Path.GetFullPath(plan.ProvisioningRoot),expectedRoot,StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("FIRST_BOOT_ROOT_CHANGED");
         // The elevated installer may run through UAC with a linked admin token;
