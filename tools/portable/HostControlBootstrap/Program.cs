@@ -62,12 +62,18 @@ internal static class Program
             Log($"bootstrap error: {ex}");
             if (!args.Contains("--silent", StringComparer.OrdinalIgnoreCase))
                 MessageBox.Show(ex.Message, DefaultProductName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            else Console.Error.WriteLine(ex.Message);
             return 1;
         }
     }
 
     private static int Run(string[] args)
     {
+        if(args.Length is 3 or 4&&args[0]=="installer-first-boot"&&(args.Length==3||args[3]=="--silent"))
+        {
+            FirstBootInstallerBridge.Run(args[1],args[2]);
+            Console.WriteLine("{\"ok\":true,\"stage\":\"REBOOT_REQUIRED\"}");return 0;
+        }
         if(args.Length>0&&args[0]=="managed-upgrade-stage")
         {
             if(args.Length is not(4 or 5)||args.Length==5&&args[4]!="--silent")throw new InvalidDataException("UPGRADE_COMMAND_INVALID");

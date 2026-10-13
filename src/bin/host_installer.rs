@@ -851,7 +851,15 @@ fn run() -> Result<()> {
                 )?;
             }
             apply_license_assignment_to_runtime_config(&paths)?;
-            println!("{{\"ok\":true,\"status\":\"PROVISIONED_WAITING_HEARTBEATS\"}}");
+            // Sentinel must be installed before first-boot arming: the new
+            // renter shell is permitted only when its gate/broker payload is
+            // already present. Its own setup script is hash-pinned in the
+            // bundle and executes without opening Host Control.
+            install_sentinel_bundle(&paths.bundle_root)?;
+            // Host credentials and Sentinel are durable before first-boot
+            // arming. The bridge can now prepare the locked rental account.
+            run_first_boot_bridge(&paths.bundle_root)?;
+            println!("{{\"ok\":true,\"status\":\"REBOOT_REQUIRED\"}}");
             Ok(())
         }
         InstallerCommand::Repair { api_base_url } => {
@@ -2802,6 +2810,31 @@ fn find_offline_vdd_control_tool(paths: &BundlePaths) -> Option<PathBuf> {
     ];
 
     candidates.into_iter().find(|path| path.exists())
+}
+
+fn install_sentinel_bundle(bundle_root: &Path) -> Result<()> {
+    let script=bundle_root.join("setup-sentinel.ps1");
+    let sentinel=bundle_root.join("sentinel\\SentinelLauncherSetup.exe");
+    if !script.is_file() || !sentinel.is_file(){bail!("sentinel bundle payload missing")}
+    let status=Command::new("powershell.exe").args(["-NoProfile","-ExecutionPolicy","Bypass","-File",script.to_str().ok_or_else(||anyhow!("sentinel setup path invalid"))?]).status().context("sentinel setup launch failed")?;
+    if !status.success(){bail!("sentinel setup failed")};Ok(())
+}
+
+fn run_first_boot_bridge(bundle_root: &Path) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    let bootstrap = bundle_root.join("host-control\\cloudgime-host-bootstrap.exe");
+    let helper = bundle_root.join("host-control\\SentinelHelper.exe");
+    let plan = bundle_root.join("host-control\\first-boot-plan.json");
+    if !bootstrap.is_file() || !helper.is_file() { bail!("first-boot bridge payload missing") }
+    let sid=Command::new("whoami").args(["/user","/fo","csv","/nh"]).output().context("operator sid lookup failed")?;
+    if !sid.status.success(){bail!("operator sid lookup failed")};let sid=String::from_utf8(sid.stdout)?.split(',').nth(1).map(|x|x.trim_matches(&['\"','\r','\n'][..]).to_string()).filter(|x|x.starts_with("S-1-5-21-")).ok_or_else(||anyhow!("operator sid invalid"))?;
+    let hash=|p:&Path|->Result<String>{let bytes=fs::read(p)?;Ok(hex::encode(Sha256::digest(bytes)))};
+    let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let timestamp=|seconds:u64| chrono::DateTime::<chrono::Utc>::from(UNIX_EPOCH+std::time::Duration::from_secs(seconds)).to_rfc3339();
+    let payload=serde_json::json!({"version":1,"operationId":uuid::Uuid::new_v4().to_string(),"sentinelHelper":"host-control/SentinelHelper.exe","sentinelHelperHash":hash(&helper)?,"provisioningRoot":r"C:\\ProgramData\\CloudGime\\Provisioning","operatorSid":sid,"packageHash":hash(&bootstrap)?,"createdAt":timestamp(now),"validUntil":timestamp(now+1200)});
+    fs::write(&plan,serde_json::to_vec(&payload)?)?;
+    let status=Command::new(&bootstrap).args(["installer-first-boot", bundle_root.to_str().ok_or_else(||anyhow!("bundle path invalid"))?, plan.to_str().ok_or_else(||anyhow!("plan path invalid"))?]).status().context("first-boot bridge launch failed")?;
+    if !status.success(){bail!("first-boot bridge failed")};Ok(())
 }
 
 fn install_bundled_virtual_display_settings(settings_source: &PathBuf) -> Result<()> {

@@ -4,16 +4,19 @@ param(
  [Parameter(Mandatory=$true)][string]$OutputBundleRoot,
  [Parameter(Mandatory=$true)][string]$SentinelInstallerPath,
  [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-fA-F]{64}$')][string]$SentinelInstallerSha256,
+ [Parameter(Mandatory=$true)][string]$SentinelHelperPath,
+ [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-fA-F]{64}$')][string]$SentinelHelperSha256,
  [Parameter(Mandatory=$true)][ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+$')][string]$ReleaseVersion,
  [switch]$FixtureOnly
 )
 Set-StrictMode -Version Latest;$ErrorActionPreference='Stop'
-$InputBundleRoot=[IO.Path]::GetFullPath($InputBundleRoot);$OutputBundleRoot=[IO.Path]::GetFullPath($OutputBundleRoot);$SentinelInstallerPath=[IO.Path]::GetFullPath($SentinelInstallerPath)
+$InputBundleRoot=[IO.Path]::GetFullPath($InputBundleRoot);$OutputBundleRoot=[IO.Path]::GetFullPath($OutputBundleRoot);$SentinelInstallerPath=[IO.Path]::GetFullPath($SentinelInstallerPath);$SentinelHelperPath=[IO.Path]::GetFullPath($SentinelHelperPath)
 if($OutputBundleRoot.StartsWith($InputBundleRoot.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase) -or $InputBundleRoot.StartsWith($OutputBundleRoot.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'INPUT_OUTPUT_OVERLAP'}
 if(-not(Test-Path $InputBundleRoot -PathType Container)){throw 'INPUT_BUNDLE_MISSING'}
 if((Get-Item -LiteralPath $InputBundleRoot -Force).Attributes-band[IO.FileAttributes]::ReparsePoint){throw 'REPARSE_INPUT_ROOT'}
 if(Test-Path $OutputBundleRoot){throw 'OUTPUT_BUNDLE_MUST_BE_NEW'}
 if((Get-FileHash $SentinelInstallerPath -Algorithm SHA256).Hash-ne$SentinelInstallerSha256){throw 'SENTINEL_HASH_MISMATCH'}
+if(-not(Test-Path $SentinelHelperPath -PathType Leaf)-or(Get-FileHash $SentinelHelperPath -Algorithm SHA256).Hash-ne$SentinelHelperSha256){throw 'SENTINEL_HELPER_HASH_MISMATCH'}
 # Require the proven helper receipt before creating a release output; fixture-only is never installable.
 if(-not$FixtureOnly){
  & node (Join-Path $PSScriptRoot 'verify-encoder-runtime.mjs') verify (Join-Path $InputBundleRoot 'moonlight\server\display-prepare-helper.exe') (Join-Path $PSScriptRoot 'DisplayPrepareHelper')
@@ -56,6 +59,7 @@ foreach($entry in @(
 [IO.File]::WriteAllText((Join-Path $OutputBundleRoot 'moonlight\server\data.json'),'{"version":"2","users":{},"hosts":{}}',[Text.UTF8Encoding]::new($false))
 $pairSource=Join-Path $PSScriptRoot 'auto-pair-host.ps1';if(-not(Test-Path $pairSource)){throw 'PAIRING_SCRIPT_MISSING'};Copy-Item $pairSource (Join-Path $OutputBundleRoot 'auto-pair-host.ps1')
 New-Item -ItemType Directory (Join-Path $OutputBundleRoot 'sentinel') -Force|Out-Null;Copy-Item $SentinelInstallerPath (Join-Path $OutputBundleRoot 'sentinel\SentinelLauncherSetup.exe')
+New-Item -ItemType Directory (Join-Path $OutputBundleRoot 'host-control') -Force|Out-Null;Copy-Item (Join-Path (Split-Path $SentinelHelperPath) '*') (Join-Path $OutputBundleRoot 'host-control') -Recurse -Force
 # Seal last. The manifest itself is intentionally not listed in files.
 $packProject=Join-Path $PSScriptRoot 'HostControlPackaging\HostControlPackaging.csproj';& dotnet build $packProject -c Release;if($LASTEXITCODE-ne0){throw 'PACKAGING_BUILD_FAILED'}
 $dll=Join-Path $PSScriptRoot 'HostControlPackaging\bin\Release\net8.0\HostControlPackaging.dll'

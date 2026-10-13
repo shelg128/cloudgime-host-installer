@@ -17,7 +17,7 @@ internal static class UniversalBundleContract
         "moonlight/static/stream/transport/webrtc.js", "moonlight/server/config.json",
         "moonlight/server/data.json", "sunshine/sunshine.exe",
         "keeper-tunnel/cloudgimehosttunnel.exe", "auto-pair-host.ps1",
-        "sentinel/SentinelLauncherSetup.exe"
+        "sentinel/SentinelLauncherSetup.exe", "host-control/SentinelHelper.exe", "host-control/SentinelHelper.deps.json", "host-control/SentinelHelper.dll", "host-control/SentinelHelper.runtimeconfig.json"
     ];
 
     internal static bool IsUniversal(string root)
