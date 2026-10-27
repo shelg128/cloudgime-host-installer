@@ -21,6 +21,7 @@ use common::api_bindings::{
 use common::config::{Config, PortRange, WebRtcNetworkType};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 #[path = "installer_identity_retry.rs"]
 mod installer_identity_retry;
@@ -55,6 +56,15 @@ struct Cli {
 enum InstallerCommand {
     PrepareHost,
     PrepareInstall,
+    #[command(name = "installer-first-boot-plan")]
+    InstallerFirstBootPlan {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long = "plan-hash")]
+        plan_hash: String,
+        #[arg(long = "current-boot")]
+        current_boot: String,
+    },
     Provision {
         #[arg(long, conflicts_with = "activation_license_file")]
         activation_license: Option<String>,
@@ -68,6 +78,10 @@ enum InstallerCommand {
         /// Explicit recovery only: reuse canonical identity from local activation state.
         #[arg(long, default_value_t = false)]
         recover_existing_identity: bool,
+        /// Commit only the activation/config transaction. The headless wrapper
+        /// owns runtime installation and first-boot sequencing separately.
+        #[arg(long, default_value_t = false)]
+        activation_only: bool,
     },
     /// Rotate host runtime + renewal credentials for an existing Universal Node
     /// without a pairing token.
@@ -761,12 +775,22 @@ fn run() -> Result<()> {
             prepare_install_environment(&paths)?;
             Ok(())
         }
+        InstallerCommand::InstallerFirstBootPlan {
+            plan,
+            plan_hash,
+            current_boot,
+        } => {
+            ensure_provision_privilege()?;
+            execute_installer_first_boot_plan(&plan, &plan_hash, &current_boot)?;
+            Ok(())
+        }
         InstallerCommand::Provision {
             activation_license,
             activation_license_file,
             profile,
             api_base_url,
             recover_existing_identity,
+            activation_only,
         } => {
             ensure_provision_privilege()?;
             if profile != "always_on_host" && profile != "instance_pair" {
@@ -775,7 +799,9 @@ fn run() -> Result<()> {
             let activation_license = match (activation_license, activation_license_file) {
                 (Some(value), None) if !value.trim().is_empty() => value,
                 (None, Some(path)) => read_activation_license_file(&path)?,
-                (None, None) if provisioning::can_resume_activation(&paths.bundle_root)? => String::new(),
+                (None, None) if provisioning::can_resume_activation(&paths.bundle_root)? => {
+                    String::new()
+                }
                 (None, None) => {
                     eprint!("Activation license: ");
                     std::io::stdout().flush()?;
@@ -851,6 +877,10 @@ fn run() -> Result<()> {
                 )?;
             }
             apply_license_assignment_to_runtime_config(&paths)?;
+            if activation_only {
+                println!("{{\"ok\":true,\"status\":\"PROVISIONED_WAITING_HEARTBEATS\"}}");
+                return Ok(());
+            }
             // Sentinel must be installed before first-boot arming: the new
             // renter shell is permitted only when its gate/broker payload is
             // already present. Its own setup script is hash-pinned in the
@@ -1052,8 +1082,42 @@ fn prepare_install_environment(paths: &BundlePaths) -> Result<()> {
     for warning in warnings {
         eprintln!("{warning}");
     }
-    ensure_user_agent_task(paths)?;
+    // Headless first-boot prepare runs as LocalSystem. A per-user companion task
+    // cannot be registered from that non-interactive token; defer it until the
+    // selected desktop user starts host control after installation.
+    if should_defer_user_agent_task() {
+        eprintln!(
+            "Deferred user-session supervisor task: no interactive desktop token is available."
+        );
+    } else {
+        ensure_user_agent_task(paths)?;
+    }
     Ok(())
+}
+
+fn should_defer_user_agent_task() -> bool {
+    if std::env::var("USERNAME")
+        .map(|name| name.eq_ignore_ascii_case("SYSTEM"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    // Scheduled tasks running as LocalSystem can inherit a normal user's active
+    // terminal session, so session enumeration is not an identity test. Query the
+    // executing process token instead; S-1-5-18 is the well-known LocalSystem SID.
+    Command::new("whoami")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()
+        .map(|output| {
+            !output.status.success()
+                || String::from_utf8_lossy(&output.stdout)
+                    .to_ascii_uppercase()
+                    .contains("S-1-5-18")
+        })
+        // If identity cannot be proven, avoid creating a task with a malformed
+        // user account. An interactive host-control launch will create it later.
+        .unwrap_or(true)
 }
 
 #[derive(Debug, Default)]
@@ -2813,32 +2877,200 @@ fn find_offline_vdd_control_tool(paths: &BundlePaths) -> Option<PathBuf> {
 }
 
 fn install_sentinel_bundle(bundle_root: &Path) -> Result<()> {
-    let script=bundle_root.join("setup-sentinel.ps1");
-    let sentinel=bundle_root.join("sentinel\\SentinelLauncherSetup.exe");
-    if !script.is_file() || !sentinel.is_file(){bail!("sentinel bundle payload missing")}
-    let status=Command::new("powershell.exe").args(["-NoProfile","-ExecutionPolicy","Bypass","-File",script.to_str().ok_or_else(||anyhow!("sentinel setup path invalid"))?]).status().context("sentinel setup launch failed")?;
-    if !status.success(){bail!("sentinel setup failed")};Ok(())
+    let script = bundle_root.join("setup-sentinel.ps1");
+    let sentinel = bundle_root.join("sentinel\\SentinelLauncherSetup.exe");
+    if !script.is_file() || !sentinel.is_file() {
+        bail!("sentinel bundle payload missing")
+    }
+    let status = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            script
+                .to_str()
+                .ok_or_else(|| anyhow!("sentinel setup path invalid"))?,
+        ])
+        .status()
+        .context("sentinel setup launch failed")?;
+    if !status.success() {
+        bail!("sentinel setup failed")
+    };
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct InstallerFirstBootPlan {
+    version: u32,
+    operation_id: String,
+    host_installer: String,
+    host_installer_hash: String,
+    provisioning_root: String,
+    operator_sid: String,
+    package_hash: String,
+    created_at: String,
+    valid_until: String,
+}
+
+fn execute_installer_first_boot_plan(
+    plan_path: &Path,
+    expected_plan_hash: &str,
+    current_boot: &str,
+) -> Result<()> {
+    if !is_sha256_hex(expected_plan_hash) {
+        bail!("FIRST_BOOT_PLAN_HASH_INVALID");
+    }
+    if current_boot.trim().is_empty() || current_boot.len() > 256 {
+        bail!("FIRST_BOOT_BOOT_ID_INVALID");
+    }
+
+    let plan_bytes = fs::read(plan_path).context("FIRST_BOOT_PLAN_READ_FAILED")?;
+    if plan_bytes.is_empty()
+        || plan_bytes.len() > 32 * 1024
+        || sha256_hex(&plan_bytes) != expected_plan_hash.to_ascii_lowercase()
+    {
+        bail!("FIRST_BOOT_PLAN_HASH_MISMATCH");
+    }
+
+    let plan: InstallerFirstBootPlan =
+        serde_json::from_slice(&plan_bytes).context("FIRST_BOOT_PLAN_INVALID")?;
+    let provisioning_root = PathBuf::from(r"C:\ProgramData\CloudGime\Provisioning");
+    let expected_plan = provisioning_root.join("first-boot-plans").join("plan.json");
+    let current_exe = std::env::current_exe().context("FIRST_BOOT_EXECUTABLE_UNKNOWN")?;
+    if plan.version != 1
+        || uuid::Uuid::parse_str(&plan.operation_id).is_err()
+        || plan_path != expected_plan
+        || Path::new(&plan.host_installer) != current_exe
+        || !is_sha256_hex(&plan.host_installer_hash)
+        || !is_sha256_hex(&plan.package_hash)
+        || Path::new(&plan.provisioning_root) != provisioning_root
+        || plan.operator_sid.trim().is_empty()
+        || plan.created_at.trim().is_empty()
+        || plan.valid_until.trim().is_empty()
+    {
+        bail!("FIRST_BOOT_PLAN_INVALID");
+    }
+    let created_at = chrono::DateTime::parse_from_rfc3339(&plan.created_at)
+        .map_err(|_| anyhow!("FIRST_BOOT_PLAN_CREATED_AT_INVALID"))?
+        .with_timezone(&chrono::Utc);
+    let valid_until = chrono::DateTime::parse_from_rfc3339(&plan.valid_until)
+        .map_err(|_| anyhow!("FIRST_BOOT_PLAN_VALID_UNTIL_INVALID"))?
+        .with_timezone(&chrono::Utc);
+    let now = chrono::Utc::now();
+    if created_at > now
+        || valid_until < now
+        || valid_until - created_at > chrono::Duration::minutes(20)
+    {
+        bail!("FIRST_BOOT_PLAN_EXPIRED");
+    }
+
+    let worker_hash =
+        sha256_hex(&fs::read(&current_exe).context("FIRST_BOOT_EXECUTABLE_READ_FAILED")?);
+    if worker_hash != plan.host_installer_hash.to_ascii_lowercase() {
+        bail!("FIRST_BOOT_WORKER_HASH_MISMATCH");
+    }
+    let bootstrap = current_exe
+        .parent()
+        .context("FIRST_BOOT_EXECUTABLE_PATH_INVALID")?
+        .join("host-control")
+        .join("cloudgime-host-bootstrap.exe");
+    let bootstrap_hash =
+        sha256_hex(&fs::read(&bootstrap).context("FIRST_BOOT_PACKAGE_READ_FAILED")?);
+    if bootstrap_hash != plan.package_hash.to_ascii_lowercase() {
+        bail!("FIRST_BOOT_PACKAGE_HASH_MISMATCH");
+    }
+
+    let installer_private = provisioning_root.join("first-boot-installer-private");
+    let shell_private = provisioning_root.join("first-boot-shell-private");
+    fs::create_dir_all(&installer_private).context("FIRST_BOOT_JOURNAL_DIRECTORY_FAILED")?;
+    fs::create_dir_all(&shell_private).context("FIRST_BOOT_HANDOFF_DIRECTORY_FAILED")?;
+
+    let binding = serde_json::json!({
+        "OperationId": plan.operation_id,
+        "PackageHash": plan.package_hash,
+        "HostInstallerHash": plan.host_installer_hash,
+        "OperatorSid": plan.operator_sid,
+        "ProvisioningRoot": plan.provisioning_root
+    });
+    let journal = serde_json::json!({
+        "Version": 1,
+        "Stage": "ARMED",
+        "StartedBoot": current_boot,
+        "Pending": serde_json::Value::Null,
+        "Binding": binding
+    });
+    let handoff = serde_json::json!({
+        "Stage": "ARMED",
+        "PreparedBoot": current_boot,
+        "Binding": binding
+    });
+    let receipt = serde_json::json!({
+        "operationId": plan.operation_id,
+        "packageHash": plan.package_hash,
+        "hostInstallerHash": plan.host_installer_hash,
+        "operatorSid": plan.operator_sid,
+        "provisioningRoot": plan.provisioning_root,
+        "stage": "ARMED",
+        "preparedBoot": current_boot
+    });
+    write_first_boot_json(&installer_private.join("installer-journal.json"), &journal)?;
+    write_first_boot_json(&shell_private.join("handoff.json"), &handoff)?;
+    write_first_boot_json(&shell_private.join("installer-complete.json"), &receipt)?;
+    Ok(())
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn write_first_boot_json(path: &Path, value: &serde_json::Value) -> Result<()> {
+    let parent = path.parent().context("FIRST_BOOT_ARTIFACT_PATH_INVALID")?;
+    fs::create_dir_all(parent).context("FIRST_BOOT_ARTIFACT_DIRECTORY_FAILED")?;
+    let temporary = path.with_extension("next");
+    let encoded = serde_json::to_vec(value).context("FIRST_BOOT_ARTIFACT_SERIALIZE_FAILED")?;
+    {
+        use std::io::Write;
+        let mut output =
+            fs::File::create(&temporary).context("FIRST_BOOT_ARTIFACT_WRITE_FAILED")?;
+        output
+            .write_all(&encoded)
+            .context("FIRST_BOOT_ARTIFACT_WRITE_FAILED")?;
+        output
+            .sync_all()
+            .context("FIRST_BOOT_ARTIFACT_SYNC_FAILED")?;
+    }
+    fs::rename(&temporary, path).context("FIRST_BOOT_ARTIFACT_COMMIT_FAILED")?;
+    Ok(())
 }
 
 fn run_first_boot_bridge(bundle_root: &Path) -> Result<()> {
-    use sha2::{Digest, Sha256};
-    let bootstrap = bundle_root.join("host-control\\cloudgime-host-bootstrap.exe");
-    let helper = bundle_root.join("host-control\\SentinelHelper.exe");
-    let plan = bundle_root.join("host-control\\first-boot-plan.json");
-    if !bootstrap.is_file() || !helper.is_file() { bail!("first-boot bridge payload missing") }
-    let sid=Command::new("whoami").args(["/user","/fo","csv","/nh"]).output().context("operator sid lookup failed")?;
-    if !sid.status.success(){bail!("operator sid lookup failed")};let sid=String::from_utf8(sid.stdout)?.split(',').nth(1).map(|x|x.trim_matches(&['\"','\r','\n'][..]).to_string()).filter(|x|x.starts_with("S-1-5-21-")).ok_or_else(||anyhow!("operator sid invalid"))?;
-    let hash=|p:&Path|->Result<String>{let bytes=fs::read(p)?;Ok(hex::encode(Sha256::digest(bytes)))};
-    let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let timestamp=|seconds:u64| chrono::DateTime::<chrono::Utc>::from(UNIX_EPOCH+std::time::Duration::from_secs(seconds)).to_rfc3339();
-    let payload=serde_json::json!({"version":1,"operationId":uuid::Uuid::new_v4().to_string(),"sentinelHelper":"host-control/SentinelHelper.exe","sentinelHelperHash":hash(&helper)?,"provisioningRoot":r"C:\\ProgramData\\CloudGime\\Provisioning","operatorSid":sid,"packageHash":hash(&bootstrap)?,"createdAt":timestamp(now),"validUntil":timestamp(now+1200)});
-    let plan_bytes=serde_json::to_vec(&payload)?;
-    fs::write(&plan,&plan_bytes)?;
-    // The bridge validates its own executable hash as PackageHash. Tell the
-    // production installer exactly which bootstrap is authorized for this
-    // operation; no activation credential is ever written into the plan.
-    let status=Command::new(&bootstrap).args(["installer-first-boot", bundle_root.to_str().ok_or_else(||anyhow!("bundle path invalid"))?, plan.to_str().ok_or_else(||anyhow!("plan path invalid"))?,"--silent"]).status().context("first-boot bridge launch failed")?;
-    if !status.success(){bail!("first-boot bridge failed")};Ok(())
+    let bootstrap = bundle_root
+        .join("host-control")
+        .join("cloudgime-host-bootstrap.exe");
+    if !bootstrap.is_file() {
+        bail!("first-boot bridge payload missing")
+    }
+    // C# owns protected plan creation and exact-operation renewal. Never write
+    // changing per-machine state into the sealed runtime bundle or mint a new
+    // operation after an interrupted arm.
+    let status = Command::new(&bootstrap)
+        .arg("prepare-installer-first-boot")
+        .arg(bundle_root)
+        .arg("--silent")
+        .status()
+        .context("first-boot bridge launch failed")?;
+    if !status.success() {
+        bail!("first-boot bridge failed")
+    }
+    Ok(())
 }
 
 fn install_bundled_virtual_display_settings(settings_source: &PathBuf) -> Result<()> {
@@ -6579,7 +6811,13 @@ fn default_sunshine_service_name(paths: &BundlePaths) -> String {
 }
 
 fn install_service(paths: &BundlePaths) -> Result<()> {
-    ensure_user_agent_task(paths)?;
+    if should_defer_user_agent_task() {
+        eprintln!(
+            "Deferred user-session supervisor task: no interactive desktop token is available."
+        );
+    } else {
+        ensure_user_agent_task(paths)?;
+    }
     ensure_sunshine_runtime_service(paths)?;
     let service_name = default_service_name(paths);
     let display_name = format!(

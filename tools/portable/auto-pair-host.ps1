@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
-    [string]$BundleRoot
+    [string]$BundleRoot,
+    [string]$FirstBootOperation
 )
 
 Set-StrictMode -Version Latest
@@ -136,6 +137,10 @@ function Invoke-JsonRequest(
     [switch]$ResponseHeadersOnly
 ) {
     $request = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::new($Method), $Url)
+    if($FirstBootOperation -and ([uri]$Url).Scheme-eq'http' -and ([uri]$Url).IsLoopback -and ([uri]$Url).Port-eq$localPort){
+        $credentialBytes=[Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes((Join-Path $env:ProgramData 'CloudGime\provisioning\host_app.credential.dpapi')),$null,[Security.Cryptography.DataProtectionScope]::LocalMachine)
+        try{$envelope=[Text.Encoding]::UTF8.GetString($credentialBytes)|ConvertFrom-Json;[void]$request.Headers.TryAddWithoutValidation('X-CloudGime-Onboarding',[string]$envelope.deviceToken)}finally{[Array]::Clear($credentialBytes,0,$credentialBytes.Length);$envelope=$null}
+    }
     if (-not [string]::IsNullOrWhiteSpace($Cookie)) {
         [void]$request.Headers.TryAddWithoutValidation('Cookie', $Cookie)
     }
@@ -191,7 +196,34 @@ function Find-LocalHostId([uint32]$SunshinePort) {
 }
 
 $broker = Get-Service SentinelNodeBroker -ErrorAction SilentlyContinue
-if ($broker -and $broker.Status -eq 'Running') { throw 'PAIRING_REQUIRES_STOPPED_BROKER_AND_OPERATOR_MAINTENANCE' }
+if($FirstBootOperation){
+    $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+    if(!$identity.IsSystem-or[Diagnostics.Process]::GetCurrentProcess().SessionId-ne 0){throw 'PAIRING_SYSTEM_REQUIRED'}
+    $operation=[guid]::Empty;if(![guid]::TryParseExact($FirstBootOperation,'D',[ref]$operation)-or$operation-eq[guid]::Empty){throw 'PAIRING_OPERATION_INVALID'}
+    $p=Join-Path $env:ProgramData 'CloudGime\provisioning';$private=Join-Path $p 'first-boot-shell-private'
+    foreach($item in @((Get-Item $private),(Get-Item (Join-Path $private 'handoff.json')))){
+        if($item.Attributes-band[IO.FileAttributes]::ReparsePoint){throw 'PAIRING_REPARSE_DENIED'}
+        $acl=Get-Acl $item.FullName
+        if($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value-notin@('S-1-5-18','S-1-5-32-544')){throw 'PAIRING_UNTRUSTED_OWNER'}
+        foreach($rule in $acl.Access){if($rule.AccessControlType-eq'Allow'-and$rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value-notin@('S-1-5-18','S-1-5-32-544')){throw 'PAIRING_PRIVATE_BOUNDARY_REQUIRED'}}
+    }
+    $h=Read-JsonFile (Join-Path $private 'handoff.json');$m=Read-JsonFile (Join-Path $p 'manifest.json');$s=@($m.components|Where-Object componentType -eq 'sentinel')
+    if($h.Binding.OperationId-ne$FirstBootOperation-or$h.Stage-notin@('ARMED','CONFIRMED')-or$s.Count-ne 1-or$h.Binding.PcId-ne$m.binding.pcId-or$h.Binding.ActivationId-ne$s[0].applicationActivationId){throw 'PAIRING_FIRST_BOOT_BINDING_CHANGED'}
+    $operational=Join-Path $private 'operational\operational.json';if(Test-Path $operational){$o=Read-JsonFile $operational;if($o.Stage-eq'OPERATIONAL'){
+        $existingConfig=Read-JsonFile $ConfigPath
+        if(Test-PairInfo ([uint32]$existingConfig.moonlight.default_http_port)){Write-Output '{"ok":true,"status":"already_paired","credentialsUnchanged":true}';exit 0}
+        throw 'PAIRING_OPERATIONAL_NODE_DENIED'
+    }}
+    Add-Type -AssemblyName System.Security
+    $plain=[Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes((Join-Path $p 'sentinel.credential.dpapi')),$null,[Security.Cryptography.DataProtectionScope]::LocalMachine)
+    try{
+        $credential=[Text.Encoding]::UTF8.GetString($plain)|ConvertFrom-Json
+        $body=@{pcId=[string]$m.binding.pcId;applicationActivationId=$h.Binding.ActivationId;operationId=$FirstBootOperation;packageSha256=('a'*64)}|ConvertTo-Json -Compress
+        $ack=Invoke-RestMethod -Uri 'https://cloudgime.my.id/api/v1/sentinel/managed-upgrade-state' -Method Post -ContentType 'application/json' -Body $body -Headers @{Authorization=('Bearer '+$credential.deviceToken)} -TimeoutSec 15 -MaximumRedirection 0
+        if(!$ack.ok-or!$ack.maintenance-or$ack.activeRentals-ne 0-or$ack.cleanupHolds-ne 0-or$ack.activeClaim){throw 'PAIRING_NODE_NOT_IDLE'}
+    }finally{[Array]::Clear($plain,0,$plain.Length);$credential=$null}
+}
+elseif ($broker -and $broker.Status -eq 'Running') { throw 'PAIRING_REQUIRES_STOPPED_BROKER_AND_OPERATOR_MAINTENANCE' }
 $config = Read-JsonFile $ConfigPath
 $localPort = Get-ConfigPort ([string]$config.web_server.bind_address)
 $sunshinePort = [int]$config.moonlight.default_http_port
@@ -279,13 +311,26 @@ try {
                 $sunshineRequest.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Basic', $sunshineAuth)
                 $pinJson = @{ pin = [string]$event.Pin; name = 'Cloudgime Host Web' } | ConvertTo-Json -Compress
                 $sunshineRequest.Content = New-Object System.Net.Http.StringContent($pinJson, [Text.Encoding]::UTF8, 'application/json')
-                $sunshineResponse = $sunshineClient.SendAsync($sunshineRequest).GetAwaiter().GetResult()
-                $sunshineBody = $sunshineResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-                $sunshineResponse.Dispose()
-                if (-not $sunshineBody -or -not (($sunshineBody | ConvertFrom-Json).status -eq $true)) {
-                    throw 'Sunshine rejected the automatic pairing PIN.'
-                }
-                $pinSubmitted = $true
+                # Host streams the PIN before its asynchronous Moonlight request
+                # necessarily reaches Sunshine. A negative PIN response can mean
+                # 'no pending client yet'; retry the SAME PIN, never start a second
+                # pairing operation or rotate the local credential.
+                $sunshineRequest.Dispose()
+                $pinDeadline=[datetime]::UtcNow.AddSeconds(15)
+                do {
+                    $pinRequest=New-Object Net.Http.HttpRequestMessage([Net.Http.HttpMethod]::Post,"https://127.0.0.1:$($sunshinePort + 1)/api/pin")
+                    $pinRequest.Headers.Authorization=New-Object Net.Http.Headers.AuthenticationHeaderValue('Basic',$sunshineAuth)
+                    $pinRequest.Content=New-Object Net.Http.StringContent($pinJson,[Text.Encoding]::UTF8,'application/json')
+                    $pinResponse=$null
+                    try {
+                        $pinResponse=$sunshineClient.SendAsync($pinRequest).GetAwaiter().GetResult()
+                        if([int]$pinResponse.StatusCode-in@(401,403)){throw 'SUNSHINE_PAIRING_AUTH_REJECTED'}
+                        $sunshineBody=$pinResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+                        if($pinResponse.IsSuccessStatusCode-and$sunshineBody-and(($sunshineBody|ConvertFrom-Json).status-eq$true)){$pinSubmitted=$true}
+                    }finally{if($null-ne$pinResponse){$pinResponse.Dispose()};$pinRequest.Dispose()}
+                    if(!$pinSubmitted){Start-Sleep -Milliseconds 350}
+                }while(!$pinSubmitted-and[datetime]::UtcNow-lt$pinDeadline)
+                if(!$pinSubmitted){throw 'SUNSHINE_PAIRING_PENDING_CLIENT_TIMEOUT'}
             }
             if ($event.PSObject.Properties.Name -contains 'Paired') { $paired = $true; break }
             if ($event.PSObject.Properties.Name -contains 'PairError') { throw 'Sunshine/Moonlight automatic pairing returned PairError.' }

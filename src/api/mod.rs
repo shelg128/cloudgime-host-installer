@@ -49,10 +49,10 @@ use common::api_bindings::{
     PostWakeUpRequest, UndetailedHost,
 };
 
-mod claim_revoke;
 pub mod admin;
 pub mod android_native;
 pub mod auth;
+mod claim_revoke;
 pub mod stream;
 
 pub mod response_streaming;

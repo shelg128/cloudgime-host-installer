@@ -1,8 +1,95 @@
 use super::*;
-use common::direct_recovery::{SelectedStreamRoute as Route,DirectRecoveryGrant};
+use common::direct_recovery::{DirectRecoveryGrant, SelectedStreamRoute as Route};
 #[actix_web::test]
-async fn recovery_route_is_bound_on_authenticated_consume_and_refresh(){let(app,_)=fixture().await;for route in["direct","relay"]{let issued=launch(&app).await;let(_,ticket)=app.consume_android_native_launch_for_route(&issued.launch_token,Some(route)).await.unwrap();assert_eq!(ticket.selected_route,Route::parse(Some(route)));let live=app.authorize_android_native_stream_ticket_for_stream(&ticket.stream_ticket,ticket.host_id,ticket.app_id).await.unwrap();assert_eq!(live.selected_route,ticket.selected_route);let renewed=app.refresh_android_native_stream_ticket(&ticket.stream_ticket,None,None).await.unwrap();assert_eq!(renewed.selected_route,ticket.selected_route);let now=unix_time_ms_now();assert_eq!(DirectRecoveryGrant::for_ticket(renewed.selected_route,renewed.expires_at_unix_ms,now).is_some(),route=="direct");}}
+async fn recovery_route_is_bound_on_authenticated_consume_and_refresh() {
+    let (app, _) = fixture().await;
+    for route in ["direct", "relay"] {
+        let issued = launch(&app).await;
+        let (_, ticket) = app
+            .consume_android_native_launch_for_route(&issued.launch_token, Some(route))
+            .await
+            .unwrap();
+        assert_eq!(ticket.selected_route, Route::parse(Some(route)));
+        let live = app
+            .authorize_android_native_stream_ticket_for_stream(
+                &ticket.stream_ticket,
+                ticket.host_id,
+                ticket.app_id,
+            )
+            .await
+            .unwrap();
+        assert_eq!(live.selected_route, ticket.selected_route);
+        let renewed = app
+            .refresh_android_native_stream_ticket(&ticket.stream_ticket, None, None)
+            .await
+            .unwrap();
+        assert_eq!(renewed.selected_route, ticket.selected_route);
+        let now = unix_time_ms_now();
+        assert_eq!(
+            DirectRecoveryGrant::for_ticket(
+                renewed.selected_route,
+                renewed.expires_at_unix_ms,
+                now
+            )
+            .is_some(),
+            route == "direct"
+        );
+    }
+}
 #[actix_web::test]
-async fn invalid_route_does_not_consume_launch_and_cannot_mint_grant(){let(app,_)=fixture().await;let issued=launch(&app).await;assert!(app.consume_android_native_launch_for_route(&issued.launch_token,Some("direct ")).await.is_err());let(_,ticket)=app.consume_android_native_launch_for_route(&issued.launch_token,Some("relay")).await.unwrap();assert_eq!(ticket.selected_route,Some(Route::Relay));assert!(app.consume_android_native_launch_for_route("not-a-token",Some("direct")).await.is_err());}
+async fn invalid_route_does_not_consume_launch_and_cannot_mint_grant() {
+    let (app, _) = fixture().await;
+    let issued = launch(&app).await;
+    assert!(
+        app.consume_android_native_launch_for_route(&issued.launch_token, Some("direct "))
+            .await
+            .is_err()
+    );
+    let (_, ticket) = app
+        .consume_android_native_launch_for_route(&issued.launch_token, Some("relay"))
+        .await
+        .unwrap();
+    assert_eq!(ticket.selected_route, Some(Route::Relay));
+    assert!(
+        app.consume_android_native_launch_for_route("not-a-token", Some("direct"))
+            .await
+            .is_err()
+    );
+}
 #[actix_web::test]
-async fn legacy_ticket_and_revoked_session_do_not_authorize_recovery(){let(app,_)=fixture().await;let issued=launch(&app).await;let(_,ticket)=app.consume_android_native_launch_token_with_stream_ticket(&issued.launch_token).await.unwrap();assert_eq!(ticket.selected_route,None);assert!(DirectRecoveryGrant::for_ticket(ticket.selected_route,ticket.expires_at_unix_ms,unix_time_ms_now()).is_none());app.inner.android_native_session_lifecycle.write().await.remove(&ticket.session_id);assert!(app.authorize_android_native_stream_ticket_for_stream(&ticket.stream_ticket,ticket.host_id,ticket.app_id).await.is_err());assert!(app.refresh_android_native_stream_ticket(&ticket.stream_ticket,None,None).await.is_err());}
+async fn legacy_ticket_and_revoked_session_do_not_authorize_recovery() {
+    let (app, _) = fixture().await;
+    let issued = launch(&app).await;
+    let (_, ticket) = app
+        .consume_android_native_launch_token_with_stream_ticket(&issued.launch_token)
+        .await
+        .unwrap();
+    assert_eq!(ticket.selected_route, None);
+    assert!(
+        DirectRecoveryGrant::for_ticket(
+            ticket.selected_route,
+            ticket.expires_at_unix_ms,
+            unix_time_ms_now()
+        )
+        .is_none()
+    );
+    app.inner
+        .android_native_session_lifecycle
+        .write()
+        .await
+        .remove(&ticket.session_id);
+    assert!(
+        app.authorize_android_native_stream_ticket_for_stream(
+            &ticket.stream_ticket,
+            ticket.host_id,
+            ticket.app_id
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        app.refresh_android_native_stream_ticket(&ticket.stream_ticket, None, None)
+            .await
+            .is_err()
+    );
+}

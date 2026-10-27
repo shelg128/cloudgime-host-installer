@@ -13,11 +13,10 @@ internal static class UniversalBundleContract
     internal static readonly string[] Required =
     [
         "host-installer.exe", "moonlight/web-server.exe", "moonlight/streamer.exe",
+        "moonlight/server/config.json", "moonlight/server/data.json",
         "moonlight/system/cloudgime-runtime-agent.exe", "moonlight/static/stream.js",
-        "moonlight/static/stream/transport/webrtc.js", "moonlight/server/config.json",
-        "moonlight/server/data.json", "sunshine/sunshine.exe",
-        "keeper-tunnel/cloudgimehosttunnel.exe", "auto-pair-host.ps1",
-        "sentinel/SentinelLauncherSetup.exe", "host-control/SentinelHelper.exe", "host-control/SentinelHelper.deps.json", "host-control/SentinelHelper.dll", "host-control/SentinelHelper.runtimeconfig.json"
+        "moonlight/static/stream/transport/webrtc.js", "sunshine/sunshine.exe",
+        "sentinel/SentinelLauncherSetup.exe", "host-control/SentinelHelper.exe", "host-control/cloudgime-host-bootstrap.exe"
     ];
 
     internal static bool IsUniversal(string root)
@@ -60,8 +59,8 @@ internal static class UniversalBundleContract
             if (!declared.Contains(required)) throw new InvalidDataException("REQUIRED_PAYLOAD_MISSING: " + required);
         var actual = Walk(root).Where(p => p != ManifestName).ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (!actual.SetEquals(declared)) throw new InvalidDataException("UNLISTED_PAYLOAD_FILES");
-        ValidateNeutralConfig(ParseObject(Path.Combine(root, "moonlight/server/config.json")),
-            ParseObject(Path.Combine(root, "moonlight/server/data.json")));
+        ValidateNeutralConfig(ParseObject(Path.Combine(root,"moonlight/server/config.json")),ParseObject(Path.Combine(root,"moonlight/server/data.json")));
+
     }
 
     internal static void RequireInstallable(string root)
@@ -174,7 +173,11 @@ internal static class UniversalBundleContract
     {
         RejectReparse(path);
         if (new FileInfo(path).Length > 16 * 1024 * 1024) throw new InvalidDataException("MANIFEST_TOO_LARGE");
-        using var document = JsonDocument.Parse(File.ReadAllBytes(path));
+        var bytes = File.ReadAllBytes(path);
+        var span = bytes.AsSpan();
+        if (span.Length >= 3 && span[0] == 0xEF && span[1] == 0xBB && span[2] == 0xBF)
+            span = span[3..];
+        using var document = JsonDocument.Parse(span.ToArray());
         RejectDuplicateKeys(document.RootElement);
         return JsonNode.Parse(document.RootElement.GetRawText())?.AsObject() ?? throw new InvalidDataException("JSON_OBJECT_REQUIRED");
     }

@@ -572,8 +572,12 @@ mod video;
 
 #[tokio::main]
 async fn main() {
-    if std::env::args().nth(1).as_deref()==Some("--direct-recovery-contract") {
-        println!("{{\"schema\":1,\"contract\":\"cg-scoped-direct-recovery-v1\",\"component\":\"streamer\",\"scoped\":{},\"negotiatedVideo\":true,\"bandwidthBudget\":true,\"qaUnscoped\":{}}}",cfg!(feature="cloudgime-scoped-direct-recovery"),cfg!(feature="cloudgime-datagram-redundancy-qa"));
+    if std::env::args().nth(1).as_deref() == Some("--direct-recovery-contract") {
+        println!(
+            "{{\"schema\":1,\"contract\":\"cg-scoped-direct-recovery-v1\",\"component\":\"streamer\",\"scoped\":{},\"negotiatedVideo\":true,\"bandwidthBudget\":true,\"qaUnscoped\":{}}}",
+            cfg!(feature = "cloudgime-scoped-direct-recovery"),
+            cfg!(feature = "cloudgime-datagram-redundancy-qa")
+        );
         return;
     }
     init_rustls_crypto_provider();
@@ -2618,7 +2622,11 @@ impl StreamConnection {
         // Share this lock with bitrate/start so a concurrent restart cannot replay
         // settings captured before this resize.
         let _reconfigure_guard = self.live_clarity_update_lock.lock().await;
-        let current = self.active_stream_settings.lock().await.clone()
+        let current = self
+            .active_stream_settings
+            .lock()
+            .await
+            .clone()
             .ok_or_else(|| anyhow::anyhow!("missing active stream settings"))?;
         let mut next = current.clone();
         next.width = width.max(1);
@@ -2627,7 +2635,10 @@ impl StreamConnection {
         if (current.width, current.height, current.fps) == (next.width, next.height, next.fps) {
             return Ok(());
         }
-        info!("[Stream]: renegotiating upstream encoder for runtime resize {}x{}@{}", next.width, next.height, next.fps);
+        info!(
+            "[Stream]: renegotiating upstream encoder for runtime resize {}x{}@{}",
+            next.width, next.height, next.fps
+        );
         if let Err(error) = self.start_stream_locked(next).await {
             // Roll back only this upstream connection; the selected WebRTC route,
             // rental identity and billing remain unchanged.
@@ -2637,7 +2648,11 @@ impl StreamConnection {
             return Err(error);
         }
         // Negotiation callbacks, not requested defaults, own stream_setup.
-        let applied = self.stream_setup.lock().await.video
+        let applied = self
+            .stream_setup
+            .lock()
+            .await
+            .video
             .ok_or_else(|| anyhow::anyhow!("missing negotiated resize video setup"))?;
         self.try_send_packet(
             OutboundPacket::General {
@@ -2650,7 +2665,8 @@ impl StreamConnection {
             },
             "runtime video reconfigured",
             false,
-        ).await;
+        )
+        .await;
         let mut pending = self.pending_video_flow_ready.lock().await;
         *pending = Some(PendingVideoFlowReady {
             phase: VideoFlowPhase::RuntimeResize,
@@ -2925,7 +2941,10 @@ impl StreamConnection {
         self.start_stream_locked(settings).await
     }
 
-    async fn start_stream_locked(self: &Arc<Self>, settings: StreamSettings) -> Result<(), anyhow::Error> {
+    async fn start_stream_locked(
+        self: &Arc<Self>,
+        settings: StreamSettings,
+    ) -> Result<(), anyhow::Error> {
         let hide_cursor = should_hide_host_cursor(settings.host_mouse_emulation);
         self.set_host_cursor_hidden_for_stream(hide_cursor, "start_stream")
             .await;

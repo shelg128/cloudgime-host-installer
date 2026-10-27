@@ -34,8 +34,9 @@ internal static class HeadlessBundleContract
             Exact(row,"path","bytes","sha256");var p=(string?)row["path"]??"";
             if(!UniversalBundleContract.IsSafeRelativePath(p)||!names.Add(p))throw new InvalidDataException("HEADLESS_PATH_INVALID");
             if(!p.StartsWith("app/",StringComparison.Ordinal)&&!p.StartsWith("bundle/",StringComparison.Ordinal))throw new InvalidDataException("HEADLESS_GROUP_INVALID");
-            UniversalBundleContract.RejectMachineState(p);
-            if(p.Contains("host-control",StringComparison.OrdinalIgnoreCase)||p.EndsWith(".lnk",StringComparison.OrdinalIgnoreCase)
+            UniversalBundleContract.RejectMachineState(p.StartsWith("bundle/",StringComparison.Ordinal)?p[7..]:p);
+            if(p.Contains("cloudgime-host-control.exe",StringComparison.OrdinalIgnoreCase)||p.Contains("open-host-control",StringComparison.OrdinalIgnoreCase)
+                ||p.EndsWith(".lnk",StringComparison.OrdinalIgnoreCase)
                 ||p.StartsWith("app/",StringComparison.Ordinal)&&p.EndsWith(".msi",StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("HEADLESS_GUI_PAYLOAD_DENIED");
             if(p.StartsWith("app/",StringComparison.Ordinal)&&!AppFiles.Contains(p[4..],StringComparer.Ordinal))throw new InvalidDataException("HEADLESS_APP_NOT_ALLOWED");

@@ -41,11 +41,11 @@ mod sender_queue;
 use sender_queue::{FrameQueue, SenderWorkers, next_frame};
 #[path = "nack_probe.rs"]
 mod nack_probe;
+use super::scoped_video_recovery::{Recovery, RecoveryTrack};
 use nack_probe::NackProbe;
-use super::scoped_video_recovery::{Recovery,RecoveryTrack};
 
-#[cfg(feature="cloudgime-egress-pacing-qa")]
-#[path="frame_egress_plan_qa.rs"]
+#[cfg(feature = "cloudgime-egress-pacing-qa")]
+#[path = "frame_egress_plan_qa.rs"]
 mod frame_egress_plan_qa;
 const PLAYOUT_DELAY_URI: &str = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay";
 const VIDEO_PACKET_PACING_BATCH: usize = 8;
@@ -59,10 +59,14 @@ fn video_playout_delay(label: &str) -> PlayoutDelayExtension {
     // without forcing a minimum delay. No route/codec/budget changes.
     if cfg!(feature = "cloudgime-jitter-window-qa") && label == "video" {
         PlayoutDelayExtension::new(0, 10)
-    } else { PlayoutDelayExtension::new(0, 0) }
+    } else {
+        PlayoutDelayExtension::new(0, 0)
+    }
 }
 
-fn include_abs_send_time(label:&str)->bool{!(cfg!(feature="cloudgime-video-noast-qa")&&label=="video")}
+fn include_abs_send_time(label: &str) -> bool {
+    !(cfg!(feature = "cloudgime-video-noast-qa") && label == "video")
+}
 
 pub fn register_header_extensions(api_media: &mut MediaEngine) -> Result<(), webrtc::Error> {
     api_media.register_header_extension(
@@ -81,13 +85,13 @@ pub fn register_header_extensions(api_media: &mut MediaEngine) -> Result<(), web
     )?;
 
     if include_abs_send_time("video") {
-    api_media.register_header_extension(
-        RTCRtpHeaderExtensionCapability {
-            uri: ABS_SEND_TIME_URI.to_string(),
-        },
-        RTPCodecType::Video,
-        None,
-    )?;
+        api_media.register_header_extension(
+            RTCRtpHeaderExtensionCapability {
+                uri: ABS_SEND_TIME_URI.to_string(),
+            },
+            RTPCodecType::Video,
+            None,
+        )?;
     }
     api_media.register_header_extension(
         RTCRtpHeaderExtensionCapability {
@@ -138,7 +142,10 @@ where
         }
     }
 
-    pub fn with_recovery(mut self,recovery:Option<Arc<Recovery>>)->Self{self.recovery=recovery;self}
+    pub fn with_recovery(mut self, recovery: Option<Arc<Recovery>>) -> Self {
+        self.recovery = recovery;
+        self
+    }
 
     pub async fn create_track(
         &mut self,
@@ -171,7 +178,9 @@ where
         }
 
         for transceiver in transceivers {
-            if track_sender.is_some() { break; }
+            if track_sender.is_some() {
+                break;
+            }
             if transceiver.kind() == kind {
                 let sender = transceiver.sender().await;
                 if sender.track().await.is_none() {
@@ -249,7 +258,10 @@ where
     pub async fn send_samples(&self, samples: Vec<Track::Sample>, important: bool) -> bool {
         let accepted = self.queue.push(samples, important).await;
         if !accepted {
-            warn!("[Stream]: {} sample queue full; dropping non-important sample", self.label);
+            warn!(
+                "[Stream]: {} sample queue full; dropping non-important sample",
+                self.label
+            );
         }
         accepted
     }
@@ -257,7 +269,6 @@ where
     pub async fn clear_queue(&self, clear_important: bool) {
         self.queue.clear(clear_important).await;
     }
-
 }
 
 async fn sample_sender<Track>(
@@ -287,12 +298,21 @@ async fn sample_sender<Track>(
         let send_started = Instant::now();
         let should_micro_pace = frame.samples.len() >= VIDEO_PACKET_PACING_BATCH * 2;
 
-        #[cfg(feature="cloudgime-egress-pacing-qa")]
-        let mut plan=frame_egress_plan_qa::FramePlan::default();
+        #[cfg(feature = "cloudgime-egress-pacing-qa")]
+        let mut plan = frame_egress_plan_qa::FramePlan::default();
         for (index, sample) in frame.samples.into_iter().enumerate() {
-            #[cfg(feature="cloudgime-egress-pacing-qa")]
-            if label=="video" {if let Some(due)=plan.next_due(send_started.elapsed()) {tokio::time::sleep_until(tokio::time::Instant::from_std(send_started+due)).await;}}
-            if !(cfg!(feature="cloudgime-egress-pacing-qa")&&label=="video") && should_micro_pace && index > 0 && index % VIDEO_PACKET_PACING_BATCH == 0 {
+            #[cfg(feature = "cloudgime-egress-pacing-qa")]
+            if label == "video" {
+                if let Some(due) = plan.next_due(send_started.elapsed()) {
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(send_started + due))
+                        .await;
+                }
+            }
+            if !(cfg!(feature = "cloudgime-egress-pacing-qa") && label == "video")
+                && should_micro_pace
+                && index > 0
+                && index % VIDEO_PACKET_PACING_BATCH == 0
+            {
                 tokio::time::sleep(Duration::from_micros(VIDEO_PACKET_PACING_DELAY_US)).await;
             }
 
@@ -302,21 +322,35 @@ async fn sample_sender<Track>(
             let now_secs = now.as_secs() as f64 + now.subsec_nanos() as f64 * 1e-9;
             let abs_send_time: u64 = (now_secs * 262_144.0) as u64;
 
-            let extensions=[HeaderExtension::PlayoutDelay(video_playout_delay(label)),HeaderExtension::AbsSendTime(AbsSendTimeExtension{timestamp:abs_send_time})];
-            let extensions=if include_abs_send_time(label){&extensions[..]}else{&extensions[..1]};
-            match track.write_with_extensions(sample,extensions).await
-            {
+            let extensions = [
+                HeaderExtension::PlayoutDelay(video_playout_delay(label)),
+                HeaderExtension::AbsSendTime(AbsSendTimeExtension {
+                    timestamp: abs_send_time,
+                }),
+            ];
+            let extensions = if include_abs_send_time(label) {
+                &extensions[..]
+            } else {
+                &extensions[..1]
+            };
+            match track.write_with_extensions(sample, extensions).await {
                 Ok(bytes_written) => {
-                    if bytes_written == 0 { zero_writes += 1; continue; }
-                    #[cfg(feature="cloudgime-egress-pacing-qa")]
-                    if label=="video"{plan.record(((bytes_written as u64).saturating_add(60)).saturating_mul(5)/4);}
+                    if bytes_written == 0 {
+                        zero_writes += 1;
+                        continue;
+                    }
+                    #[cfg(feature = "cloudgime-egress-pacing-qa")]
+                    if label == "video" {
+                        plan.record(
+                            ((bytes_written as u64).saturating_add(60)).saturating_mul(5) / 4,
+                        );
+                    }
                     samples_written = samples_written.saturating_add(1);
                     bytes_written_total = bytes_written_total.saturating_add(bytes_written as u64);
                     if !first_write_logged {
                         first_write_logged = true;
                         info!("[Stream]: first {label} WebRTC sample written");
                     }
-
                 }
                 Err(err) => {
                     warn!("[Stream]: {label} track.write_sample failed: {err}");
@@ -325,9 +359,14 @@ async fn sample_sender<Track>(
         }
         frame_send_max_us = frame_send_max_us.max(send_started.elapsed().as_micros() as u64);
         if last_stats_log_at.elapsed() >= Duration::from_secs(5) {
-            info!("[Stream]: pace {label} q_us={queue_max_us} send_us={frame_send_max_us} frames={frames_dequeued} zero={zero_writes}");
-            info!("[Stream]: {label} WebRTC RTP stats samples_written={samples_written} bytes_written={bytes_written_total}");
-            queue_max_us = 0; frame_send_max_us = 0;
+            info!(
+                "[Stream]: pace {label} q_us={queue_max_us} send_us={frame_send_max_us} frames={frames_dequeued} zero={zero_writes}"
+            );
+            info!(
+                "[Stream]: {label} WebRTC RTP stats samples_written={samples_written} bytes_written={bytes_written_total}"
+            );
+            queue_max_us = 0;
+            frame_send_max_us = 0;
             last_stats_log_at = Instant::now();
         }
     }
@@ -340,7 +379,7 @@ pub trait TrackLike: Send + Sync + 'static {
     // numbers on replacement. Static-sample tracks own their own packetizer.
     fn set_sequence_counter(&mut self, _counter: Arc<Mutex<u16>>) {}
     fn set_nack_probe(&mut self, _probe: Arc<Mutex<NackProbe>>) {}
-    fn set_recovery(&mut self,_recovery:Option<Arc<Recovery>>) {}
+    fn set_recovery(&mut self, _recovery: Option<Arc<Recovery>>) {}
 
     fn write_with_extensions(
         &self,
@@ -403,8 +442,14 @@ impl TrackLike for SequencedTrackLocalStaticRTP {
     fn set_sequence_counter(&mut self, counter: Arc<Mutex<u16>>) {
         self.sequence_number = counter;
     }
-    fn set_nack_probe(&mut self, probe: Arc<Mutex<NackProbe>>) { self.nack_probe = Some(probe); }
-    fn set_recovery(&mut self,recovery:Option<Arc<Recovery>>){if recovery.is_some(){self.recovery_track=Some(Arc::new(RecoveryTrack::new(self.track.clone(),recovery)));}}
+    fn set_nack_probe(&mut self, probe: Arc<Mutex<NackProbe>>) {
+        self.nack_probe = Some(probe);
+    }
+    fn set_recovery(&mut self, recovery: Option<Arc<Recovery>>) {
+        if recovery.is_some() {
+            self.recovery_track = Some(Arc::new(RecoveryTrack::new(self.track.clone(), recovery)));
+        }
+    }
 
     async fn write_with_extensions(
         &self,
@@ -442,19 +487,33 @@ impl TrackLike for SequencedTrackLocalStaticRTP {
         let mut sequence_number = self.sequence_number.lock().await;
         sample.header.sequence_number = advance_rtp_sequence(&mut sequence_number);
         if let Some(probe) = &self.nack_probe {
-            probe.lock().await.sent(sample.header.sequence_number, sample.payload.len(), Instant::now());
+            probe.lock().await.sent(
+                sample.header.sequence_number,
+                sample.payload.len(),
+                Instant::now(),
+            );
         }
 
-        let permission=if let Some(track)=&self.recovery_track {track.permission(sample.header.sequence_number).await}else{None};
-        let send=async {let send=self.track.write_rtp_with_extensions(&sample,extensions);if let Some(scope)=permission{webrtc_util::conn::scoped_recovery::within(scope,send).await}else{send.await}};
-        #[cfg(feature="cloudgime-total-egress-qa")]
-        let send=super::original_write_qa::within(sample.header.sequence_number,sample.header.timestamp,send);
-        let bytes_written = match tokio::time::timeout(
-            RTP_WRITE_TIMEOUT,
+        let permission = if let Some(track) = &self.recovery_track {
+            track.permission(sample.header.sequence_number).await
+        } else {
+            None
+        };
+        let send = async {
+            let send = self.track.write_rtp_with_extensions(&sample, extensions);
+            if let Some(scope) = permission {
+                webrtc_util::conn::scoped_recovery::within(scope, send).await
+            } else {
+                send.await
+            }
+        };
+        #[cfg(feature = "cloudgime-total-egress-qa")]
+        let send = super::original_write_qa::within(
+            sample.header.sequence_number,
+            sample.header.timestamp,
             send,
-        )
-        .await
-        {
+        );
+        let bytes_written = match tokio::time::timeout(RTP_WRITE_TIMEOUT, send).await {
             Ok(result) => result.map_err(anyhow::Error::from)?,
             Err(_) => {
                 warn!(
@@ -475,7 +534,11 @@ impl TrackLike for SequencedTrackLocalStaticRTP {
     }
 
     fn track(self: Arc<Self>) -> Arc<dyn TrackLocal + Send + Sync + 'static> {
-        if let Some(track)=&self.recovery_track {track.clone()} else {self.track.clone()}
+        if let Some(track) = &self.recovery_track {
+            track.clone()
+        } else {
+            self.track.clone()
+        }
     }
 }
 
@@ -486,39 +549,126 @@ mod sender_sequence_tests {
 
     fn raw_track() -> SequencedTrackLocalStaticRTP {
         TrackLocalStaticRTP::new(
-            RTCRtpCodecCapability { mime_type: "video/H264".into(), clock_rate: 90_000, ..Default::default() },
-            "video".into(), "test".into(),
-        ).into()
+            RTCRtpCodecCapability {
+                mime_type: "video/H264".into(),
+                clock_rate: 90_000,
+                ..Default::default()
+            },
+            "video".into(),
+            "test".into(),
+        )
+        .into()
     }
 
     #[tokio::test]
     async fn replacement_uses_the_same_next_sequence() {
         let counter = Arc::new(Mutex::new(65_534));
-        let mut first = raw_track(); first.set_sequence_counter(counter.clone());
-        assert_eq!(advance_rtp_sequence(&mut *first.sequence_number.lock().await), 65_534);
-        let mut replacement = raw_track(); replacement.set_sequence_counter(counter);
-        assert!(Arc::ptr_eq(&first.sequence_number, &replacement.sequence_number));
-        assert_eq!(advance_rtp_sequence(&mut *replacement.sequence_number.lock().await), 65_535);
-        assert_eq!(advance_rtp_sequence(&mut *replacement.sequence_number.lock().await), 0);
+        let mut first = raw_track();
+        first.set_sequence_counter(counter.clone());
+        assert_eq!(
+            advance_rtp_sequence(&mut *first.sequence_number.lock().await),
+            65_534
+        );
+        let mut replacement = raw_track();
+        replacement.set_sequence_counter(counter);
+        assert!(Arc::ptr_eq(
+            &first.sequence_number,
+            &replacement.sequence_number
+        ));
+        assert_eq!(
+            advance_rtp_sequence(&mut *replacement.sequence_number.lock().await),
+            65_535
+        );
+        assert_eq!(
+            advance_rtp_sequence(&mut *replacement.sequence_number.lock().await),
+            0
+        );
     }
 
     #[tokio::test]
     async fn independent_media_senders_do_not_share_sequence() {
-        let a = raw_track(); let b = raw_track();
+        let a = raw_track();
+        let b = raw_track();
         assert!(!Arc::ptr_eq(&a.sequence_number, &b.sequence_number));
-        assert_eq!(advance_rtp_sequence(&mut *a.sequence_number.lock().await), 0);
+        assert_eq!(
+            advance_rtp_sequence(&mut *a.sequence_number.lock().await),
+            0
+        );
         assert_eq!(*b.sequence_number.lock().await, 0);
         assert_eq!(*a.sequence_number.lock().await, 1);
     }
 
-    #[test]fn ast_control_is_opt_in_video_only(){assert!(include_abs_send_time("audio"));assert!(include_abs_send_time("other"));assert_eq!(include_abs_send_time("video"),!cfg!(feature="cloudgime-video-noast-qa"));assert_eq!(video_playout_delay("video"),PlayoutDelayExtension::new(0,if cfg!(feature="cloudgime-jitter-window-qa"){10}else{0}));}
-    #[tokio::test]async fn sdp_extension_configuration_matches_video_only_qa(){use webrtc::{api::APIBuilder,peer_connection::configuration::RTCConfiguration};let mut media=MediaEngine::default();media.register_default_codecs().unwrap();register_header_extensions(&mut media).unwrap();let api=APIBuilder::new().with_media_engine(media).build();let pc=api.new_peer_connection(RTCConfiguration::default()).await.unwrap();pc.add_transceiver_from_kind(RTPCodecType::Video,None).await.unwrap();pc.add_transceiver_from_kind(RTPCodecType::Audio,None).await.unwrap();let offer=pc.create_offer(None).await.unwrap();let sections:Vec<_>=offer.sdp.split("\r\nm=").collect();let v=sections.iter().find(|s|s.starts_with("video ")).unwrap();let a=sections.iter().find(|s|s.starts_with("audio ")).unwrap();assert_eq!(v.contains(ABS_SEND_TIME_URI),include_abs_send_time("video"));assert!(a.contains(ABS_SEND_TIME_URI));assert!(v.contains(PLAYOUT_DELAY_URI));pc.close().await.unwrap();}
+    #[test]
+    fn ast_control_is_opt_in_video_only() {
+        assert!(include_abs_send_time("audio"));
+        assert!(include_abs_send_time("other"));
+        assert_eq!(
+            include_abs_send_time("video"),
+            !cfg!(feature = "cloudgime-video-noast-qa")
+        );
+        assert_eq!(
+            video_playout_delay("video"),
+            PlayoutDelayExtension::new(
+                0,
+                if cfg!(feature = "cloudgime-jitter-window-qa") {
+                    10
+                } else {
+                    0
+                }
+            )
+        );
+    }
+    #[tokio::test]
+    async fn sdp_extension_configuration_matches_video_only_qa() {
+        use webrtc::{api::APIBuilder, peer_connection::configuration::RTCConfiguration};
+        let mut media = MediaEngine::default();
+        media.register_default_codecs().unwrap();
+        register_header_extensions(&mut media).unwrap();
+        let api = APIBuilder::new().with_media_engine(media).build();
+        let pc = api
+            .new_peer_connection(RTCConfiguration::default())
+            .await
+            .unwrap();
+        pc.add_transceiver_from_kind(RTPCodecType::Video, None)
+            .await
+            .unwrap();
+        pc.add_transceiver_from_kind(RTPCodecType::Audio, None)
+            .await
+            .unwrap();
+        let offer = pc.create_offer(None).await.unwrap();
+        let sections: Vec<_> = offer.sdp.split("\r\nm=").collect();
+        let v = sections.iter().find(|s| s.starts_with("video ")).unwrap();
+        let a = sections.iter().find(|s| s.starts_with("audio ")).unwrap();
+        assert_eq!(
+            v.contains(ABS_SEND_TIME_URI),
+            include_abs_send_time("video")
+        );
+        assert!(a.contains(ABS_SEND_TIME_URI));
+        assert!(v.contains(PLAYOUT_DELAY_URI));
+        pc.close().await.unwrap();
+    }
 
     #[test]
     fn playout_window_is_qa_only_and_never_changes_audio() {
-        assert_eq!(video_playout_delay("audio"),PlayoutDelayExtension::new(0,0));
-        assert_eq!(video_playout_delay("video"),PlayoutDelayExtension::new(0,if cfg!(feature="cloudgime-jitter-window-qa"){10}else{0}));
-        assert_eq!(video_playout_delay("other"),PlayoutDelayExtension::new(0,0));
+        assert_eq!(
+            video_playout_delay("audio"),
+            PlayoutDelayExtension::new(0, 0)
+        );
+        assert_eq!(
+            video_playout_delay("video"),
+            PlayoutDelayExtension::new(
+                0,
+                if cfg!(feature = "cloudgime-jitter-window-qa") {
+                    10
+                } else {
+                    0
+                }
+            )
+        );
+        assert_eq!(
+            video_playout_delay("other"),
+            PlayoutDelayExtension::new(0, 0)
+        );
     }
 
     #[test]

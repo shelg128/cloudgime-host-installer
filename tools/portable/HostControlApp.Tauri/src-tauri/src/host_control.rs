@@ -231,6 +231,16 @@ struct DiagnosticUploadEnvelope {
     payload: Value,
 }
 
+#[derive(Debug, Deserialize)]
+struct InstallerReadinessResponse {
+    ok: bool,
+    #[serde(rename = "rentalReady")]
+    rental_ready: bool,
+    reason: String,
+    #[serde(rename = "retryAfterSec")]
+    retry_after_sec: Option<u64>,
+}
+
 #[derive(Serialize, Deserialize, Default, Clone)]
 #[serde(default, rename_all = "PascalCase")]
 struct HostActivationStateRecord {
@@ -1148,19 +1158,58 @@ pub fn is_headless_claim_requested(args: &[String]) -> bool {
     args.iter().any(|arg| {
         arg.eq_ignore_ascii_case("--headless-claim-license")
             || arg.eq_ignore_ascii_case("--headless-claim-host")
+            || arg.eq_ignore_ascii_case("--headless-claim-host-env")
+            || arg.eq_ignore_ascii_case("--headless-wait-rental-ready")
     })
 }
 
 pub async fn run_headless_claim_from_args(args: &[String]) -> i32 {
+    let token_from_environment = args
+        .iter()
+        .any(|arg| arg.eq_ignore_ascii_case("--headless-claim-host-env"));
+    let wait_for_rental_ready = args
+        .iter()
+        .any(|arg| arg.eq_ignore_ascii_case("--headless-wait-rental-ready"));
+    let defer_rental_readiness = args
+        .iter()
+        .any(|arg| arg.eq_ignore_ascii_case("--defer-rental-readiness"));
     let result_json = read_headless_arg_value(args, "--result-json").unwrap_or_default();
     let result = async {
-        let setup_token = read_headless_arg_value(args, "--headless-claim-license")
-            .or_else(|| read_headless_arg_value(args, "--headless-claim-host"))
-            .ok_or_else(|| "--headless-claim-license requires a value.".to_string())?;
+        if wait_for_rental_ready {
+            let bundle_root = resolve_bundle_root()?;
+            wait_for_installer_rental_ready(&bundle_root, None).await?;
+            let activation = load_activation_state(&bundle_root)?;
+            return Ok(ActionOutcome {
+                message: "Control plane confirmed rentalReady: true.".into(),
+                state: build_headless_claim_state(&bundle_root, &activation),
+            });
+        }
+
+        let setup_token = if token_from_environment {
+            std::env::var("CLOUDGIME_SETUP_TOKEN")
+                .ok()
+                .filter(|token| !token.trim().is_empty())
+                .ok_or_else(|| {
+                    "headless setup token was not supplied through the protected process environment"
+                        .to_string()
+                })?
+        } else {
+            read_headless_arg_value(args, "--headless-claim-license")
+                .or_else(|| read_headless_arg_value(args, "--headless-claim-host"))
+                .ok_or_else(|| "--headless-claim-license requires a value.".to_string())?
+        };
         let expected_token_kind =
             read_headless_arg_value(args, "--expected-token-kind").unwrap_or_default();
-        let claim_only = args.iter().any(|arg| arg.eq_ignore_ascii_case("--claim-only"));
-        claim_setup_token_headless(setup_token, expected_token_kind, claim_only).await
+        let claim_only = args
+            .iter()
+            .any(|arg| arg.eq_ignore_ascii_case("--claim-only"));
+        claim_setup_token_headless(
+            setup_token,
+            expected_token_kind,
+            claim_only,
+            defer_rental_readiness,
+        )
+        .await
     }
     .await;
 
@@ -1228,6 +1277,7 @@ async fn claim_setup_token_headless(
     setup_token: String,
     expected_token_kind: String,
     claim_only: bool,
+    defer_rental_readiness: bool,
 ) -> Result<ActionOutcome, String> {
     reconcile_pending_uninstall_marker().await;
     let bundle_root = resolve_bundle_root()?;
@@ -1341,7 +1391,9 @@ async fn claim_setup_token_headless(
     save_activation_state(&bundle_root, &activation)?;
     if claim_only {
         return Ok(ActionOutcome {
-            message: "Host license claimed. Runtime service start skipped by headless claim-only mode.".into(),
+            message:
+                "Host license claimed. Runtime service start skipped by headless claim-only mode."
+                    .into(),
             state: build_headless_claim_state(&bundle_root, &activation),
         });
     }
@@ -1372,7 +1424,97 @@ async fn claim_setup_token_headless(
         format!("{lane_label} {binding_label}")
     };
     outcome.message = format!("{} siap. {}", binding_copy, outcome.message);
+    if !defer_rental_readiness {
+        wait_for_installer_rental_ready(&bundle_root, None).await?;
+        outcome
+            .message
+            .push_str(" Node telah terverifikasi siap rental.");
+    } else {
+        outcome
+            .message
+            .push_str(" Aktivasi tersimpan; menunggu finalisasi service dan verifikasi rentalReady.");
+    }
     Ok(outcome)
+}
+
+async fn wait_for_installer_rental_ready(
+    bundle_root: &Path,
+    timeout_override: Option<Duration>,
+) -> Result<(), String> {
+    let activation = load_activation_state(bundle_root)?;
+    let activation_record_id = activation.activation_record_id.trim();
+    let runtime_token = activation.runtime_token.trim();
+    if activation_record_id.is_empty() || runtime_token.is_empty() {
+        return Err("Aktivasi berhasil, tetapi credential runtime belum tersedia untuk verifikasi readiness.".into());
+    }
+
+    let base_url = normalize_control_plane(&activation.control_plane_url)?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|_| "Could not create the readiness client.")?;
+    let deadline = Instant::now()
+        + timeout_override.unwrap_or_else(|| installer_readiness_timeout());
+    let mut last_reason = String::new();
+
+    while Instant::now() < deadline {
+        let response = client
+            .post(format!(
+                "{base_url}/api/v1/host-activation/installer-readiness"
+            ))
+            .json(&serde_json::json!({
+                "activationRecordId": activation_record_id,
+                "runtimeToken": runtime_token,
+            }))
+            .send()
+            .await;
+
+        match response {
+            Ok(response) => {
+                let status = response.status();
+                let raw = response.text().await.unwrap_or_default();
+                if status.is_success() {
+                    match serde_json::from_str::<InstallerReadinessResponse>(&raw) {
+                        Ok(payload) if payload.ok && payload.rental_ready => return Ok(()),
+                        Ok(payload) => {
+                            last_reason = payload.reason;
+                            std::thread::sleep(Duration::from_secs(
+                                payload.retry_after_sec.unwrap_or(5).clamp(1, 15),
+                            ));
+                            continue;
+                        }
+                        Err(_) => {
+                            last_reason =
+                                "Control plane returned an invalid readiness response.".into()
+                        }
+                    }
+                } else {
+                    last_reason = format!(
+                        "Control plane readiness check returned HTTP {}.",
+                        status.as_u16()
+                    );
+                }
+            }
+            Err(_) => last_reason = "Could not reach the control plane readiness endpoint.".into(),
+        }
+        std::thread::sleep(Duration::from_secs(5));
+    }
+
+    if last_reason.is_empty() {
+        last_reason = "Readiness was not confirmed before the installer timeout.".into();
+    }
+    Err(format!(
+        "Instalasi komponen selesai, tetapi node belum siap rental: {last_reason}"
+    ))
+}
+
+fn installer_readiness_timeout() -> Duration {
+    let seconds = std::env::var("CLOUDGIME_INSTALLER_READINESS_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(180)
+        .clamp(1, 900);
+    Duration::from_secs(seconds)
 }
 
 #[tauri::command]
@@ -3563,7 +3705,8 @@ fn unregister_host_keeper_tunnel_task(bundle_root: &Path) {
 }
 
 fn is_host_keeper_agent_running(bundle_root: &Path) -> bool {
-    let agent_path = escape_powershell_literal(&host_keeper_agent_path(bundle_root).to_string_lossy());
+    let agent_path =
+        escape_powershell_literal(&host_keeper_agent_path(bundle_root).to_string_lossy());
     let script = format!(
         concat!(
             "$ErrorActionPreference = 'SilentlyContinue';",
@@ -3851,9 +3994,7 @@ mod tests {
         let env_file = fs::read_to_string(host_keeper_env_path(&test_root)).unwrap();
         assert!(env_file.contains("CLOUDRENTAL_HOST_HTTP_PORT=18081"));
         assert!(env_file.contains("HOST_STREAM_LOCAL_URL=http://127.0.0.1:18081/stream/"));
-        assert!(env_file.contains(
-            "CLOUDGIME_HOST_STREAM_LOCAL_URL=http://127.0.0.1:18081/stream/"
-        ));
+        assert!(env_file.contains("CLOUDGIME_HOST_STREAM_LOCAL_URL=http://127.0.0.1:18081/stream/"));
 
         fs::remove_dir_all(&test_root).unwrap();
     }

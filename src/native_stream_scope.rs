@@ -117,7 +117,9 @@ impl NativeStreamRegistry {
             // can register between the empty check and tombstone publication.
             entry.revoked = true;
             if !entry.registered {
-                if !entry.connections.is_empty() { return Err("native_scope_inconsistent".into()); }
+                if !entry.connections.is_empty() {
+                    return Err("native_scope_inconsistent".into());
+                }
                 return Ok(0);
             }
         }

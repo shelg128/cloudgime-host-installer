@@ -7,6 +7,16 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+    <Compile Include="../HostControlBootstrap/FirstBootInstallerCommandContract.cs" Link="FirstBootInstallerCommandContract.cs" />
+    <Compile Include="../HostControlBootstrap/InstallerProvisionCommandContract.cs" Link="InstallerProvisionCommandContract.cs" />
+    <Compile Include="../HostControlBootstrap/InstallerProvisionPolicy.cs" Link="InstallerProvisionPolicy.cs" />
+    <Compile Include="../HostControlBootstrap/FirstBootInstallerPlanPreparation.cs" Link="FirstBootInstallerPlanPreparation.cs" />
+    <Compile Include="../HostControlBootstrap/FirstBootInstallerBridge.cs" Link="FirstBootInstallerBridge.cs" />
+    <Compile Include="../HostControlBootstrap/FirstBootInstallerReceiptPolicy.cs" Link="FirstBootInstallerReceiptPolicy.cs" />
+    <Compile Include="../HostControlBootstrap/HeadlessPairingTask.cs" Link="HeadlessPairingTask.cs" />
+    <Compile Include="../HostControlBootstrap/HeadlessServiceRecovery.cs" Link="HeadlessServiceRecovery.cs" />
+    <Compile Include="../HostControlBootstrap/HeadlessPublicRoute.cs" Link="HeadlessPublicRoute.cs" />
+    <Compile Include="../HostControlBootstrap/HeadlessFreshInstall.cs" Link="HeadlessFreshInstall.cs" />
     <Compile Include="../HostControlBootstrap/HeadlessSetupCommands.cs" Link="HeadlessSetupCommands.cs" />
     <Compile Include="../HostControlBootstrap/HeadlessSetupJournal.cs" Link="HeadlessSetupJournal.cs" />
     <Compile Include="../HostControlBootstrap/UniversalMachineBoundary.cs" Link="UniversalMachineBoundary.cs" />
@@ -22,5 +32,6 @@
     <Compile Include="../HostControlBootstrap/ManagedUpgradeTransaction.cs" Link="ManagedUpgradeTransaction.cs" />
     <Compile Include="../HostControlBootstrap/ManagedNodeUpgradeGuard.cs" Link="ManagedNodeUpgradeGuard.cs" />
     <Compile Include="../HostControlBootstrap/UniversalInstallPolicy.cs" Link="UniversalInstallPolicy.cs" />
+    <Compile Include="../HostControlBootstrap/UniversalIdentityReset.cs" Link="UniversalIdentityReset.cs" />
   </ItemGroup>
 </Project>

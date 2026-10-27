@@ -4479,25 +4479,44 @@ pub(super) async fn run_display_helper_command(
     // Mutations from the SYSTEM service use a private, per-child state broker.
     // Do not retry privileged mutations in a different desktop after broker failure.
     if helper_should_prefer_active_user_session()
-        && matches!(helper_action, Some("prepare" | "resize" | "restore" | "project-display"))
+        && matches!(
+            helper_action,
+            Some("prepare" | "resize" | "restore" | "project-display")
+        )
     {
         let session = enumerate_interactive_user_session_candidates()
-            .into_iter().find(|id| *id != 0)
+            .into_iter()
+            .find(|id| *id != 0)
             .ok_or_else(|| "no interactive user session for display broker".to_string())?;
         let mut command = Command::new(helper_path);
-        command.arg("--broker").arg(session.to_string()).args(helper_arguments)
-            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        command
+            .arg("--broker")
+            .arg(session.to_string())
+            .args(helper_arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         command.kill_on_drop(true);
         apply_background_spawn_flags(&mut command);
-        let output = timeout(timeout_duration.max(Duration::from_secs(100)), command.output()).await
-            .map_err(|_| "display state broker timed out".to_string())?
-            .map_err(|_| "display state broker launch failed".to_string())?;
-        let reason = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok()
+        let output = timeout(
+            timeout_duration.max(Duration::from_secs(100)),
+            command.output(),
+        )
+        .await
+        .map_err(|_| "display state broker timed out".to_string())?
+        .map_err(|_| "display state broker launch failed".to_string())?;
+        let reason = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .ok()
             .and_then(|v| v.get("reason").and_then(|s| s.as_str()).map(str::to_owned))
             .filter(|s| s.len() <= 120 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
             .unwrap_or_else(|| "unclassified".to_string());
-        append_host_stream_trace(&format!("DISPLAY_BROKER_RESULT action={} session={} exit_code={} reason={}",
-            helper_action.unwrap_or("unknown"), session, output.status.code().unwrap_or(1), reason));
+        append_host_stream_trace(&format!(
+            "DISPLAY_BROKER_RESULT action={} session={} exit_code={} reason={}",
+            helper_action.unwrap_or("unknown"),
+            session,
+            output.status.code().unwrap_or(1),
+            reason
+        ));
         return Ok(HelperCommandOutput {
             stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
@@ -6238,7 +6257,15 @@ pub async fn start_host(
         ipc_sender
             .send(ServerIpcMessage::Init {
                 config: StreamerConfig {
-                    direct_recovery: android_native_stream_ticket_record.as_ref().and_then(|r| common::direct_recovery::DirectRecoveryGrant::for_ticket(r.selected_route,r.expires_at_unix_ms,std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(u64::MAX,|d|d.as_millis() as u64))),
+                    direct_recovery: android_native_stream_ticket_record.as_ref().and_then(|r| {
+                        common::direct_recovery::DirectRecoveryGrant::for_ticket(
+                            r.selected_route,
+                            r.expires_at_unix_ms,
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map_or(u64::MAX, |d| d.as_millis() as u64),
+                        )
+                    }),
                     webrtc: web_app.config().webrtc.clone(),
                     log_level: web_app.config().log.level_filter,
                 },
@@ -8054,7 +8081,10 @@ pub async fn start_host(
             )
             .await;
             let graceful_exit = scope.wait_owned_children_exit(Duration::from_secs(3)).await;
-            append_host_stream_trace(&format!("NATIVE_CHILD_GRACEFUL_STOP token={} exited={}", dynamic_display_session_token, graceful_exit));
+            append_host_stream_trace(&format!(
+                "NATIVE_CHILD_GRACEFUL_STOP token={} exited={}",
+                dynamic_display_session_token, graceful_exit
+            ));
             if let Err(error) = scope.stop_owned_children().await {
                 warn!("[Native scope]: child exit unverified: {error}");
             }

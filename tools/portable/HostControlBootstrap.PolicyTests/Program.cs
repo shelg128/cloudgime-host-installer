@@ -7,6 +7,12 @@ static void Throws(Action action, string contains) { try { action(); } catch (Ex
 if(HeadlessJournalTests.Worker(args))return;
 if(HeadlessProcessTests.Worker(args))return;
 if(ManagedCrashProcessTests.Worker(args))return;
+FirstBootInstallerReceiptTests.Run();
+FirstBootInstallerPlanTests.Run();
+InstallerProvisionPolicyTests.Run();
+CloudgimeHostBootstrap.PolicyTests.UniversalIdentityResetTests.Run();
+HeadlessFreshInstallTests.Run();
+if(args.Length==1&&args[0]=="--first-boot-receipt-only")return;
 ManagedCrashProcessTests.Run();
 
 var activated = new JsonObject { ["ActivationState"]="activated", ["HostId"]="cgslot-pc02", ["ActivationRecordId"]="cgslot-pc02", ["CredentialRef"]="host_app.credential.dpapi" };

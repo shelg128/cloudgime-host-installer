@@ -1211,7 +1211,10 @@ fn stale_route_recovery_can_restart(
         processes_ready: required_processes_ready,
         http_ready: local_http_ready,
         command_pending,
-        command_busy: matches!(state.last_command_status.as_deref(), Some("running" | "queued")),
+        command_busy: matches!(
+            state.last_command_status.as_deref(),
+            Some("running" | "queued")
+        ),
         active_stream,
     })
 }
@@ -1901,7 +1904,12 @@ fn send_host_runtime_heartbeat_with_curl(
     heartbeat_body: &Value,
     activation: &mut HostActivationStateRecord,
 ) -> Result<bool> {
-    if Command::new("curl.exe").arg("--disable").arg("--version").output().is_err() {
+    if Command::new("curl.exe")
+        .arg("--disable")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
         append_supervisor_log(paths, "host runtime heartbeat curl fallback unavailable")?;
         return Ok(false);
     }
@@ -1918,10 +1926,14 @@ fn send_host_runtime_heartbeat_with_curl(
     let mut command = Command::new("curl.exe");
     command
         .arg("--disable")
-        .arg("--proto").arg("=https")
-        .arg("--connect-timeout").arg("3")
-        .arg("--max-time").arg("7")
-        .arg("--max-filesize").arg("65536")
+        .arg("--proto")
+        .arg("=https")
+        .arg("--connect-timeout")
+        .arg("3")
+        .arg("--max-time")
+        .arg("7")
+        .arg("--max-filesize")
+        .arg("65536")
         .arg("--silent")
         .arg("--show-error")
         .arg("--request")
@@ -3417,9 +3429,10 @@ fn read_activation_state(paths: &BundlePaths) -> HostActivationStateRecord {
     if node_selected {
         NODE_SELECTED.store(true, Ordering::SeqCst);
         let raw = match (|| -> std::io::Result<Vec<u8>> {
-            let file=fs::File::open(&paths.activation_state_path)?;
-            let mut raw=Vec::new();
-            file.take(node_erased_cache::MAX_CACHE_BYTES as u64 + 1).read_to_end(&mut raw)?;
+            let file = fs::File::open(&paths.activation_state_path)?;
+            let mut raw = Vec::new();
+            file.take(node_erased_cache::MAX_CACHE_BYTES as u64 + 1)
+                .read_to_end(&mut raw)?;
             Ok(raw)
         })() {
             Ok(raw) if raw.len() <= node_erased_cache::MAX_CACHE_BYTES => raw,
@@ -3433,7 +3446,9 @@ fn read_activation_state(paths: &BundlePaths) -> HostActivationStateRecord {
         // Invalid non-erased content must never bypass conflicting identity.
         // Erased cache has no usable identity; hydrate still verifies manifest,
         // DPAPI identity and component credential, then requires server status.
-        if parsed.erased { host_node_runtime::invalidate_erased_cache(); }
+        if parsed.erased {
+            host_node_runtime::invalidate_erased_cache();
+        }
         let mut state = parsed.state;
         state.universal_node = true;
         if host_node_runtime::hydrate(paths, &mut state).is_err() {

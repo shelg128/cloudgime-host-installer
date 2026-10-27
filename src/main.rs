@@ -45,6 +45,7 @@ mod web;
 mod cli;
 mod host_rental_revoke;
 mod human_json;
+mod local_onboarding;
 mod native_stream_scope;
 #[path = "provisioning.rs"]
 mod provisioning;
@@ -54,8 +55,10 @@ mod stream_controller;
 
 #[actix_web::main]
 async fn main() {
-    if std::env::args().nth(1).as_deref()==Some("--direct-recovery-contract") {
-        println!("{{\"schema\":1,\"contract\":\"cg-scoped-direct-recovery-v1\",\"component\":\"host\",\"ticketRouteBinding\":true,\"ipcGrant\":true}}");
+    if std::env::args().nth(1).as_deref() == Some("--direct-recovery-contract") {
+        println!(
+            "{{\"schema\":1,\"contract\":\"cg-scoped-direct-recovery-v1\",\"component\":\"host\",\"ticketRouteBinding\":true,\"ipcGrant\":true}}"
+        );
         return;
     }
     init_rustls_crypto_provider();

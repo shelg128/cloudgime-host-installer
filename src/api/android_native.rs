@@ -72,6 +72,58 @@ fn native_control_credential(req: &HttpRequest, body: Option<&str>) -> Result<St
 
 // A loopback address is a transport detail, not backend authentication. Validate
 // the Host runtime bearer before any default-user lookup, pairing or token issue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TunnelAuthCategory {
+    PeerNonLoopback,
+    HeaderMissing,
+    HeaderDuplicate,
+    HeaderMalformed,
+    CredentialLoadFailed,
+    CredentialShapeInvalid,
+    CredentialMismatch,
+    Accepted,
+}
+
+pub(super) fn classify_host_tunnel(
+    req: &HttpRequest,
+    load_runtime_credential: impl FnOnce() -> Result<String, AppError>,
+) -> TunnelAuthCategory {
+    use sha2::{Digest, Sha256};
+    if !request_origin_is_loopback(req) {
+        return TunnelAuthCategory::PeerNonLoopback;
+    }
+    let mut headers = req.headers().get_all("authorization");
+    let Some(value) = headers.next() else {
+        return TunnelAuthCategory::HeaderMissing;
+    };
+    if headers.next().is_some() {
+        return TunnelAuthCategory::HeaderDuplicate;
+    }
+    let Ok(header) = value.to_str() else {
+        return TunnelAuthCategory::HeaderMalformed;
+    };
+    let Some(presented) = header.strip_prefix("Bearer ") else {
+        return TunnelAuthCategory::HeaderMalformed;
+    };
+    if presented.is_empty() || presented.len() > 2048 || presented.chars().any(char::is_whitespace)
+    {
+        return TunnelAuthCategory::HeaderMalformed;
+    }
+    let Ok(expected) = load_runtime_credential() else {
+        return TunnelAuthCategory::CredentialLoadFailed;
+    };
+    if expected.is_empty() || expected.len() > 2048 || expected.chars().any(char::is_whitespace) {
+        return TunnelAuthCategory::CredentialShapeInvalid;
+    };
+    if !openssl::memcmp::eq(
+        Sha256::digest(presented.as_bytes()).as_ref(),
+        Sha256::digest(expected.as_bytes()).as_ref(),
+    ) {
+        return TunnelAuthCategory::CredentialMismatch;
+    }
+    TunnelAuthCategory::Accepted
+}
+
 pub(super) fn authorize_host_tunnel(
     req: &HttpRequest,
     load_runtime_credential: impl FnOnce() -> Result<String, AppError>,
@@ -1379,13 +1431,25 @@ pub(crate) async fn issue_android_native_launch_response(
 
     let record = if let Some(root_session_id) = root_session_id {
         app.issue_android_native_sibling_launch_token(
-            root_session_id, user.id(), host_id, app_id, host_binding, trust_bootstrap,
+            root_session_id,
+            user.id(),
+            host_id,
+            app_id,
+            host_binding,
+            trust_bootstrap,
             rental_binding.ok_or(AppError::AndroidNativeStreamTicketBindingMismatch)?,
-        ).await?
+        )
+        .await?
     } else {
         app.issue_android_native_launch_token(
-            user.id(), host_id, app_id, host_binding, trust_bootstrap, rental_binding,
-        ).await
+            user.id(),
+            host_id,
+            app_id,
+            host_binding,
+            trust_bootstrap,
+            rental_binding,
+        )
+        .await
     };
 
     let open_native_path = prefixed_path(
@@ -1522,7 +1586,11 @@ pub async fn post_android_native_launch_token_from_tunnel(
         request.client_os.as_deref(),
         request.client_platform.as_deref(),
     );
-    authorize_host_tunnel(&req, installed_host_runtime_credential)?;
+    let auth_category = classify_host_tunnel(&req, installed_host_runtime_credential);
+    log::info!(target: "cg_tunnel_auth", "category={:?}", auth_category);
+    if auth_category != TunnelAuthCategory::Accepted {
+        return Err(AppError::Unauthorized);
+    }
     let rental_binding = validate_tunnel_rental_binding(
         request.stream_profile.as_deref(),
         request.app_id,
@@ -1552,7 +1620,10 @@ pub async fn post_android_native_consume_launch(
     Json(request): Json<PostAndroidNativeConsumeLaunchRequest>,
 ) -> Result<Json<PostAndroidNativeConsumeLaunchResponse>, AppError> {
     let (record, stream_ticket) = app
-        .consume_android_native_launch_for_route(&request.launch_token,request.connection_route.as_deref())
+        .consume_android_native_launch_for_route(
+            &request.launch_token,
+            request.connection_route.as_deref(),
+        )
         .await?;
     let transport_policy = build_transport_policy(
         &app,
@@ -1708,16 +1779,27 @@ pub async fn post_android_native_shared_session_invite(
         None => None,
     };
     if let Some(ref ticket) = expected {
-        if ticket.user_id != user.id() || ticket.host_id != HostId(request.host_id)
-            || ticket.app_id != AppId(request.app_id) {
+        if ticket.user_id != user.id()
+            || ticket.host_id != HostId(request.host_id)
+            || ticket.app_id != AppId(request.app_id)
+        {
             return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
         }
     }
-    let record = app.issue_android_native_shared_session_invite_scoped(
-        user.id(), HostId(request.host_id), AppId(request.app_id), request.role,
-        expected.as_ref().map(|t| (t.session_id.as_str(), t.token_id.as_str())),
-    ).await?;
-    Ok(Json(build_shared_session_invite_response(&app, record).await))
+    let record = app
+        .issue_android_native_shared_session_invite_scoped(
+            user.id(),
+            HostId(request.host_id),
+            AppId(request.app_id),
+            request.role,
+            expected
+                .as_ref()
+                .map(|t| (t.session_id.as_str(), t.token_id.as_str())),
+        )
+        .await?;
+    Ok(Json(
+        build_shared_session_invite_response(&app, record).await,
+    ))
 }
 
 #[post("/android-native/shared-session/invite-loopback")]

@@ -4,6 +4,64 @@ use actix_web::{App as HttpApp, test};
 #[actix_web::test]
 async fn tunnel_requires_exact_host_runtime_bearer_and_strict_rental_binding() {
     let valid = || Ok("host-runtime-fixture".to_string());
+    fn valid_fixture() -> Result<String, AppError> {
+        Ok("host-runtime-fixture".to_string())
+    }
+    fn missing_fixture() -> Result<String, AppError> {
+        Err(AppError::Unauthorized)
+    }
+    let absent = test::TestRequest::default()
+        .peer_addr("127.0.0.1:10000".parse().unwrap())
+        .to_http_request();
+    assert_eq!(
+        classify_host_tunnel(&absent, valid_fixture),
+        TunnelAuthCategory::HeaderMissing
+    );
+    let basic = test::TestRequest::default()
+        .peer_addr("127.0.0.1:10000".parse().unwrap())
+        .insert_header(("authorization", "Basic fixture-only"))
+        .to_http_request();
+    assert_eq!(
+        classify_host_tunnel(&basic, missing_fixture),
+        TunnelAuthCategory::HeaderMalformed
+    );
+    let remote = test::TestRequest::default()
+        .peer_addr("203.0.113.9:10000".parse().unwrap())
+        .insert_header(("authorization", "Bearer host-runtime-fixture"))
+        .to_http_request();
+    assert_eq!(
+        classify_host_tunnel(&remote, valid_fixture),
+        TunnelAuthCategory::PeerNonLoopback
+    );
+    let bearer = test::TestRequest::default()
+        .peer_addr("127.0.0.1:10000".parse().unwrap())
+        .insert_header(("authorization", "Bearer host-runtime-fixture"))
+        .to_http_request();
+    assert_eq!(
+        classify_host_tunnel(&bearer, missing_fixture),
+        TunnelAuthCategory::CredentialLoadFailed
+    );
+    assert_eq!(
+        classify_host_tunnel(&bearer, || Ok("other-fixture".to_string())),
+        TunnelAuthCategory::CredentialMismatch
+    );
+    assert_eq!(
+        classify_host_tunnel(&bearer, || Ok("fixture token-with-space".to_string())),
+        TunnelAuthCategory::CredentialShapeInvalid
+    );
+    assert_eq!(
+        classify_host_tunnel(&bearer, valid_fixture),
+        TunnelAuthCategory::Accepted
+    );
+    let duplicate = test::TestRequest::default()
+        .peer_addr("127.0.0.1:10000".parse().unwrap())
+        .append_header(("authorization", "Bearer fixture-one"))
+        .append_header(("authorization", "Bearer fixture-two"))
+        .to_http_request();
+    assert_eq!(
+        classify_host_tunnel(&duplicate, valid_fixture),
+        TunnelAuthCategory::HeaderDuplicate
+    );
     for request in [
         test::TestRequest::default()
             .peer_addr("127.0.0.1:10000".parse().unwrap())
@@ -66,7 +124,10 @@ async fn tunnel_requires_exact_host_runtime_bearer_and_strict_rental_binding() {
         "streamProfile":"sentinel_prelogin","rootNativeSessionId":"android-native-root",
         "rentalBinding":{"handoffBindingId":uuid::Uuid::new_v4().to_string(),"claimId":"claim-1"}
     })).unwrap();
-    assert_eq!(root_payload.root_native_session_id.as_deref(),Some("android-native-root"));
+    assert_eq!(
+        root_payload.root_native_session_id.as_deref(),
+        Some("android-native-root")
+    );
     assert!(serde_json::from_value::<PostAndroidNativeTunnelLaunchTokenRequest>(serde_json::json!({
         "streamProfile":"sentinel_prelogin","rootNativeSessionId":"root","rentalBinding":{"handoffBindingId":uuid::Uuid::new_v4().to_string(),"claimId":"c"},"extra":true
     })).is_err());

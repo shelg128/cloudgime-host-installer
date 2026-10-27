@@ -124,7 +124,10 @@ pub async fn rental_cookie_middleware(
         return next.call(req).await;
     }
     let ticket = scoped_stream_ticket(req.request())?;
-    if app.config().web_server.rental_stream_ticket_required && ticket.is_none() {
+    if app.config().web_server.rental_stream_ticket_required
+        && ticket.is_none()
+        && !crate::local_onboarding::authenticated(req.request(), route)
+    {
         return Err(AppError::Unauthorized.into());
     }
     if let Some(ticket) = ticket {

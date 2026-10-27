@@ -28,8 +28,8 @@ use crate::app::{
     user::{Admin, AuthenticatedUser, Role, User, UserId},
 };
 
-mod claim_revoke;
 pub mod auth;
+mod claim_revoke;
 pub mod host;
 pub mod password;
 pub mod storage;
@@ -639,7 +639,9 @@ impl App {
             // must always match; populated IDs are never overwritten.
             if state.session_id != command.native_session_id
                 || (binding.handoff_binding_id != command.handoff_binding_id
-                    && !state.issued_rental_handoffs.contains(&command.handoff_binding_id))
+                    && !state
+                        .issued_rental_handoffs
+                        .contains(&command.handoff_binding_id))
                 || binding.claim_id != command.claim_id
                 || binding.prepare_operation_id.is_some() != binding.rental_session_id.is_some()
                 || binding
@@ -740,7 +742,11 @@ impl App {
                 token_id: record.token_id.clone(),
                 session_id: record.session_id.clone(),
                 user_id,
-                issued_rental_handoffs: rental_binding.as_ref().map(|b| b.handoff_binding_id.clone()).into_iter().collect(),
+                issued_rental_handoffs: rental_binding
+                    .as_ref()
+                    .map(|b| b.handoff_binding_id.clone())
+                    .into_iter()
+                    .collect(),
                 rental_binding,
                 trust_bootstrap_status: if record.trust_bootstrap.paired {
                     "paired_material_reused".to_string()
@@ -855,9 +861,13 @@ impl App {
             return Err(AppError::AndroidNativeStreamTicketExpired);
         }
         drop(tickets);
-        if !root.issued_rental_handoffs.contains(&rental_binding.handoff_binding_id)
+        if !root
+            .issued_rental_handoffs
+            .contains(&rental_binding.handoff_binding_id)
             && root.issued_rental_handoffs.len() >= 64
-        { return Err(AppError::AndroidNativeTicketCapacity); }
+        {
+            return Err(AppError::AndroidNativeTicketCapacity);
+        }
         let issued_handoff = rental_binding.handoff_binding_id.clone();
         let record = AndroidNativeLaunchTokenRecord {
             token_id: root.token_id.clone(),
@@ -990,24 +1000,53 @@ impl App {
         Ok((record, stream_ticket))
     }
 
-    pub async fn issue_android_native_stream_ticket(&self, launch_record:&AndroidNativeLaunchTokenRecord)->Result<AndroidNativeStreamTicketRecord,AppError>{
-        self.issue_android_native_stream_ticket_with_route(launch_record,None).await
+    pub async fn issue_android_native_stream_ticket(
+        &self,
+        launch_record: &AndroidNativeLaunchTokenRecord,
+    ) -> Result<AndroidNativeStreamTicketRecord, AppError> {
+        self.issue_android_native_stream_ticket_with_route(launch_record, None)
+            .await
     }
-    pub async fn consume_android_native_launch_for_route(&self,launch_token:&str,route:Option<&str>)->Result<(AndroidNativeLaunchTokenRecord,AndroidNativeStreamTicketRecord),AppError>{
-        let selected_route=common::direct_recovery::SelectedStreamRoute::parse(route);
-        if route.is_some()&&selected_route.is_none(){return Err(AppError::BadRequest)}
-        let record=self.consume_android_native_launch_token(launch_token).await?;
-        let ticket=self.issue_android_native_stream_ticket_with_route(&record,selected_route).await?;
-        Ok((record,ticket))
+    pub async fn consume_android_native_launch_for_route(
+        &self,
+        launch_token: &str,
+        route: Option<&str>,
+    ) -> Result<
+        (
+            AndroidNativeLaunchTokenRecord,
+            AndroidNativeStreamTicketRecord,
+        ),
+        AppError,
+    > {
+        let selected_route = common::direct_recovery::SelectedStreamRoute::parse(route);
+        if route.is_some() && selected_route.is_none() {
+            return Err(AppError::BadRequest);
+        }
+        let record = self
+            .consume_android_native_launch_token(launch_token)
+            .await?;
+        let ticket = self
+            .issue_android_native_stream_ticket_with_route(&record, selected_route)
+            .await?;
+        Ok((record, ticket))
     }
-    async fn issue_android_native_stream_ticket_with_route(&self,launch_record:&AndroidNativeLaunchTokenRecord,selected_route:Option<common::direct_recovery::SelectedStreamRoute>)->Result<AndroidNativeStreamTicketRecord,AppError>{
+    async fn issue_android_native_stream_ticket_with_route(
+        &self,
+        launch_record: &AndroidNativeLaunchTokenRecord,
+        selected_route: Option<common::direct_recovery::SelectedStreamRoute>,
+    ) -> Result<AndroidNativeStreamTicketRecord, AppError> {
         const STREAM_TICKET_TTL_MS: u64 = 8 * 60 * 60 * 1000;
 
         let now = unix_time_ms_now();
         let stream_ticket = format!("mlnatstream_{}", Uuid::new_v4().to_simple());
-        let expires_at_unix_ms = launch_record.stream_authority_expires_at_unix_ms
-            .map_or(now + STREAM_TICKET_TTL_MS, |cap| cap.min(now + STREAM_TICKET_TTL_MS));
-        if expires_at_unix_ms <= now { return Err(AppError::AndroidNativeStreamTicketExpired); }
+        let expires_at_unix_ms = launch_record
+            .stream_authority_expires_at_unix_ms
+            .map_or(now + STREAM_TICKET_TTL_MS, |cap| {
+                cap.min(now + STREAM_TICKET_TTL_MS)
+            });
+        if expires_at_unix_ms <= now {
+            return Err(AppError::AndroidNativeStreamTicketExpired);
+        }
         let record = AndroidNativeStreamTicketRecord {
             selected_route,
             stream_ticket: stream_ticket.clone(),
@@ -1195,29 +1234,44 @@ impl App {
         let lifecycle = self.inner.android_native_session_lifecycle.read().await;
         let mut tickets = self.inner.android_native_stream_tickets.write().await;
         tickets.retain(|_, value| value.expires_at_unix_ms > now);
-        let parent = tickets.get(parent_ticket).cloned()
+        let parent = tickets
+            .get(parent_ticket)
+            .cloned()
             .ok_or(AppError::AndroidNativeStreamTicketNotFound)?;
-        let binding = parent.rental_binding.as_ref()
+        let binding = parent
+            .rental_binding
+            .as_ref()
             .ok_or(AppError::AndroidNativeStreamTicketBindingMismatch)?;
         if parent.consumed_at_unix_ms.is_some() {
             return Err(AppError::AndroidNativeStreamTicketConsumed);
         }
-        if expected_claim_id.is_empty() || expected_claim_id.trim() != expected_claim_id
+        if expected_claim_id.is_empty()
+            || expected_claim_id.trim() != expected_claim_id
             || expected_claim_id.chars().any(char::is_control)
-            || parent.host_id != host_id || parent.app_id != app_id
+            || parent.host_id != host_id
+            || parent.app_id != app_id
             || binding.claim_id != expected_claim_id
         {
             return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
         }
-        if !native_binding_active(&lifecycle, &parent.session_id, &parent.token_id, parent.user_id) {
+        if !native_binding_active(
+            &lifecycle,
+            &parent.session_id,
+            &parent.token_id,
+            parent.user_id,
+        ) {
             return Err(AppError::AndroidNativeSessionInactive);
         }
-        let state = lifecycle.get(&parent.session_id)
+        let state = lifecycle
+            .get(&parent.session_id)
             .ok_or(AppError::AndroidNativeSessionInactive)?;
         if state.rental_binding.as_ref() != Some(binding) {
             return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
         }
-        let siblings = tickets.values().filter(|ticket| ticket.session_id == parent.session_id).count();
+        let siblings = tickets
+            .values()
+            .filter(|ticket| ticket.session_id == parent.session_id)
+            .count();
         if siblings >= MAX_ROOT_TICKET_CAPABILITIES || tickets.len() >= 4096 {
             return Err(AppError::AndroidNativeTicketCapacity);
         }
@@ -1282,8 +1336,11 @@ impl App {
             host_id: source.host_id,
             app_id: source.app_id,
             issued_at_unix_ms: now,
-            expires_at_unix_ms: source.authority_expires_at_unix_ms
-                .map_or(now + STREAM_TICKET_TTL_MS, |cap| cap.min(now + STREAM_TICKET_TTL_MS)),
+            expires_at_unix_ms: source
+                .authority_expires_at_unix_ms
+                .map_or(now + STREAM_TICKET_TTL_MS, |cap| {
+                    cap.min(now + STREAM_TICKET_TTL_MS)
+                }),
             consumed_at_unix_ms: None,
             rental_binding: source.rental_binding.clone(),
         };
@@ -1702,7 +1759,8 @@ impl App {
         app_id: AppId,
         role: common::api_bindings::AndroidNativeSharedSessionRole,
     ) -> Result<AndroidNativeSharedSessionInviteRecord, AppError> {
-        self.issue_android_native_shared_session_invite_scoped(user_id, host_id, app_id, role, None).await
+        self.issue_android_native_shared_session_invite_scoped(user_id, host_id, app_id, role, None)
+            .await
     }
 
     pub async fn issue_android_native_shared_session_invite_scoped(

@@ -262,41 +262,108 @@ async fn poll(
     parsed
 }
 
-async fn send_receipt(client:&reqwest::Client,root:&Path,pinned:&Context,verified:&VerifiedRevokeCommand)->Result<(),&'static str>{
-    let c=verified.command();
+async fn send_receipt(
+    client: &reqwest::Client,
+    root: &Path,
+    pinned: &Context,
+    verified: &VerifiedRevokeCommand,
+) -> Result<(), &'static str> {
+    let c = verified.command();
     // Called only after stream revocation/inspection. If the local clock is
     // still behind the command, persist nothing; the next poll must inspect
     // again. Never clamp observedAt or mutate an already durable receipt.
-    let observed_at=receipt_clock::observation_timestamp(&c.requested_at,Utc::now())?;
-    let mut id=c.digest()?;id[6]=(id[6]&0x0f)|0x40;id[8]=(id[8]&0x3f)|0x80;
-    let receipt_id=uuid::Uuid::from_bytes(id[..16].try_into().map_err(|_|"HOST_RECEIPT_ID_FAILED")?).to_hyphenated().to_string();
-    let fresh=serde_json::json!({"schemaVersion":1,"source":"HOST","receiptId":receipt_id,
+    let observed_at = receipt_clock::observation_timestamp(&c.requested_at, Utc::now())?;
+    let mut id = c.digest()?;
+    id[6] = (id[6] & 0x0f) | 0x40;
+    id[8] = (id[8] & 0x3f) | 0x80;
+    let receipt_id =
+        uuid::Uuid::from_bytes(id[..16].try_into().map_err(|_| "HOST_RECEIPT_ID_FAILED")?)
+            .to_hyphenated()
+            .to_string();
+    let fresh = serde_json::json!({"schemaVersion":1,"source":"HOST","receiptId":receipt_id,
       "operationId":c.operation_id,"sessionId":c.session_id,"prepareOperationId":c.prepare_operation_id,
       "handoffBindingId":c.handoff_binding_id,"nativeSessionId":c.native_session_id,"claimId":c.claim_id,
       "pcId":c.pc_id,"userId":c.user_id,"applicationActivationId":c.application_activation_id,
       "commandId":c.command_id,"challenge":c.challenge,"observedAt":observed_at,
       "proof":{"streamTerminated":true,"activeRentalStreams":0,"inspectionDigest":hex::encode(c.digest()?)}});
-    let receipt_path=root.join("moonlight").join("server").join("cleanup-receipts").join(format!("{}.dpapi",c.operation_id));
-    let receipt:serde_json::Value=if receipt_path.exists(){
-      serde_json::from_slice(&provisioning::read_dpapi_secret(&receipt_path).map_err(|_|"HOST_RECEIPT_STORAGE_INVALID")?)
-        .map_err(|_|"HOST_RECEIPT_STORAGE_INVALID")?
-    }else{
-      fs::create_dir_all(receipt_path.parent().ok_or("HOST_RECEIPT_PATH_INVALID")?).map_err(|_|"HOST_RECEIPT_STORAGE_FAILED")?;
-      provisioning::write_dpapi_secret(&receipt_path,&serde_json::to_vec(&fresh).map_err(|_|"HOST_RECEIPT_ENCODING_FAILED")?)
-        .map_err(|_|"HOST_RECEIPT_STORAGE_FAILED")?; fresh.clone()
+    let receipt_path = root
+        .join("moonlight")
+        .join("server")
+        .join("cleanup-receipts")
+        .join(format!("{}.dpapi", c.operation_id));
+    let receipt: serde_json::Value = if receipt_path.exists() {
+        serde_json::from_slice(
+            &provisioning::read_dpapi_secret(&receipt_path)
+                .map_err(|_| "HOST_RECEIPT_STORAGE_INVALID")?,
+        )
+        .map_err(|_| "HOST_RECEIPT_STORAGE_INVALID")?
+    } else {
+        fs::create_dir_all(receipt_path.parent().ok_or("HOST_RECEIPT_PATH_INVALID")?)
+            .map_err(|_| "HOST_RECEIPT_STORAGE_FAILED")?;
+        provisioning::write_dpapi_secret(
+            &receipt_path,
+            &serde_json::to_vec(&fresh).map_err(|_| "HOST_RECEIPT_ENCODING_FAILED")?,
+        )
+        .map_err(|_| "HOST_RECEIPT_STORAGE_FAILED")?;
+        fresh.clone()
     };
-    for key in ["operationId","sessionId","prepareOperationId","handoffBindingId","nativeSessionId","claimId","pcId","userId","applicationActivationId","commandId","challenge","proof"]{
-      if receipt.get(key)!=fresh.get(key){return Err("HOST_RECEIPT_REPLAY_CONFLICT")}
+    for key in [
+        "operationId",
+        "sessionId",
+        "prepareOperationId",
+        "handoffBindingId",
+        "nativeSessionId",
+        "claimId",
+        "pcId",
+        "userId",
+        "applicationActivationId",
+        "commandId",
+        "challenge",
+        "proof",
+    ] {
+        if receipt.get(key) != fresh.get(key) {
+            return Err("HOST_RECEIPT_REPLAY_CONFLICT");
+        }
     }
-    let current=context(root)?;if current.binding!=pinned.binding||current.credential!=pinned.credential{return Err("HOST_RECEIPT_BINDING_CHANGED")}
-    let endpoint=format!("{}/api/v1/host/rental-cleanup-receipt",provisioning::NODE_CONTROL_PLANE);
-    let response=client.post(&endpoint).bearer_auth(&pinned.credential).json(&receipt).send().await.map_err(|_|"HOST_RECEIPT_NETWORK_UNAVAILABLE")?;
-    if response.status()!=reqwest::StatusCode::OK||response.url().as_str()!=endpoint{return Err("HOST_RECEIPT_REJECTED")}
-    let bytes=response.bytes().await.map_err(|_|"HOST_RECEIPT_RESPONSE_INVALID")?;if bytes.len()>MAX_BODY{return Err("HOST_RECEIPT_RESPONSE_SIZE")}
-    let v:serde_json::Value=serde_json::from_slice(&bytes).map_err(|_|"HOST_RECEIPT_RESPONSE_INVALID")?;
-    if v.get("ok")!=Some(&serde_json::Value::Bool(true))||v.get("operationId").and_then(|x|x.as_str())!=Some(c.operation_id.as_str())
-      ||v.get("cleanupComplete").and_then(|x|x.as_bool()).is_none()||v.get("claimReleased").and_then(|x|x.as_bool()).is_none(){return Err("HOST_RECEIPT_RESPONSE_INVALID")}
-    let current=context(root)?;if current.binding!=pinned.binding||current.credential!=pinned.credential{return Err("HOST_RECEIPT_BINDING_CHANGED")} Ok(())
+    let current = context(root)?;
+    if current.binding != pinned.binding || current.credential != pinned.credential {
+        return Err("HOST_RECEIPT_BINDING_CHANGED");
+    }
+    let endpoint = format!(
+        "{}/api/v1/host/rental-cleanup-receipt",
+        provisioning::NODE_CONTROL_PLANE
+    );
+    let response = client
+        .post(&endpoint)
+        .bearer_auth(&pinned.credential)
+        .json(&receipt)
+        .send()
+        .await
+        .map_err(|_| "HOST_RECEIPT_NETWORK_UNAVAILABLE")?;
+    if response.status() != reqwest::StatusCode::OK || response.url().as_str() != endpoint {
+        return Err("HOST_RECEIPT_REJECTED");
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|_| "HOST_RECEIPT_RESPONSE_INVALID")?;
+    if bytes.len() > MAX_BODY {
+        return Err("HOST_RECEIPT_RESPONSE_SIZE");
+    }
+    let v: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| "HOST_RECEIPT_RESPONSE_INVALID")?;
+    if v.get("ok") != Some(&serde_json::Value::Bool(true))
+        || v.get("operationId").and_then(|x| x.as_str()) != Some(c.operation_id.as_str())
+        || v.get("cleanupComplete").and_then(|x| x.as_bool()).is_none()
+        || v.get("claimReleased").and_then(|x| x.as_bool()).is_none()
+    {
+        return Err("HOST_RECEIPT_RESPONSE_INVALID");
+    }
+    let current = context(root)?;
+    if current.binding != pinned.binding || current.credential != pinned.credential {
+        return Err("HOST_RECEIPT_BINDING_CHANGED");
+    }
+    Ok(())
 }
 
 pub(crate) struct RevokeWorker(Option<tokio::task::JoinHandle<()>>);
@@ -337,7 +404,12 @@ async fn run(app: Data<App>, root: PathBuf) -> Result<(), &'static str> {
                 }
                 for command in commands {
                     match app.revoke_backend_rental_stream(&command).await {
-                        Ok(_) => if let Err(code)=send_receipt(&client,&root,&pinned,&command).await{log::warn!("{code}");},
+                        Ok(_) => {
+                            if let Err(code) = send_receipt(&client, &root, &pinned, &command).await
+                            {
+                                log::warn!("{code}");
+                            }
+                        }
                         Err(code) => log::warn!("{code}"),
                     }
                 }

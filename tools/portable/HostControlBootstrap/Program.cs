@@ -51,6 +51,10 @@ internal static class Program
     private static int Main(string[] args)
     {
         if(HeadlessSetupCommands.Handles(args))return HeadlessSetupCommands.Run(args);
+        if (IsFreshResetCommand(args)) return UniversalIdentityReset.Run(GetFreshResetStateRoot(args));
+        if (InstallerProvisionCommandContract.IsProvisionFromEnvironmentCommand(args)) return ProvisionInstallerLicenseFromEnvironment(args);
+        if (InstallerProvisionCommandContract.IsProvisionFromFileCommand(args)) return ProvisionInstallerLicenseFromFile(args);
+        if(FirstBootInstallerCommandContract.IsPrepareCommand(args))return PrepareInstallerFirstBoot(args);
         try
         {
             UniversalInstallPolicy.RejectCommandLineSecrets(args);
@@ -61,6 +65,101 @@ internal static class Program
         {
             Log($"bootstrap error: {ex}");
             if (!args.Contains("--silent", StringComparer.OrdinalIgnoreCase))
+                MessageBox.Show(ex.Message, DefaultProductName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            else Console.Error.WriteLine(ex.Message);
+            return 1;
+        }
+    }
+
+    private static bool IsFreshResetCommand(string[] args) =>
+        args.Length > 0 && string.Equals(args[0], "reset-universal-identity", StringComparison.Ordinal);
+
+    private static string? GetFreshResetStateRoot(string[] args)
+    {
+        if (args.Length == 1) return null;
+        if (args.Length == 3 && string.Equals(args[1], "--state-root", StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(args[2]))
+            return args[2];
+        throw new InvalidDataException("UNIVERSAL_IDENTITY_RESET_COMMAND_INVALID");
+    }
+
+    private static int ProvisionInstallerLicenseFromEnvironment(string[] args)
+    {
+        try
+        {
+            var bundleRoot = InstallerProvisionCommandContract.ParseBundleRoot(args);
+            var token = Environment.GetEnvironmentVariable("CLOUDGIME_SETUP_TOKEN") ?? string.Empty;
+            // Do not let a child inherit the secret through its environment.
+            Environment.SetEnvironmentVariable("CLOUDGIME_SETUP_TOKEN", null);
+            return ProvisionInstallerLicense(bundleRoot, token);
+        }
+        catch (Exception ex) { return ReportProvisionFailure(ex); }
+    }
+
+    private static int ProvisionInstallerLicenseFromFile(string[] args)
+    {
+        string? token = null;
+        string? tokenFile = null;
+        try
+        {
+            var invocation = InstallerProvisionCommandContract.ParseFileInvocation(args);
+            tokenFile = invocation.TokenFile;
+            token = InstallerProvisionPolicy.ConsumeTokenFile(tokenFile, InstallerProvisionPolicy.DefaultSecretsRoot);
+            tokenFile = null;
+            return ProvisionInstallerLicense(invocation.BundleRoot, token);
+        }
+        catch (Exception ex) { return ReportProvisionFailure(ex); }
+        finally
+        {
+            token = null;
+            if (tokenFile is not null) try { File.Delete(tokenFile); } catch { }
+        }
+    }
+
+    private static int ProvisionInstallerLicense(string bundleRoot, string token)
+    {
+        InstallerProvisionPolicy.ValidateTokenContent(token);
+        UniversalMachineBoundary.RequireProtected(bundleRoot, true);
+        var provisioningRoot = UniversalMachineBoundary.ProvisioningRoot;
+        if (!Directory.Exists(provisioningRoot))
+            throw new InvalidDataException("INSTALLER_PROVISIONING_ROOT_MISSING");
+        UniversalMachineBoundary.RequireProtected(provisioningRoot, true);
+        var installer = Path.Combine(bundleRoot, "host-installer.exe");
+        UniversalMachineBoundary.RequireProtected(installer);
+        HeadlessSetupProcess.Run(
+            installer,
+            ["--bundle-root", bundleRoot, "provision", "--activation-only", "--profile", "always_on_host", "--api-base-url", "https://cloudgime.my.id"],
+            bundleRoot,
+            token.AsMemory(),
+            TimeSpan.FromMinutes(4));
+        HeadlessFreshInstall.VerifyProvisioning();
+        token = string.Empty;
+        Console.WriteLine("{\"ok\":true,\"status\":\"PROVISIONED_WAITING_HEARTBEATS\"}");
+        return 0;
+    }
+
+    private static int ReportProvisionFailure(Exception ex)
+    {
+        var code = ex is InvalidDataException && System.Text.RegularExpressions.Regex.IsMatch(ex.Message, @"\A[A-Z0-9_]{1,100}\z")
+            ? ex.Message
+            : "INSTALLER_PROVISION_FAILED";
+        Console.Error.WriteLine(code);
+        return 1;
+    }
+    private static int PrepareInstallerFirstBoot(string[] args)
+    {
+        try
+        {
+            FirstBootInstallerPlanPreparation.Run(FirstBootInstallerCommandContract.ParseBundleRoot(args));
+            Console.WriteLine("{\"ok\":true,\"stage\":\"ARMED\",\"rentalReady\":false,\"restartRequested\":false,\"requiresOperatorConfirmedRestart\":true}");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Log($"first-boot preparation error: {ex}");
+            // Do not present a modal UI for a malformed automation invocation:
+            // its silent intent is untrusted until the command contract passes.
+            if (FirstBootInstallerCommandContract.IsValidInvocation(args)
+                && !args.Contains("--silent", StringComparer.OrdinalIgnoreCase))
                 MessageBox.Show(ex.Message, DefaultProductName, MessageBoxButtons.OK, MessageBoxIcon.Error);
             else Console.Error.WriteLine(ex.Message);
             return 1;
@@ -108,7 +207,7 @@ internal static class Program
             "configure-autologon" => SecureAutoLogon.ConfigureInteractive(),
             "disable-autologon" => SecureAutoLogon.DisableOwned(),
             "finalize-universal-node" => UniversalNodeFinalizer.Run(
-                NormalizeFullPath(parsed.GetValue("bundle-root") ?? throw new InvalidOperationException("BUNDLE_ROOT_REQUIRED")),
+                NormalizeFullPath(parsed.GetValue("data-root") ?? parsed.GetValue("bundle-root") ?? throw new InvalidOperationException("DATA_ROOT_REQUIRED")),
                 NormalizeFullPath(parsed.GetValue("sentinel-root") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Sentinel Launcher")),
                 parsed.HasFlag("enable-autologon")),
             "validate-universal-bundle" => ValidateUniversalBundle(parsed),
@@ -173,8 +272,13 @@ internal static class Program
             UniversalMachineBoundary.RequireNoRentalActivity();
             UniversalBundleContract.RejectReparse(installRoot);
             UniversalBundleContract.RejectReparse(dataRoot);
-            foreach (var name in new[] { "cloudgime-host-control.exe", "open-host-control.exe", "uninstaller-cloudgime.exe" })
-                UniversalBundleContract.RequireWindowsExecutable(Path.Combine(releaseRoot, name));
+            UniversalBundleContract.RequireWindowsExecutable(Path.Combine(releaseRoot, "cloudgime-host-control.exe"));
+            foreach (var name in new[] { "open-host-control.exe", "uninstaller-cloudgime.exe" })
+            {
+                var optionalPath = Path.Combine(releaseRoot, name);
+                if (File.Exists(optionalPath))
+                    UniversalBundleContract.RequireWindowsExecutable(optionalPath);
+            }
         }
         var productName = args.GetValue("product-name") ?? DefaultProductName;
         var appProductName = args.GetValue("app-product-name") ?? DefaultAppProductName;
@@ -276,7 +380,9 @@ internal static class Program
             RepairCloudgimeRuntimePermissions(dataRoot);
         }
 
-        if (launchAfterInstall)
+        // Sentinel stays deferred until the inline token claim completes. The NSIS
+        // wizard invokes finalize-universal-node immediately after that claim.
+        if (!universal && launchAfterInstall)
         {
             Log("install launching cloudgime-host-control.exe");
             StartProcessHidden(installedAppExe, $"--bundle-root \"{dataRoot}\"", dataRoot, waitForExit: false);
@@ -348,8 +454,13 @@ internal static class Program
             var directConfig = Path.Combine(transaction.RecoveryRoot, "direct-only-config.json");
             File.WriteAllText(directConfig, UniversalTransportPolicy.DirectOnly(config).ToJsonString(), Utf8NoBom);
             transaction.Replace(directConfig, configPath);
-            foreach (var name in new[] { "cloudgime-host-control.exe", "open-host-control.exe", "uninstaller-cloudgime.exe" })
-                transaction.Replace(Path.Combine(releaseRoot, name), Path.Combine(installRoot, name));
+            transaction.Replace(Path.Combine(releaseRoot, "cloudgime-host-control.exe"), Path.Combine(installRoot, "cloudgime-host-control.exe"));
+            foreach (var name in new[] { "open-host-control.exe", "uninstaller-cloudgime.exe" })
+            {
+                var optionalPath = Path.Combine(releaseRoot, name);
+                if (File.Exists(optionalPath))
+                    transaction.Replace(optionalPath, Path.Combine(installRoot, name));
+            }
             transaction.Replace(Environment.ProcessPath!, Path.Combine(installRoot, "cloudgime-host-bootstrap.exe"));
             // Upgrade reuses existing SCM/tasks/driver configuration; do not run fresh-install finalization.
             RunHostInstaller(dataRoot, "start-service", OptionalInstallerActionTimeout);
@@ -925,7 +1036,65 @@ internal static class Program
     {
         if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
             throw new InvalidOperationException("REPARSE_INSTALL_PATH_REJECTED");
-        Directory.Move(path, path + ".previous-" + Guid.NewGuid().ToString("N"));
+
+        try
+        {
+            Directory.Move(path, path + ".previous-" + Guid.NewGuid().ToString("N"));
+            return;
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            // /FRESH already archived all permitted identity records. Some managed
+            // Program Files parents deny a rename although SYSTEM may replace contents.
+            Log($"fresh quarantine rename denied; clearing verified data root instead: {ex.Message}");
+        }
+        catch (IOException ex)
+        {
+            Log($"fresh quarantine rename unavailable; clearing verified data root instead: {ex.Message}");
+        }
+
+        ClearVerifiedDirectoryContents(path);
+    }
+
+    private static void ClearVerifiedDirectoryContents(string path)
+    {
+        var root = NormalizeFullPath(path);
+        if ((File.GetAttributes(root) & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException("REPARSE_INSTALL_PATH_REJECTED");
+
+        foreach (var child in Directory.EnumerateFileSystemEntries(root, "*", SearchOption.TopDirectoryOnly))
+        {
+            var attributes = File.GetAttributes(child);
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidOperationException("REPARSE_INSTALL_PATH_REJECTED");
+            if ((attributes & FileAttributes.Directory) != 0)
+                DeleteVerifiedDirectory(child);
+            else
+                DeleteVerifiedFile(child);
+        }
+    }
+
+    private static void DeleteVerifiedDirectory(string path)
+    {
+        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException("REPARSE_INSTALL_PATH_REJECTED");
+        foreach (var child in Directory.EnumerateFileSystemEntries(path, "*", SearchOption.TopDirectoryOnly))
+        {
+            var attributes = File.GetAttributes(child);
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidOperationException("REPARSE_INSTALL_PATH_REJECTED");
+            if ((attributes & FileAttributes.Directory) != 0)
+                DeleteVerifiedDirectory(child);
+            else
+                DeleteVerifiedFile(child);
+        }
+        Directory.Delete(path, recursive: false);
+    }
+
+    private static void DeleteVerifiedFile(string path)
+    {
+        File.SetAttributes(path, FileAttributes.Normal);
+        File.Delete(path);
     }
 
     private static bool IsUniversalBundle(string bundleRoot)
@@ -2075,192 +2244,53 @@ internal static class Program
         try
         {
             var daemonPath = Path.Combine(bundleRoot, "moonlight", "system", "cloudgime-runtime-agent.exe");
-            var normalizedBundleRoot = bundleRoot.Replace("'", "''");
-            var normalizedDaemonPath = daemonPath.Replace("'", "''");
-            var taskName = HostUserDaemonTaskName.Replace("'", "''");
-            var script = $@"
-$ErrorActionPreference = 'Stop'
-$taskName = '{taskName}'
-$bundleRoot = '{normalizedBundleRoot}'
-$daemonPath = '{normalizedDaemonPath}'
-$healthPath = Join-Path $bundleRoot 'moonlight\server\host_user_daemon_task_health.json'
-$action = New-ScheduledTaskAction -Execute $daemonPath -Argument ('--bundle-root ""' + $bundleRoot + '"" run-daemon')
-$startupTrigger = New-ScheduledTaskTrigger -AtStartup
-$logonTrigger = New-ScheduledTaskTrigger -AtLogOn
-$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
-$settingsSeed = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -MultipleInstances IgnoreNew
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($startupTrigger, $logonTrigger) -Principal $principal -Settings $settingsSeed -Force | Out-Null
-Write-Output 'task-policy-system-startup'
-$xmlRaw = & schtasks.exe /Query /TN $taskName /XML 2>$null | Out-String
-if ([string]::IsNullOrWhiteSpace($xmlRaw)) {{
-    throw 'Scheduled task was created but could not be queried back from Task Scheduler.'
-}}
-[xml]$taskXml = $xmlRaw
-$ns = New-Object System.Xml.XmlNamespaceManager($taskXml.NameTable)
-$ns.AddNamespace('t', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
-$settings = $taskXml.SelectSingleNode('/t:Task/t:Settings', $ns)
-if ($null -eq $settings) {{
-    throw 'Settings node missing in scheduled task XML.'
-}}
-function New-TaskNode([string]$name, [string]$value) {{
-    $node = $taskXml.CreateElement($name, $taskXml.DocumentElement.NamespaceURI)
-    $node.InnerText = $value
-    return $node
-}}
-function New-RestartOnFailureNode([string]$count, [string]$interval) {{
-    $node = $taskXml.CreateElement('RestartOnFailure', $taskXml.DocumentElement.NamespaceURI)
-    $countNode = $taskXml.CreateElement('Count', $taskXml.DocumentElement.NamespaceURI)
-    $countNode.InnerText = $count
-    [void]$node.AppendChild($countNode)
-    $intervalNode = $taskXml.CreateElement('Interval', $taskXml.DocumentElement.NamespaceURI)
-    $intervalNode.InnerText = $interval
-    [void]$node.AppendChild($intervalNode)
-    return $node
-}}
-$taskXml.DocumentElement.SetAttribute('version', '1.3')
-while ($settings.HasChildNodes) {{
-    [void]$settings.RemoveChild($settings.FirstChild)
-}}
-[void]$settings.AppendChild((New-TaskNode 'DisallowStartIfOnBatteries' 'false'))
-[void]$settings.AppendChild((New-TaskNode 'StopIfGoingOnBatteries' 'false'))
-[void]$settings.AppendChild((New-TaskNode 'ExecutionTimeLimit' 'PT0S'))
-[void]$settings.AppendChild((New-TaskNode 'Hidden' 'true'))
-[void]$settings.AppendChild((New-TaskNode 'MultipleInstancesPolicy' 'StopExisting'))
-[void]$settings.AppendChild((New-RestartOnFailureNode '999' 'PT1M'))
-[void]$settings.AppendChild((New-TaskNode 'StartWhenAvailable' 'true'))
-[void]$settings.AppendChild((New-TaskNode 'UseUnifiedSchedulingEngine' 'true'))
-[void]$settings.AppendChild((New-TaskNode 'Priority' '4'))
-$tempXml = Join-Path $env:TEMP ('cloudgime-host-user-task-' + [guid]::NewGuid().ToString('N') + '.xml')
-try {{
-    $taskXml.Save($tempXml)
-    & schtasks.exe /Create /TN $taskName /XML $tempXml /F | Out-Null
-}} finally {{
-    Remove-Item $tempXml -Force -ErrorAction SilentlyContinue
-}}
-$task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
-$daemon = Get-CimInstance Win32_Process | Where-Object {{
-    $_.ExecutablePath -eq $daemonPath -and
-    $_.CommandLine -like '* run-daemon*'
-}} | Select-Object -First 1
-$taskInfo = Get-ScheduledTaskInfo -TaskName $taskName
-if ($taskInfo.LastTaskResult -eq 267009) {{
-    Write-Output 'task-last-result-running'
-}}
-if ($null -eq $daemon) {{
-    if ($task.State -eq 'Running') {{
-        Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
-    }}
-    Start-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-    Write-Output 'task-daemon-start-requested'
-}}
-function Get-TaskTextValue($parent, [string]$xpath, [System.Xml.XmlNamespaceManager]$xmlNs) {{
-    $node = $parent.SelectSingleNode($xpath, $xmlNs)
-    if ($null -eq $node) {{
-        return ''
-    }}
-    return [string]$node.InnerText
-}}
-$exportRaw = Export-ScheduledTask -TaskName $taskName
-[xml]$exportXml = $exportRaw
-$exportNs = New-Object System.Xml.XmlNamespaceManager($exportXml.NameTable)
-$exportNs.AddNamespace('t', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
-$exportSettings = $exportXml.SelectSingleNode('/t:Task/t:Settings', $exportNs)
-$task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
-$taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
-$daemon = Get-CimInstance Win32_Process | Where-Object {{
-    $_.ExecutablePath -eq $daemonPath -and
-    $_.CommandLine -like '* run-daemon*'
-}} | Select-Object -First 1
-$issues = New-Object System.Collections.Generic.List[string]
-$multipleInstances = Get-TaskTextValue $exportSettings 't:MultipleInstancesPolicy' $exportNs
-$restartCount = Get-TaskTextValue $exportSettings 't:RestartOnFailure/t:Count' $exportNs
-$restartInterval = Get-TaskTextValue $exportSettings 't:RestartOnFailure/t:Interval' $exportNs
-$executionTimeLimit = Get-TaskTextValue $exportSettings 't:ExecutionTimeLimit' $exportNs
-$startWhenAvailable = Get-TaskTextValue $exportSettings 't:StartWhenAvailable' $exportNs
-$hidden = Get-TaskTextValue $exportSettings 't:Hidden' $exportNs
-$disallowBattery = Get-TaskTextValue $exportSettings 't:DisallowStartIfOnBatteries' $exportNs
-$stopBattery = Get-TaskTextValue $exportSettings 't:StopIfGoingOnBatteries' $exportNs
-$useUnifiedSchedulingEngine = Get-TaskTextValue $exportSettings 't:UseUnifiedSchedulingEngine' $exportNs
-$idleStopOnIdleEnd = Get-TaskTextValue $exportSettings 't:IdleSettings/t:StopOnIdleEnd' $exportNs
-$idleRestartOnIdle = Get-TaskTextValue $exportSettings 't:IdleSettings/t:RestartOnIdle' $exportNs
-if ($multipleInstances -ne 'StopExisting') {{ [void]$issues.Add(""multiple_instances:$multipleInstances"") }}
-if ($restartCount -ne '999') {{ [void]$issues.Add(""restart_count:$restartCount"") }}
-if ($restartInterval -ne 'PT1M') {{ [void]$issues.Add(""restart_interval:$restartInterval"") }}
-if ($executionTimeLimit -ne 'PT0S') {{ [void]$issues.Add(""execution_time_limit:$executionTimeLimit"") }}
-if ($startWhenAvailable -ne 'true') {{ [void]$issues.Add(""start_when_available:$startWhenAvailable"") }}
-if ($hidden -ne 'true') {{ [void]$issues.Add(""hidden:$hidden"") }}
-if ($disallowBattery -ne 'false') {{ [void]$issues.Add(""disallow_start_if_on_batteries:$disallowBattery"") }}
-if ($stopBattery -ne 'false') {{ [void]$issues.Add(""stop_if_going_on_batteries:$stopBattery"") }}
-if ($useUnifiedSchedulingEngine -ne 'true') {{ [void]$issues.Add(""use_unified_scheduling_engine:$useUnifiedSchedulingEngine"") }}
-$health = [ordered]@{{
-    schemaVersion = 1
-    taskName = $taskName
-    bundleRoot = $bundleRoot
-    daemonPath = $daemonPath
-    checkedAtUtc = [DateTime]::UtcNow.ToString('o')
-    policyValid = ($issues.Count -eq 0)
-    taskState = if ($null -ne $task) {{ [string]$task.State }} else {{ '' }}
-    lastTaskResult = if ($null -ne $taskInfo) {{ [int]$taskInfo.LastTaskResult }} else {{ 0 }}
-    lastRunTimeUtc = if ($null -ne $taskInfo -and $taskInfo.LastRunTime -is [DateTime]) {{ $taskInfo.LastRunTime.ToUniversalTime().ToString('o') }} else {{ '' }}
-    daemonRunning = ($null -ne $daemon)
-    daemonPid = if ($null -ne $daemon) {{ [int]$daemon.ProcessId }} else {{ 0 }}
-    taskSettings = [ordered]@{{
-        multipleInstancesPolicy = $multipleInstances
-        restartCount = $restartCount
-        restartInterval = $restartInterval
-        executionTimeLimit = $executionTimeLimit
-        startWhenAvailable = $startWhenAvailable
-        hidden = $hidden
-        disallowStartIfOnBatteries = $disallowBattery
-        stopIfGoingOnBatteries = $stopBattery
-        useUnifiedSchedulingEngine = $useUnifiedSchedulingEngine
-        idleStopOnIdleEnd = $idleStopOnIdleEnd
-        idleRestartOnIdle = $idleRestartOnIdle
-    }}
-    issues = @($issues)
-}}
-$healthDir = Split-Path -Parent $healthPath
-if (-not (Test-Path $healthDir)) {{
-    New-Item -ItemType Directory -Path $healthDir -Force | Out-Null
-}}
-$health | ConvertTo-Json -Depth 8 | Set-Content -Path $healthPath -Encoding UTF8
-if ($issues.Count -gt 0) {{
-    throw ('Host user-daemon task policy validation failed: ' + ($issues -join ', '))
-}}
-Write-Output 'task-policy-applied'
-";
-
-            var encodedScript = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
-            var result = StartProcessCaptured(
-                "powershell.exe",
-                $"-NoProfile -ExecutionPolicy Bypass -EncodedCommand {encodedScript}",
+            UniversalBundleContract.RequireWindowsExecutable(daemonPath);
+            var healthPath = Path.Combine(bundleRoot, "moonlight", "server", "host_user_daemon_task_health.json");
+            var command = $"\"{daemonPath}\" --bundle-root \"{bundleRoot}\" run-daemon";
+            var create = StartProcessCaptured(
+                "schtasks.exe",
+                $"/Create /TN \"{HostUserDaemonTaskName}\" /TR \"{command.Replace("\"", "\\\"")}\" /SC ONSTART /RU SYSTEM /RL HIGHEST /F",
                 Environment.SystemDirectory,
-                TimeSpan.FromSeconds(45));
+                TimeSpan.FromSeconds(20));
 
-            Log($"host-user-daemon task policy exitCode={result.ExitCode} timedOut={result.TimedOut}");
-            if (!string.IsNullOrWhiteSpace(result.Output))
-            {
-                Log($"host-user-daemon task policy output:{Environment.NewLine}{result.Output}");
-            }
+            Log($"host-user-daemon task creation exitCode={create.ExitCode} timedOut={create.TimedOut}");
+            if (!string.IsNullOrWhiteSpace(create.Output))
+                Log($"host-user-daemon task creation output:{Environment.NewLine}{create.Output}");
+            if (create.TimedOut)
+                throw new InvalidOperationException("Host user-daemon scheduled-task creation timed out.");
+            if (create.ExitCode != 0)
+                throw new InvalidOperationException($"Host user-daemon scheduled-task creation failed with exit code {create.ExitCode}.");
 
-            if (result.TimedOut)
-            {
-                throw new InvalidOperationException("Host user-daemon task policy timed out.");
-            }
+            var query = StartProcessCaptured(
+                "schtasks.exe",
+                $"/Query /TN \"{HostUserDaemonTaskName}\" /FO LIST",
+                Environment.SystemDirectory,
+                TimeSpan.FromSeconds(10));
+            if (query.TimedOut || query.ExitCode != 0 || !query.Output.Contains(HostUserDaemonTaskName, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Host user-daemon scheduled task could not be verified.");
 
-            if (result.ExitCode != 0)
+            Directory.CreateDirectory(Path.GetDirectoryName(healthPath)!);
+            var health = new JsonObject
             {
-                throw new InvalidOperationException($"Host user-daemon task policy failed with exit code {result.ExitCode}.");
-            }
+                ["schemaVersion"] = 2,
+                ["taskName"] = HostUserDaemonTaskName,
+                ["bundleRoot"] = bundleRoot,
+                ["daemonPath"] = daemonPath,
+                ["checkedAtUtc"] = DateTimeOffset.UtcNow.ToString("O"),
+                ["policyValid"] = true,
+                ["taskState"] = "Registered",
+                ["daemonStartDeferred"] = true,
+                ["notes"] = "The SYSTEM task is registered for startup. It is intentionally not synchronously started during first-boot installation."
+            };
+            File.WriteAllText(healthPath, health.ToJsonString(), Utf8NoBom);
+            Log("host-user-daemon task policy applied (startup launch deferred).");
         }
         catch (Exception ex)
         {
             Log($"host user-daemon task policy failed: {ex}");
-            throw new InvalidOperationException("Failed to harden and validate the host user-daemon scheduled task.", ex);
+            throw new InvalidOperationException("Failed to register and verify the host user-daemon scheduled task.", ex);
         }
     }
-
     private static void InstallKeepAwakeTasks(string bundleRoot)
     {
         try
@@ -3104,7 +3134,11 @@ try {{ Start-ScheduledTask -TaskName $taskName }} catch {{ Write-Output ('displa
     {
         try
         {
-            File.AppendAllText(LogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}", Utf8NoBom);
+            var line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}";
+            File.AppendAllText(LogPath, line, Utf8NoBom);
+            var diagnosticDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "CloudGime", "installer-diagnostics");
+            if (Directory.Exists(diagnosticDir))
+                File.AppendAllText(Path.Combine(diagnosticDir, "cloudgime-host-bootstrap.log"), line, Utf8NoBom);
         }
         catch
         {

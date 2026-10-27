@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 pub mod api_bindings;
 pub mod api_bindings_ext;
 pub mod config;
-pub mod ipc;
 pub mod direct_recovery;
+pub mod ipc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamSettings {

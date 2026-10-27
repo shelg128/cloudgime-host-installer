@@ -5,7 +5,7 @@ using System.Security.Principal;
 using System.Text.Json;
 namespace CloudgimeHostBootstrap;
 
-internal sealed record FirstBootInstallerPlan(int Version,string OperationId,string SentinelHelper,string SentinelHelperHash,
+internal sealed record FirstBootInstallerPlan(int Version,string OperationId,string HostInstaller,string HostInstallerHash,
     string ProvisioningRoot,string OperatorSid,string PackageHash,DateTimeOffset CreatedAt,DateTimeOffset ValidUntil);
 internal static class FirstBootInstallerBridge
 {
@@ -17,14 +17,19 @@ internal static class FirstBootInstallerBridge
     internal static void RunCore(string bundleRoot,string planPath,bool silent)
     {
         if(!IsAdministrator())throw new InvalidOperationException("HEADLESS_UAC_REQUIRED");
+        UniversalMachineBoundary.RequireProtected(Path.GetFullPath(bundleRoot),true);
+        UniversalMachineBoundary.RequireProtected(Path.GetDirectoryName(Path.GetFullPath(planPath))!,true);
         var plan=Read(bundleRoot,planPath);
         ProtectPlan(planPath);
         plan=Read(bundleRoot,planPath);
-        var helper=Path.GetFullPath(Path.Combine(bundleRoot,plan.SentinelHelper));
+        var helper=Path.GetFullPath(plan.HostInstaller);
         var planDirectory=Path.GetDirectoryName(Path.GetFullPath(planPath))!;var directoryInfo=new DirectoryInfo(planDirectory);if(directoryInfo.LinkTarget is not null)throw new InvalidDataException("FIRST_BOOT_PLAN_REPARSE_DENIED");
         if(!helper.StartsWith(Path.GetFullPath(bundleRoot)+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase)||!File.Exists(helper)
-            ||!CryptographicOperations.FixedTimeEquals(Convert.FromHexString(Hash(helper)),Convert.FromHexString(plan.SentinelHelperHash)))throw new InvalidDataException("FIRST_BOOT_HELPER_HASH_INVALID");
-        var bootstrap=System.Reflection.Assembly.GetExecutingAssembly().Location;
+            ||!CryptographicOperations.FixedTimeEquals(Convert.FromHexString(Hash(helper)),Convert.FromHexString(plan.HostInstallerHash)))throw new InvalidDataException("FIRST_BOOT_HELPER_HASH_INVALID");
+        UniversalMachineBoundary.RequireProtected(helper);
+        // Assembly.Location is empty in our published single-file executable;
+        // ProcessPath names the actual pinned bootstrap binary in both modes.
+        var bootstrap=Environment.ProcessPath??throw new InvalidDataException("FIRST_BOOT_PACKAGE_PATH_MISSING");
         if(!CryptographicOperations.FixedTimeEquals(Convert.FromHexString(Hash(bootstrap)),Convert.FromHexString(plan.PackageHash)))throw new InvalidDataException("FIRST_BOOT_PACKAGE_HASH_CHANGED");
         var expectedRoot=Path.GetFullPath(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),"CloudGime","Provisioning"));
         if(!string.Equals(Path.GetFullPath(plan.ProvisioningRoot),expectedRoot,StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("FIRST_BOOT_ROOT_CHANGED");
@@ -38,8 +43,8 @@ internal static class FirstBootInstallerBridge
             // but has a protected SYSTEM/Administrators DACL before task create;
             // untrusted users cannot exchange its command between validation and run.
             var command=helper.EndsWith(".dll",StringComparison.OrdinalIgnoreCase)
-                ?"dotnet "+Quote(helper)+" --installer-first-boot-plan "+Quote(Path.GetFullPath(planPath))+" "+planHash
-                :Quote(helper)+" --installer-first-boot-plan "+Quote(Path.GetFullPath(planPath))+" "+planHash;
+                ?"dotnet "+Quote(helper)+" installer-first-boot-plan --plan "+Quote(Path.GetFullPath(planPath))+" --plan-hash "+planHash+" --current-boot "+Quote(FirstBootInstallerReceiptPolicy.ReadCurrentBoot())
+                :Quote(helper)+" installer-first-boot-plan --plan "+Quote(Path.GetFullPath(planPath))+" --plan-hash "+planHash+" --current-boot "+Quote(FirstBootInstallerReceiptPolicy.ReadCurrentBoot());
             var wrapper=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(planPath))!,"fb-"+plan.OperationId+".cmd");
             WriteProtectedWrapper(wrapper,command);
             Execute("/Create","/TN",task,"/TR",Quote(wrapper),"/SC","ONCE","/ST","00:00","/RU","SYSTEM","/RL","HIGHEST","/F");
@@ -48,9 +53,9 @@ internal static class FirstBootInstallerBridge
             // profile/shell transaction. This receipt is written only by the
             // SYSTEM helper after provision + prepare + arm all succeed.
             var deadline=DateTimeOffset.UtcNow.AddMinutes(2);
-            while(!FirstBootComplete(plan.ProvisioningRoot,plan.OperationId)&&DateTimeOffset.UtcNow<deadline)
+            while(!FirstBootComplete(plan)&&DateTimeOffset.UtcNow<deadline)
                 Thread.Sleep(250);
-            if(!FirstBootComplete(plan.ProvisioningRoot,plan.OperationId))
+            if(!FirstBootComplete(plan))
                 throw new InvalidDataException("FIRST_BOOT_TASK_NO_COMPLETION");
             Execute("/Delete","/TN",task,"/F");
             File.Delete(wrapper);
@@ -64,15 +69,22 @@ internal static class FirstBootInstallerBridge
     }
     private static FirstBootInstallerPlan Read(string root,string path)
     {
-        var full=Path.GetFullPath(path);var baseRoot=Path.GetFullPath(root)+Path.DirectorySeparatorChar;
-        if(!full.StartsWith(baseRoot,StringComparison.OrdinalIgnoreCase)||!File.Exists(full)||new FileInfo(full).Length is 0 or >32768)throw new InvalidDataException("FIRST_BOOT_PLAN_PATH_INVALID");
+        var full=Path.GetFullPath(path);
+        var planDirectory=Path.Combine(UniversalMachineBoundary.ProvisioningRoot,"first-boot-plans");
+        if(!string.Equals(full,Path.Combine(planDirectory,"plan.json"),StringComparison.OrdinalIgnoreCase)
+            ||!File.Exists(full)||new FileInfo(full).Length is 0 or >32768)throw new InvalidDataException("FIRST_BOOT_PLAN_PATH_INVALID");
         var json=File.ReadAllText(full).TrimStart('\uFEFF');var p=JsonSerializer.Deserialize<FirstBootInstallerPlan>(json,new JsonSerializerOptions{PropertyNameCaseInsensitive=true})??throw new InvalidDataException("FIRST_BOOT_PLAN_INVALID");
-        if(p.Version!=1||!Guid.TryParse(p.OperationId,out _)||p.SentinelHelperHash.Length!=64||!p.SentinelHelperHash.All(Uri.IsHexDigit)||!Path.IsPathFullyQualified(p.ProvisioningRoot)
-            ||p.ValidUntil<=DateTimeOffset.UtcNow||p.ValidUntil>p.CreatedAt.AddMinutes(30)||!new SecurityIdentifier(p.OperatorSid).IsAccountSid())throw new InvalidDataException("FIRST_BOOT_PLAN_INVALID");return p;
+        var now=DateTimeOffset.UtcNow;
+        if(p.Version!=1||!Guid.TryParseExact(p.OperationId,"D",out var id)||id==Guid.Empty
+            ||p.HostInstallerHash is not {Length:64}||!p.HostInstallerHash.All(Uri.IsHexDigit)
+            ||p.PackageHash is not {Length:64}||!p.PackageHash.All(Uri.IsHexDigit)
+            ||string.IsNullOrWhiteSpace(p.HostInstaller)||!Path.IsPathFullyQualified(p.HostInstaller)||!Path.IsPathFullyQualified(p.ProvisioningRoot)
+            ||p.CreatedAt.Offset!=TimeSpan.Zero||p.ValidUntil.Offset!=TimeSpan.Zero||p.CreatedAt>now||p.ValidUntil<=now
+            ||p.ValidUntil<=p.CreatedAt||p.ValidUntil-p.CreatedAt>TimeSpan.FromMinutes(30)||!new SecurityIdentifier(p.OperatorSid).IsAccountSid())throw new InvalidDataException("FIRST_BOOT_PLAN_INVALID");return p;
     }
     private static void ProtectPlan(string planPath)
     {
-        var security=new FileSecurity();security.SetAccessRuleProtection(true,false);
+        var security=new FileSecurity();security.SetAccessRuleProtection(true,false);security.SetOwner(new SecurityIdentifier("S-1-5-32-544"));
         foreach(var sid in new[]{"S-1-5-18","S-1-5-32-544"})
             security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(sid),FileSystemRights.FullControl,AccessControlType.Allow));
         new FileInfo(planPath).SetAccessControl(security);
@@ -80,16 +92,29 @@ internal static class FirstBootInstallerBridge
     private static void WriteProtectedWrapper(string wrapper,string command)
     {
         File.WriteAllText(wrapper,"@echo off\r\n"+command+"\r\n",new System.Text.UTF8Encoding(false));
-        var security=new FileSecurity();security.SetAccessRuleProtection(true,false);
+        var security=new FileSecurity();security.SetAccessRuleProtection(true,false);security.SetOwner(new SecurityIdentifier("S-1-5-32-544"));
         foreach(var sid in new[]{"S-1-5-18","S-1-5-32-544"})
             security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(sid),FileSystemRights.FullControl,AccessControlType.Allow));
         new FileInfo(wrapper).SetAccessControl(security);
     }
-    private static bool FirstBootComplete(string root,string operation)
+    private static bool FirstBootComplete(FirstBootInstallerPlan plan)
     {
-        var path=Path.Combine(root,"first-boot-shell-private","installer-complete.json");
-        if(!File.Exists(path)||new FileInfo(path).Length is 0 or >4096)return false;
-        try{using var json=JsonDocument.Parse(File.ReadAllText(path));return json.RootElement.GetProperty("operationId").GetString()==operation&&json.RootElement.GetProperty("stage").GetString()=="ARMED";}catch{return false;}
+        var receipt=Path.Combine(plan.ProvisioningRoot,"first-boot-shell-private","installer-complete.json");
+        var journal=Path.Combine(plan.ProvisioningRoot,"first-boot-installer-private","installer-journal.json");
+        try
+        {
+            var handoff=Path.Combine(plan.ProvisioningRoot,"first-boot-shell-private","handoff.json");
+            foreach(var path in new[]{receipt,journal,handoff})
+            {
+                if(!File.Exists(path))return false;
+                UniversalMachineBoundary.RequireProtected(path);
+                if(new FileInfo(path).Length is 0 or >16384)return false;
+            }
+            return FirstBootInstallerReceiptPolicy.Matches(File.ReadAllText(journal),File.ReadAllText(receipt),File.ReadAllText(handoff),plan.OperationId,
+                plan.PackageHash,plan.HostInstallerHash,plan.OperatorSid,plan.ProvisioningRoot,FirstBootInstallerReceiptPolicy.ReadCurrentBoot());
+        }
+        catch(IOException){return false;}
+        catch(UnauthorizedAccessException){return false;}
     }
     private static void Execute(params string[] args)
     {

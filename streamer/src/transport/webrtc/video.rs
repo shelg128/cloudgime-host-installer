@@ -51,16 +51,16 @@ use crate::transport::{
 };
 
 mod annexb;
-#[path = "video_rtp_clock.rs"]
-mod video_rtp_clock;
+#[cfg(test)]
+#[path = "frame_boundary_tests.rs"]
+mod frame_boundary_tests;
 #[cfg(feature = "cloudgime-frame-correlation-qa")]
 #[path = "frame_probe.rs"]
 mod frame_probe;
 mod h264;
 mod h265;
-#[cfg(test)]
-#[path="frame_boundary_tests.rs"]
-mod frame_boundary_tests;
+#[path = "video_rtp_clock.rs"]
+mod video_rtp_clock;
 
 enum VideoCodec {
     H264 {
@@ -92,11 +92,17 @@ pub struct WebRtcVideo {
 }
 
 impl WebRtcVideo {
-    pub fn new(runtime: Handle, peer: Weak<RTCPeerConnection>, frame_queue_size: usize, recovery:Option<Arc<super::scoped_video_recovery::Recovery>>) -> Self {
+    pub fn new(
+        runtime: Handle,
+        peer: Weak<RTCPeerConnection>,
+        frame_queue_size: usize,
+        recovery: Option<Arc<super::scoped_video_recovery::Recovery>>,
+    ) -> Self {
         Self {
             clock_rate: 0,
             needs_idr: Default::default(),
-            sender: TrackLocalSender::new("video", runtime, peer, frame_queue_size).with_recovery(recovery),
+            sender: TrackLocalSender::new("video", runtime, peer, frame_queue_size)
+                .with_recovery(recovery),
             active_format: None,
             codec: None,
             supported_video_formats: SupportedVideoFormats::empty(),
@@ -308,7 +314,8 @@ impl WebRtcVideo {
 
     pub async fn send_decode_unit(&mut self, unit: &VideoDecodeUnit<'_>) -> DecodeResult {
         let source_ticks = (unit.timestamp.as_nanos() * 90_000 / 1_000_000_000) as u64;
-        let monotonic_ticks = (self.rtp_clock_began.elapsed().as_nanos() * 90_000 / 1_000_000_000) as u64;
+        let monotonic_ticks =
+            (self.rtp_clock_began.elapsed().as_nanos() * 90_000 / 1_000_000_000) as u64;
         let timestamp = self.rtp_clock.map(source_ticks, monotonic_ticks);
 
         let mut full_frame = Vec::new();
@@ -474,13 +481,17 @@ async fn send_single_frame(
     let frame_samples = match packetize_access_unit(samples, payloader, timestamp) {
         Ok(packets) if packets.is_empty() => {
             #[cfg(feature = "cloudgime-frame-correlation-qa")]
-            if let Some(p)=probe {p.record(meta,timestamp,important,0,0,"empty");}
+            if let Some(p) = probe {
+                p.record(meta, timestamp, important, 0, 0, "empty");
+            }
             return;
-        },
+        }
         Ok(packets) => packets,
         Err(err) => {
             #[cfg(feature = "cloudgime-frame-correlation-qa")]
-            if let Some(p)=probe {p.record(meta,timestamp,important,0,0,"packetizer_error");}
+            if let Some(p) = probe {
+                p.record(meta, timestamp, important, 0, 0, "packetizer_error");
+            }
             warn!("[Stream]: access unit rejected before enqueue: {err}");
             sender.clear_queue(true).await;
             needs_idr.store(true, Ordering::Release);
@@ -493,10 +504,22 @@ async fn send_single_frame(
     }
 
     #[cfg(feature = "cloudgime-frame-correlation-qa")]
-    let packet_meta=(frame_samples.len(),frame_samples.iter().filter(|p|p.header.marker).count());
-    let accepted=sender.send_samples(frame_samples, important).await;
+    let packet_meta = (
+        frame_samples.len(),
+        frame_samples.iter().filter(|p| p.header.marker).count(),
+    );
+    let accepted = sender.send_samples(frame_samples, important).await;
     #[cfg(feature = "cloudgime-frame-correlation-qa")]
-    if let Some(p)=probe {p.record(meta,timestamp,important,packet_meta.0,packet_meta.1,if accepted {"queued"}else{"queue_rejected"});}
+    if let Some(p) = probe {
+        p.record(
+            meta,
+            timestamp,
+            important,
+            packet_meta.0,
+            packet_meta.1,
+            if accepted { "queued" } else { "queue_rejected" },
+        );
+    }
     if !accepted {
         sender.clear_queue(true).await;
 
@@ -505,7 +528,11 @@ async fn send_single_frame(
     }
 }
 
-fn packetize_access_unit(samples:&mut Vec<BytesMut>,payloader:&mut impl Payloader,timestamp:u32)->Result<Vec<Packet>,anyhow::Error>{
+fn packetize_access_unit(
+    samples: &mut Vec<BytesMut>,
+    payloader: &mut impl Payloader,
+    timestamp: u32,
+) -> Result<Vec<Packet>, anyhow::Error> {
     // A NAL may emit zero RTP packets (AUD/filler/cached parameter sets).
     // Frame completeness must be marked on the final *emitted* packet, not
     // inferred from the final source NAL. Dropping Drain consumes the entire

@@ -33,3 +33,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 sha2 = "0.10"
 subtle = "2.6"
 uuid = { version = "1", features = ["v4"] }
+# Host Control is a standalone operator shell. It communicates with the host
+# through its installed bundle and HTTP control paths; it does not link the
+# web-server workspace crate. Keeping an unused path dependency here broke
+# clean portable builds because that workspace exposes no cloudgime-host crate.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Memory"] }
