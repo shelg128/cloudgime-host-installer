@@ -35,6 +35,10 @@ pub fn resolve_retry_identity(
             .map(str::trim)
             .filter(|v| !v.is_empty())
     };
+    let activation_state = text("ActivationState").or_else(|| text("activationState"));
+    if activation_state == Some("prepared_local") {
+        return Ok((default_host_id, default_device_id));
+    }
     let state_machine = text("MachineIdentity").or_else(|| text("machineIdentity"));
     let state_install = text("InstallInstanceId").or_else(|| text("installInstanceId"));
     if state_machine.is_none() && state_install.is_none() {
@@ -77,6 +81,14 @@ mod tests {
             ("m".into(), "i".into())
         );
         assert!(explicit_recovery_machine_state(&json!({"MachineIdentity":"m"})).is_err());
+    }
+    #[test]
+    fn prepared_local_state_permits_fresh_identity() {
+        let s = json!({"ActivationState":"prepared_local","MachineIdentity":"old-m","InstallInstanceId":"old-i","HostId":"h","SentinelDeviceId":"d"});
+        assert_eq!(
+            resolve_retry_identity(&s, "new-m", "new-i", "def-h".into(), "def-d".into()).unwrap(),
+            ("def-h".into(), "def-d".into())
+        );
     }
     #[test]
     fn no_state_uses_current_identity() {

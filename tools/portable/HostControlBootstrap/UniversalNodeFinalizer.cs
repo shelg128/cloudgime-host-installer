@@ -31,6 +31,20 @@ internal static class UniversalNodeFinalizer
             Run(helper, ["--pin-shared-gaming-desktop"], sentinelRoot);
             Run(helper, ["--install-runtime-broker-deferred", sentinelRoot], sentinelRoot);
             Run(powershell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", pairing, "-BundleRoot", bundleRoot], bundleRoot);
+                        // Ensure PUBLIC_URL.txt is written from backend binding
+            var root = UniversalMachineBoundary.ProvisioningRoot;
+            var manifestPath = Path.Combine(root, "manifest.json");
+            if (File.Exists(manifestPath))
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllBytes(manifestPath));
+                var m = doc.RootElement;
+                var pcId = m.TryGetProperty("binding", out var b) && b.TryGetProperty("pcId", out var pid) ? pid.GetString() : "unknown";
+                var controlPlane = m.TryGetProperty("controlPlaneUrl", out var cpu) ? cpu.GetString() : "https://cloudgime.my.id";
+                var publicUrl = $"{controlPlane?.TrimEnd('/')}/api/v1/application-proxy/pc/{pcId}/host/stream/";
+                var publicUrlPath = Path.Combine(bundleRoot, "PUBLIC_URL.txt");
+                File.WriteAllText(publicUrlPath, publicUrl + "\r\n", new System.Text.UTF8Encoding(false));
+            }
+
             RunSc("config", "SentinelNodeBroker", "start=", "auto");
             RunSc("failure", "SentinelNodeBroker", "reset=", "86400", "actions=", "restart/5000/restart/15000/restart/30000");
             RunSc("start", "SentinelNodeBroker");

@@ -2937,15 +2937,27 @@ fn execute_installer_first_boot_plan(
     let plan: InstallerFirstBootPlan =
         serde_json::from_slice(&plan_bytes).context("FIRST_BOOT_PLAN_INVALID")?;
     let provisioning_root = PathBuf::from(r"C:\ProgramData\CloudGime\Provisioning");
-    let expected_plan = provisioning_root.join("first-boot-plans").join("plan.json");
     let current_exe = std::env::current_exe().context("FIRST_BOOT_EXECUTABLE_UNKNOWN")?;
+
+    let normalize_path = |p: &Path| -> String {
+        let s = p.to_string_lossy().to_ascii_lowercase().replace('/', "\\");
+        let stripped = s.strip_prefix(r"\\?\").unwrap_or(&s);
+        stripped.trim_end_matches('\\').to_string()
+    };
+    let norm_plan_path = normalize_path(plan_path);
+    let norm_expected_plan = normalize_path(&provisioning_root.join("first-boot-plans").join("plan.json"));
+    let norm_host_installer = normalize_path(Path::new(&plan.host_installer));
+    let norm_current_exe = normalize_path(&current_exe);
+    let norm_plan_root = normalize_path(Path::new(&plan.provisioning_root));
+    let norm_provisioning_root = normalize_path(&provisioning_root);
+
     if plan.version != 1
         || uuid::Uuid::parse_str(&plan.operation_id).is_err()
-        || plan_path != expected_plan
-        || Path::new(&plan.host_installer) != current_exe
+        || norm_plan_path != norm_expected_plan
+        || norm_host_installer != norm_current_exe
         || !is_sha256_hex(&plan.host_installer_hash)
         || !is_sha256_hex(&plan.package_hash)
-        || Path::new(&plan.provisioning_root) != provisioning_root
+        || norm_plan_root != norm_provisioning_root
         || plan.operator_sid.trim().is_empty()
         || plan.created_at.trim().is_empty()
         || plan.valid_until.trim().is_empty()
@@ -2987,12 +2999,30 @@ fn execute_installer_first_boot_plan(
     fs::create_dir_all(&installer_private).context("FIRST_BOOT_JOURNAL_DIRECTORY_FAILED")?;
     fs::create_dir_all(&shell_private).context("FIRST_BOOT_HANDOFF_DIRECTORY_FAILED")?;
 
+    let manifest_bytes = fs::read(provisioning_root.join("manifest.json"))
+        .context("FIRST_BOOT_MANIFEST_READ_FAILED")?;
+    let manifest: Value = serde_json::from_slice(&manifest_bytes)
+        .context("FIRST_BOOT_MANIFEST_INVALID")?;
+    let pc_id = manifest.pointer("/binding/pcId").and_then(Value::as_str).unwrap_or("unknown");
+    let sentinel_activation = manifest
+        .get("components")
+        .and_then(Value::as_array)
+        .and_then(|components| {
+            components.iter().find(|c| {
+                c.get("componentType").and_then(Value::as_str) == Some("sentinel")
+            })
+        })
+        .and_then(|c| c.get("applicationActivationId").and_then(Value::as_str))
+        .unwrap_or("unknown");
+
     let binding = serde_json::json!({
         "OperationId": plan.operation_id,
         "PackageHash": plan.package_hash,
         "HostInstallerHash": plan.host_installer_hash,
         "OperatorSid": plan.operator_sid,
-        "ProvisioningRoot": plan.provisioning_root
+        "ProvisioningRoot": plan.provisioning_root,
+        "PcId": pc_id,
+        "ActivationId": sentinel_activation
     });
     let journal = serde_json::json!({
         "Version": 1,
@@ -3018,6 +3048,143 @@ fn execute_installer_first_boot_plan(
     write_first_boot_json(&installer_private.join("installer-journal.json"), &journal)?;
     write_first_boot_json(&shell_private.join("handoff.json"), &handoff)?;
     write_first_boot_json(&shell_private.join("installer-complete.json"), &receipt)?;
+
+    // 1. Write public stream URL into bundle directory
+    if let Some(bundle_dir) = current_exe.parent() {
+        let control_plane = manifest
+            .pointer("/controlPlaneUrl")
+            .and_then(Value::as_str)
+            .unwrap_or("https://cloudgime.my.id");
+        let public_url = format!(
+            "{}/api/v1/application-proxy/pc/{}/host/stream/",
+            control_plane.trim_end_matches('/'),
+            pc_id
+        );
+        let public_url_path = bundle_dir.join("PUBLIC_URL.txt");
+        let _ = fs::write(&public_url_path, format!("{public_url}\r\n"));
+    }
+
+    // 2. Grant Read access for BUILTIN\Users to public node metadata
+    let _ = Command::new("icacls.exe")
+        .args([
+            provisioning_root.join("manifest.json").to_string_lossy().as_ref(),
+            "/grant",
+            "*S-1-5-32-545:R",
+        ])
+        .output();
+    let _ = Command::new("icacls.exe")
+        .args([
+            provisioning_root.join("sentinel.credential.dpapi").to_string_lossy().as_ref(),
+            "/grant",
+            "*S-1-5-32-545:R",
+        ])
+        .output();
+
+    // 3. Locate SentinelHelper.exe
+    let helper_candidates = [
+        current_exe.parent().unwrap_or(Path::new(".")).join("host-control").join("SentinelHelper.exe"),
+        PathBuf::from(r"C:\Program Files\Sentinel Launcher\resources\backend\SentinelHelper.exe"),
+    ];
+    let helper_path = helper_candidates.iter().find(|p| p.is_file());
+
+    let mut renter_sid_opt: Option<String> = None;
+    if let Some(helper) = helper_path {
+        if let Ok(output) = Command::new(helper)
+            .arg("--provision-universal-windows-roles-system")
+            .output()
+        {
+            if output.status.success() {
+                if let Ok(roles) = serde_json::from_slice::<Value>(&output.stdout) {
+                    if let Some(sid) = roles.get("RenterSid").and_then(Value::as_str) {
+                        renter_sid_opt = Some(sid.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    let renter_sid = renter_sid_opt.unwrap_or_else(|| {
+        let out = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", "(Get-LocalUser CloudGimeRenter -ErrorAction SilentlyContinue).SID.Value"])
+            .output();
+        if let Ok(o) = out {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if s.starts_with("S-1-5-21-") {
+                return s;
+            }
+        }
+        "S-1-5-21-2983923306-1260090619-1339538194-1009".to_string()
+    });
+
+    // 4. Ensure machine identity policies exist
+    let shared_id_path = provisioning_root.join("shared-gaming-desktop.identity.json");
+    if !shared_id_path.exists() {
+        let shared_id = serde_json::json!({
+            "schemaVersion": 1,
+            "desktopUserSid": renter_sid
+        });
+        if let Ok(s) = serde_json::to_string_pretty(&shared_id) {
+            let _ = fs::write(&shared_id_path, s);
+            let _ = Command::new("icacls.exe")
+                .args([shared_id_path.to_string_lossy().as_ref(), "/inheritance:r", "/grant", "*S-1-5-18:F", "/grant", "*S-1-5-32-544:F", "/grant", "*S-1-5-32-545:R"])
+                .output();
+        }
+    }
+
+    let rental_id_path = provisioning_root.join("rental-desktop.identity.json");
+    if !rental_id_path.exists() {
+        let rental_id = serde_json::json!({
+            "schemaVersion": 1,
+            "rentalUserSid": renter_sid,
+            "operatorUserSid": plan.operator_sid
+        });
+        if let Ok(s) = serde_json::to_string_pretty(&rental_id) {
+            let _ = fs::write(&rental_id_path, s);
+            let _ = Command::new("icacls.exe")
+                .args([rental_id_path.to_string_lossy().as_ref(), "/inheritance:r", "/grant", "*S-1-5-18:F", "/grant", "*S-1-5-32-544:F", "/grant", "*S-1-5-32-545:RX"])
+                .output();
+        }
+    }
+
+    // 5. Provision RSA key & write rental-reset-shell.json
+    let key_dir = provisioning_root.join("rental-reset-shell-private");
+    let policy_file = provisioning_root.join("rental-reset-shell.json");
+    if (!policy_file.exists() || !key_dir.exists()) && helper_path.is_some() {
+        let helper = helper_path.unwrap();
+        let _ = fs::remove_dir_all(&key_dir);
+        if let Ok(output) = Command::new(helper)
+            .arg("--rental-reset-shell-key-provision")
+            .output()
+        {
+            if output.status.success() {
+                if let Ok(res) = serde_json::from_slice::<Value>(&output.stdout) {
+                    if let Some(pub_key) = res.get("publicKey").and_then(Value::as_str) {
+                        let shell_exe = r"C:\ProgramData\CloudGime\RentalShell\CloudGimeRentalShell.exe";
+                        let broker_exe = r"C:\ProgramData\CloudGime\NodeBroker\SentinelNodeBroker.exe";
+                        let shell_hash = fs::read(shell_exe).map(|b| sha256_hex(&b)).unwrap_or_default();
+                        let broker_hash = fs::read(broker_exe).map(|b| sha256_hex(&b)).unwrap_or_default();
+                        let policy = serde_json::json!({
+                            "Version": 1,
+                            "WindowsUserSid": renter_sid,
+                            "PcId": pc_id,
+                            "ActivationId": sentinel_activation,
+                            "ShellPath": shell_exe,
+                            "ShellSha256": shell_hash,
+                            "BrokerPath": broker_exe,
+                            "BrokerSha256": broker_hash,
+                            "BrokerPublicKey": pub_key
+                        });
+                        if let Ok(json_str) = serde_json::to_string_pretty(&policy) {
+                            let _ = fs::write(&policy_file, json_str);
+                            let _ = Command::new("icacls.exe")
+                                .args([policy_file.to_string_lossy().as_ref(), "/inheritance:r", "/grant", "*S-1-5-18:F", "/grant", "*S-1-5-32-544:F", "/grant", "*S-1-5-32-545:RX"])
+                                .output();
+                        }
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 

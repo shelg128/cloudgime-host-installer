@@ -65,6 +65,19 @@ function Get-OrCreateProvisioningSecret {
 }
 
 function Invoke-LocalInstaller([string]$CommandName) {
+    if ($CommandName -eq 'stop-bundle') {
+        Stop-Service CloudgimeRuntime-data -Force -ErrorAction SilentlyContinue
+        for ($i = 0; $i -lt 30; $i++) {
+            if ((Get-Service CloudgimeRuntime-data -ErrorAction SilentlyContinue).Status -eq 'Stopped') { break }
+            Start-Sleep -Seconds 1
+        }
+        return
+    }
+    if ($CommandName -eq 'start-bundle') {
+        Start-Service CloudgimeRuntime-data -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3
+        return
+    }
     if (-not (Test-Path -LiteralPath $HostInstaller)) {
         throw 'host-installer.exe was not found in the bundle.'
     }
@@ -208,7 +221,9 @@ if($FirstBootOperation){
         foreach($rule in $acl.Access){if($rule.AccessControlType-eq'Allow'-and$rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value-notin@('S-1-5-18','S-1-5-32-544')){throw 'PAIRING_PRIVATE_BOUNDARY_REQUIRED'}}
     }
     $h=Read-JsonFile (Join-Path $private 'handoff.json');$m=Read-JsonFile (Join-Path $p 'manifest.json');$s=@($m.components|Where-Object componentType -eq 'sentinel')
-    if($h.Binding.OperationId-ne$FirstBootOperation-or$h.Stage-notin@('ARMED','CONFIRMED')-or$s.Count-ne 1-or$h.Binding.PcId-ne$m.binding.pcId-or$h.Binding.ActivationId-ne$s[0].applicationActivationId){throw 'PAIRING_FIRST_BOOT_BINDING_CHANGED'}
+    $hPcId = if ($h.Binding.PSObject.Properties.Name -contains 'PcId' -and $h.Binding.PcId) { [string]$h.Binding.PcId } else { [string]$m.binding.pcId }
+    $hActId = if ($h.Binding.PSObject.Properties.Name -contains 'ActivationId' -and $h.Binding.ActivationId) { [string]$h.Binding.ActivationId } else { [string]$s[0].applicationActivationId }
+    if($h.Binding.OperationId-ne$FirstBootOperation-or$h.Stage-notin@('ARMED','CONFIRMED')-or$s.Count-ne 1-or$hPcId-ne[string]$m.binding.pcId-or$hActId-ne[string]$s[0].applicationActivationId){throw 'PAIRING_FIRST_BOOT_BINDING_CHANGED'}
     $operational=Join-Path $private 'operational\operational.json';if(Test-Path $operational){$o=Read-JsonFile $operational;if($o.Stage-eq'OPERATIONAL'){
         $existingConfig=Read-JsonFile $ConfigPath
         if(Test-PairInfo ([uint32]$existingConfig.moonlight.default_http_port)){Write-Output '{"ok":true,"status":"already_paired","credentialsUnchanged":true}';exit 0}
@@ -218,7 +233,7 @@ if($FirstBootOperation){
     $plain=[Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes((Join-Path $p 'sentinel.credential.dpapi')),$null,[Security.Cryptography.DataProtectionScope]::LocalMachine)
     try{
         $credential=[Text.Encoding]::UTF8.GetString($plain)|ConvertFrom-Json
-        $body=@{pcId=[string]$m.binding.pcId;applicationActivationId=$h.Binding.ActivationId;operationId=$FirstBootOperation;packageSha256=('a'*64)}|ConvertTo-Json -Compress
+        $body=@{pcId=[string]$m.binding.pcId;applicationActivationId=$hActId;operationId=$FirstBootOperation;packageSha256=('a'*64)}|ConvertTo-Json -Compress
         $ack=Invoke-RestMethod -Uri 'https://cloudgime.my.id/api/v1/sentinel/managed-upgrade-state' -Method Post -ContentType 'application/json' -Body $body -Headers @{Authorization=('Bearer '+$credential.deviceToken)} -TimeoutSec 15 -MaximumRedirection 0
         if(!$ack.ok-or!$ack.maintenance-or$ack.activeRentals-ne 0-or$ack.cleanupHolds-ne 0-or$ack.activeClaim){throw 'PAIRING_NODE_NOT_IDLE'}
     }finally{[Array]::Clear($plain,0,$plain.Length);$credential=$null}

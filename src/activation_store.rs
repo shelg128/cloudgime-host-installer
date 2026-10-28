@@ -88,8 +88,14 @@ pub(super) fn read_private(path: &Path) -> Result<Vec<u8>> {
             bail!("ACTIVATION_PRIVATE_ACL_INVALID")
         }
         let text = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(sid, len) });
-        if text != "S-1-5-18" && text != "S-1-5-32-544" {
-            bail!("ACTIVATION_PRIVATE_ACL_REQUIRED")
+if text != "S-1-5-18" && text != "S-1-5-32-544" {
+            if let Ok(cur_sid) = crate::provisioning::current_process_user_sid() {
+                if text != cur_sid {
+                    bail!("ACTIVATION_PRIVATE_ACL_REQUIRED")
+                }
+            } else {
+                bail!("ACTIVATION_PRIVATE_ACL_REQUIRED")
+            }
         }
     }
     reader::read_machine_owned(path)

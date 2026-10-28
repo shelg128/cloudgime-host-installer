@@ -755,7 +755,6 @@ internal static class Program
         InstallDisplayBootGuardTask(bundleRoot);
         InstallBundledGamepadDriver(bundleRoot);
         SyncPublicRouteMetadata(bundleRoot);
-        SeedPreparedLocalActivationState(bundleRoot, resetLocalIdentity);
         RepairSunshineSharedIfMissing(bundleRoot, releaseRoot);
         RepairPairSeedIfMissing(bundleRoot, releaseRoot);
         RepairCloudgimeRuntimePermissions(bundleRoot);

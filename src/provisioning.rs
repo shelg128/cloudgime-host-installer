@@ -1519,22 +1519,22 @@ pub(crate) fn restrict_to_local_system_and_current_user(path: &Path) -> Result<(
     #[cfg(windows)]
     {
         let current_user_sid = current_process_user_sid()?;
-        let output = std::process::Command::new("icacls")
-            .arg(path)
+        let mut cmd = std::process::Command::new("icacls");
+        cmd.arg(path)
             .arg("/inheritance:r")
             .arg("/grant:r")
-            // The writer keeps explicit access so an un-elevated installer can
-            // atomically replace its prior file. SIDs avoid localized account
-            // names and also work when the writer is LocalSystem.
             .arg(format!("*{current_user_sid}:F"))
             .arg("*S-1-5-18:F")
-            .arg("*S-1-5-32-544:F")
-            .arg("/remove:g")
-            .arg("*S-1-5-32-545")
+            .arg("*S-1-5-32-544:F");
+        if path.file_name().and_then(|n| n.to_str()) == Some("manifest.json") {
+            cmd.arg("/grant").arg("*S-1-5-32-545:R");
+        } else {
+            cmd.arg("/remove:g").arg("*S-1-5-32-545");
+        }
+        cmd.arg("/remove:g")
             .arg("*S-1-5-11")
-            .arg("*S-1-1-0")
-            .output()
-            .context("failed to apply credential ACL")?;
+            .arg("*S-1-1-0");
+        let output = cmd.output().context("failed to apply credential ACL")?;
         if !output.status.success() {
             bail!("credential ACL update failed");
         }
@@ -1545,7 +1545,7 @@ pub(crate) fn restrict_to_local_system_and_current_user(path: &Path) -> Result<(
 }
 
 #[cfg(windows)]
-fn current_process_user_sid() -> Result<String> {
+pub(crate) fn current_process_user_sid() -> Result<String> {
     let output = std::process::Command::new("whoami")
         .args(["/user", "/fo", "csv", "/nh"])
         .output()

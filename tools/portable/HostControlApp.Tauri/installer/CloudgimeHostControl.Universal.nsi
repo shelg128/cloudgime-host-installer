@@ -45,6 +45,9 @@ ShowInstDetails hide
 !insertmacro MUI_PAGE_DIRECTORY
 Page custom SetupTokenPageCreate SetupTokenPageLeave
 !insertmacro MUI_PAGE_INSTFILES
+!define MUI_FINISHPAGE_TEXT_REBOOT "Instalasi CloudGime Host selesai. Komputer harus direstart agar sistem rental CloudGime dan penguncian layar otomatis aktif."
+!define MUI_FINISHPAGE_TEXT_REBOOTNOW "Restart Komputer Sekarang (Disarankan)"
+!define MUI_FINISHPAGE_TEXT_REBOOTLATER "Saya akan restart nanti secara manual"
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_LANGUAGE "English"
 
@@ -100,10 +103,12 @@ Function SetupTokenPageCreate
   ${If} $0 == error
     Abort
   ${EndIf}
-  ${NSD_CreateLabel} 0 0 100% 30u "Enter the CloudGime setup token or license supplied by CloudRental. It is activated securely before installation continues."
+  ${NSD_CreateLabel} 0 0 100% 25u "Masukkan Setup Token / Lisensi CloudGime yang didapatkan dari Web Panel untuk PC ini:$\r$\nLisensi akan divalidasi dan dihubungkan secara otomatis."
   Pop $0
-  ${NSD_CreatePassword} 0 36u 100% 14u ""
+  ${NSD_CreateText} 0 30u 100% 14u ""
   Pop $SetupTokenInput
+  ${NSD_CreateLabel} 0 48u 100% 20u "Contoh: stk_pc03_xxxxxxxxxxxx (klik kanan -> Tempel / Ctrl+V)"
+  Pop $0
   ${NSD_SetFocus} $SetupTokenInput
   nsDialogs::Show
 FunctionEnd
@@ -166,6 +171,7 @@ activation_invoked:
   activation_ok:
     Return
   activation_missing:
+    IfSilent +2
     MessageBox MB_ICONSTOP "CloudGime activation component is missing from this installer bundle. Installation cannot continue."
     Abort
   activation_failed:
@@ -173,6 +179,7 @@ activation_invoked:
     StrCpy $R4 ""
     StrCpy $SetupTokenValue ""
     StrCpy $SetupTokenFile ""
+    IfSilent +2
     MessageBox MB_ICONSTOP "The setup token could not be activated. Check the token and network connection, then run Setup again."
     Abort
 FunctionEnd
@@ -319,5 +326,5 @@ bootstrap_done:
     MessageBox MB_ICONSTOP "CloudGime components were installed, but the control plane did not confirm rentalReady: true. Installation is not complete.$\r$\nCheck network/Sentinel readiness and run Setup again."
     Abort
   ${EndIf}
-
+  SetRebootFlag true
 SectionEnd
