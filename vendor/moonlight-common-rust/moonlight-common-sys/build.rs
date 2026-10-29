@@ -51,6 +51,7 @@ fn compile_moonlight(allow_vendored: bool) -> Option<(String, PathBuf)> {
 
     // builds into $OUT_DIR
     let mut config = cmake::Config::new("moonlight-common-c");
+    config.generator("NMake Makefiles");
     config.define("BUILD_SHARED_LIBS", "OFF");
     config.define("CMAKE_TRY_COMPILE_TARGET_TYPE", "STATIC_LIBRARY");
 

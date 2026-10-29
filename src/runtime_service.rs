@@ -61,7 +61,10 @@ pub(crate) fn transition(
         .map_err(|e| format!("SCM config {name}: {e}"))?;
     // Canonical paths ensure a service name collision cannot control another install.
     let root = std::fs::canonicalize(bundle_root).map_err(|e| format!("bundle path: {e}"))?;
-    let image = std::fs::canonicalize(&config.executable_path)
+    let raw_image_path = config.executable_path.to_string_lossy();
+    let unquoted = raw_image_path.trim().trim_matches('"');
+    let image_path = unquoted.split('"').next().unwrap_or(unquoted).trim();
+    let image = std::fs::canonicalize(image_path)
         .map_err(|e| format!("service image: {e}"))?;
     if !image.starts_with(&root)
         || !image
