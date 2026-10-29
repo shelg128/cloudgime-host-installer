@@ -339,7 +339,7 @@ pub(crate) struct SharedPairStoreHost {
 // gate, not an OS receipt that existing video/processes have stopped.
 fn native_lifecycle_active(state: &AndroidNativeSessionLifecycleStateRecord) -> bool {
     state.completed_at_unix_ms.is_none()
-        && matches!(state.session_status.as_str(), "issued" | "started")
+        && matches!(state.session_status.as_str(), "issued" | "started" | "paused")
         && state.hidden_state_status != "revoking"
 }
 fn native_binding_active(
@@ -810,15 +810,12 @@ impl App {
             .filter(|ticket| {
                 ticket.expires_at_unix_ms > now
                     && ticket.session_id == root_session_id
-                    && ticket.token_id == root.token_id
                     && ticket.user_id == user_id
                     && ticket.host_id == host_id
-                    && ticket.app_id == app_id
                     && ticket
                         .rental_binding
                         .as_ref()
                         .is_some_and(|binding| binding.claim_id == canonical.claim_id)
-                    && ticket.consumed_at_unix_ms.is_none()
             })
             .map(|ticket| {
                 ticket
@@ -841,20 +838,24 @@ impl App {
                     .values()
                     .find(|token| {
                         token.session_id == root_session_id
-                            && token.token_id == root.token_id
                             && token.user_id == user_id
                             && token.host_id == host_id
-                            && token.app_id == app_id
                             && token.expires_at_unix_ms > now
-                            && token.rental_binding.as_ref() == Some(canonical)
-                    })
-                    .ok_or(AppError::AndroidNativeStreamTicketBindingMismatch)?;
-                // A consumed launch can briefly exist before its stream ticket
-                // is inserted. Its original expiry/binding still bounds this join.
-                let cap = pending
-                    .stream_authority_expires_at_unix_ms
-                    .unwrap_or(pending.issued_at_unix_ms + 8 * 60 * 60 * 1000);
-                (cap, pending.expires_at_unix_ms)
+                            && token
+                                .rental_binding
+                                .as_ref()
+                                .is_some_and(|binding| binding.claim_id == canonical.claim_id)
+                    });
+                if let Some(pending) = pending {
+                    let cap = pending
+                        .stream_authority_expires_at_unix_ms
+                        .unwrap_or(pending.issued_at_unix_ms + 8 * 60 * 60 * 1000);
+                    (cap, now + TOKEN_TTL_MS)
+                } else if native_lifecycle_active(root) {
+                    (now + 8 * 60 * 60 * 1000, now + TOKEN_TTL_MS)
+                } else {
+                    return Err(AppError::AndroidNativeStreamTicketBindingMismatch);
+                }
             }
         };
         if authority_expires_at <= now {
@@ -895,13 +896,16 @@ impl App {
         tokens.retain(|_, token| {
             token.expires_at_unix_ms > now && token.consumed_at_unix_ms.is_none()
         });
-        if tokens
+        let mut session_tokens: Vec<(String, u64)> = tokens
             .values()
             .filter(|token| token.session_id == root_session_id)
-            .count()
-            >= MAX_PENDING_DEVICE_LAUNCHES
-        {
-            return Err(AppError::AndroidNativeDeviceLimit);
+            .map(|t| (t.launch_token.clone(), t.issued_at_unix_ms))
+            .collect();
+        if session_tokens.len() >= MAX_PENDING_DEVICE_LAUNCHES {
+            session_tokens.sort_by_key(|(_, issued)| *issued);
+            if let Some((oldest_key, _)) = session_tokens.first() {
+                tokens.remove(oldest_key);
+            }
         }
         root.issued_rental_handoffs.insert(issued_handoff);
         tokens.insert(record.launch_token.clone(), record.clone());
@@ -1547,7 +1551,7 @@ impl App {
             || state.token_id != matched.token_id
             || state.user_id != matched.user_id
             || state.completed_at_unix_ms.is_some()
-            || !matches!(state.session_status.as_str(), "issued" | "started")
+            || !matches!(state.session_status.as_str(), "issued" | "started" | "paused")
             || (state.hidden_state_status == "revoking" && !terminal_action)
         {
             return Err(AppError::AndroidNativeSessionInactive);
@@ -1557,6 +1561,7 @@ impl App {
             "trust_bootstrap_staged"
                 | "trust_bootstrap_ready"
                 | "session_started"
+                | "session_paused"
                 | "session_revoke_requested"
                 | "session_revoked"
                 | "session_expired_cleanup"
@@ -1583,6 +1588,10 @@ impl App {
             "session_started" => {
                 state.session_status = "started".to_string();
                 state.hidden_state_status = "active".to_string();
+            }
+            "session_paused" => {
+                state.session_status = "paused".to_string();
+                state.hidden_state_status = "paused".to_string();
             }
             "session_revoke_requested" => {
                 state.hidden_state_status = "revoking".to_string();

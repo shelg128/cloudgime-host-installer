@@ -738,19 +738,21 @@ struct AndroidNativeRentalBindingRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PostAndroidNativeTunnelLaunchTokenRequest {
+    #[serde(default, alias = "host_id")]
     host_id: Option<u32>,
+    #[serde(default, alias = "app_id")]
     app_id: Option<u32>,
-    #[serde(default, rename = "streamProfile")]
+    #[serde(default, rename = "streamProfile", alias = "stream_profile")]
     stream_profile: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "native_shell")]
     native_shell: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "client_os")]
     client_os: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "client_platform")]
     client_platform: Option<String>,
-    #[serde(default, rename = "rentalBinding")]
+    #[serde(default, rename = "rentalBinding", alias = "rental_binding")]
     rental_binding: Option<AndroidNativeRentalBindingRequest>,
-    #[serde(default, rename = "rootNativeSessionId")]
+    #[serde(default, rename = "rootNativeSessionId", alias = "root_native_session_id")]
     root_native_session_id: Option<String>,
 }
 

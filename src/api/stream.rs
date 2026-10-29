@@ -1212,6 +1212,11 @@ fn is_benign_pre_connect_lifecycle_reason(reason: &str) -> bool {
         || normalized == "control_channel_receive_failed_before_start_forward"
         || normalized == "control_channel_ended_before_start_forward"
         || normalized == "control_channel_heartbeat_timeout_before_connect"
+        || normalized == "control_channel_heartbeat_timeout_after_connect"
+        || normalized.starts_with("connection_terminated")
+        || normalized == "post_connect_control_channel_closed"
+        || normalized == "client_disconnected_paused"
+        || normalized == "paused_waiting_resume"
 }
 
 fn normalize_stream_display_mode(mode: &str) -> String {
@@ -4982,21 +4987,32 @@ async fn forward_stream_server_message(
                 "STREAM_CONNECTION_TERMINATED token={} error_code={}",
                 dynamic_display_session_token, error_code
             ));
-            note_host_lifecycle_phase("failed", &failure_reason);
-            maybe_schedule_host_failure_recovery(&failure_reason);
-            if legacy_runtime_selected_for_session && *error_code == -100 {
-                let failure_count = note_legacy_runtime_startup_failure().await;
+            let is_client_disconnect = *error_code == 0
+                || stream_connection_established.load(Ordering::Acquire)
+                || video_flow_ready_observed.load(Ordering::Acquire);
+            if is_client_disconnect {
                 append_host_stream_trace(&format!(
-                    "LEGACY_RUNTIME_STARTUP_FAILURE token={} stage=connection_terminated failure_count={} reason=legacy_no_video_traffic video_flow_ready={}",
-                    dynamic_display_session_token,
-                    failure_count,
-                    video_flow_ready_observed.load(Ordering::Acquire)
+                    "STREAM_CLIENT_DISCONNECTED_PAUSED token={} error_code={}",
+                    dynamic_display_session_token, error_code
                 ));
-                if failure_count >= 2 {
-                    maybe_schedule_legacy_runtime_auto_fallback(
+                note_host_lifecycle_phase("ready", "paused_waiting_resume");
+            } else {
+                note_host_lifecycle_phase("failed", &failure_reason);
+                maybe_schedule_host_failure_recovery(&failure_reason);
+                if legacy_runtime_selected_for_session && *error_code == -100 {
+                    let failure_count = note_legacy_runtime_startup_failure().await;
+                    append_host_stream_trace(&format!(
+                        "LEGACY_RUNTIME_STARTUP_FAILURE token={} stage=connection_terminated failure_count={} reason=legacy_no_video_traffic video_flow_ready={}",
                         dynamic_display_session_token,
-                        "legacy_no_video_traffic",
-                    );
+                        failure_count,
+                        video_flow_ready_observed.load(Ordering::Acquire)
+                    ));
+                    if failure_count >= 2 {
+                        maybe_schedule_legacy_runtime_auto_fallback(
+                            dynamic_display_session_token,
+                            "legacy_no_video_traffic",
+                        );
+                    }
                 }
             }
         }
@@ -6193,6 +6209,7 @@ pub async fn start_host(
                     if let Err(error) = scope.stop_owned_children().await {
                         warn!("[Native scope]: child exit unverified: {error}");
                     }
+                    note_host_lifecycle_phase("ready", "paused_waiting_resume");
                     // Never run the global legacy display/window-watch cleanup
                     // for a native session; generation binding is handled separately.
                     return;
@@ -8166,8 +8183,7 @@ pub async fn start_host(
             let stop_before_connect_reason = pre_connect_stop_reason
                 .clone()
                 .unwrap_or_else(|| "session_stopped_before_connect".to_string());
-            let benign_pre_connect_stop = !start_stream_was_received
-                && is_benign_pre_connect_lifecycle_reason(&stop_before_connect_reason);
+            let benign_pre_connect_stop = is_benign_pre_connect_lifecycle_reason(&stop_before_connect_reason);
             append_host_stream_trace(&format!(
                 "STOP_BEFORE_CONNECT token={} start_stream_received={} reason={}",
                 dynamic_display_session_token,
@@ -8175,12 +8191,12 @@ pub async fn start_host(
                 sanitize_trace_value(&stop_before_connect_reason)
             ));
             if benign_pre_connect_stop {
-                note_host_lifecycle_phase("ready", "pre_connect_client_closed_no_stream_started");
+                note_host_lifecycle_phase("ready", "paused_waiting_resume");
             } else {
                 note_host_lifecycle_phase("failed", &stop_before_connect_reason);
-            }
-            if !benign_pre_connect_stop && pre_connect_stop_reason.is_none() {
-                maybe_schedule_host_failure_recovery("session_stopped_before_connect");
+                if pre_connect_stop_reason.is_none() {
+                    maybe_schedule_host_failure_recovery("session_stopped_before_connect");
+                }
             }
             warn!(
                 "[Stream]: stopping before connection completed (start_stream_received={}, reason={})",
