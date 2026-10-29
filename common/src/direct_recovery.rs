@@ -9,7 +9,7 @@ pub enum SelectedStreamRoute {
 }
 impl SelectedStreamRoute {
     pub fn parse(value: Option<&str>) -> Option<Self> {
-        match value {
+        match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
             Some("direct") => Some(Self::Direct),
             Some("relay") => Some(Self::Relay),
             _ => None,

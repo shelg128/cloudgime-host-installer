@@ -727,21 +727,27 @@ struct PostAndroidNativeBootstrapWebSessionFromNativeSessionRequest {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct AndroidNativeRentalBindingRequest {
+    #[serde(alias = "handoff_binding_id")]
     handoff_binding_id: String,
+    #[serde(alias = "claim_id")]
     claim_id: String,
+    #[serde(default, alias = "prepare_operation_id")]
     prepare_operation_id: Option<String>,
+    #[serde(default, alias = "rental_session_id")]
     rental_session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct PostAndroidNativeTunnelLaunchTokenRequest {
     #[serde(default, alias = "host_id")]
     host_id: Option<u32>,
     #[serde(default, alias = "app_id")]
     app_id: Option<u32>,
+    #[serde(default, alias = "pc_id")]
+    pc_id: Option<String>,
     #[serde(default, rename = "streamProfile", alias = "stream_profile")]
     stream_profile: Option<String>,
     #[serde(default, alias = "native_shell")]
