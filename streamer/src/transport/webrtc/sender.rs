@@ -42,7 +42,12 @@ use sender_queue::{FrameQueue, SenderWorkers, next_frame};
 #[path = "nack_probe.rs"]
 mod nack_probe;
 use super::scoped_video_recovery::{Recovery, RecoveryTrack};
+#[path = "video_egress_control.rs"]
+mod video_egress_control;
 use nack_probe::NackProbe;
+use video_egress_control::{
+    KeyframeDecision, VideoEgressControl, log_assessment,
+};
 
 #[cfg(feature = "cloudgime-egress-pacing-qa")]
 #[path = "frame_egress_plan_qa.rs"]
@@ -53,6 +58,9 @@ const VIDEO_PACKET_PACING_DELAY_US: u64 = 350;
 const RTP_BINDING_UNPAUSE_WAIT: Duration = Duration::from_secs(5);
 const RTP_BINDING_UNPAUSE_POLL: Duration = Duration::from_millis(20);
 const RTP_WRITE_TIMEOUT: Duration = Duration::from_millis(1500);
+/// A keyframe already asked for by the reliability path suppresses a second,
+/// host-initiated request inside this grace window.
+const EXTERNAL_KEYFRAME_GRACE: Duration = Duration::from_secs(2);
 
 fn video_playout_delay(label: &str) -> PlayoutDelayExtension {
     // RTP extension units are 10ms. QA only: permit bounded jitter buffering
@@ -104,6 +112,14 @@ pub fn register_header_extensions(api_media: &mut MediaEngine) -> Result<(), web
     Ok(())
 }
 
+/// Optional decision hook driven by the track worker's own measurement window.
+/// `None` for audio: audio has no keyframe path and must not inherit video policy.
+struct EgressControl {
+    state: Mutex<VideoEgressControl>,
+    needs_idr: Arc<AtomicBool>,
+    keyframe_requested_at: Arc<Mutex<Option<Instant>>>,
+}
+
 pub struct TrackLocalSender<Track>
 where
     Track: TrackLike,
@@ -117,6 +133,7 @@ where
     sequence_number: Arc<Mutex<u16>>,
     nack_probe: Arc<Mutex<NackProbe>>,
     recovery: Option<Arc<Recovery>>,
+    egress: Option<Arc<EgressControl>>,
 }
 
 impl<Track> TrackLocalSender<Track>
@@ -139,11 +156,26 @@ where
             sequence_number: Arc::new(Mutex::new(0)),
             nack_probe: Arc::new(Mutex::new(NackProbe::default())),
             recovery: None,
+            egress: None,
         }
     }
 
     pub fn with_recovery(mut self, recovery: Option<Arc<Recovery>>) -> Self {
         self.recovery = recovery;
+        self
+    }
+
+    /// Attach host-side egress backpressure control (video only).
+    pub(super) fn with_egress_control(
+        mut self,
+        needs_idr: Arc<AtomicBool>,
+        keyframe_requested_at: Arc<Mutex<Option<Instant>>>,
+    ) -> Self {
+        self.egress = Some(Arc::new(EgressControl {
+            state: Mutex::new(VideoEgressControl::new()),
+            needs_idr,
+            keyframe_requested_at,
+        }));
         self
     }
 
@@ -248,8 +280,9 @@ where
         let wake = self.queue.wake.clone();
         let queue = Arc::downgrade(&self.queue);
         let label = self.label;
+        let egress = self.egress.clone();
         self.workers.push(self.runtime.spawn(async move {
-            sample_sender(label, track, &wake, queue).await;
+            sample_sender(label, track, &wake, queue, egress).await;
         }));
         Ok(())
     }
@@ -258,12 +291,36 @@ where
     pub async fn send_samples(&self, samples: Vec<Track::Sample>, important: bool) -> bool {
         let accepted = self.queue.push(samples, important).await;
         if !accepted {
+            // A refused access unit means egress is behind. Do NOT request a
+            // keyframe here: the reliability path (PLI/NACK/packetizer error)
+            // owns IDRs, and re-requesting on overflow is what turned a slow
+            // encoder into a permanent 1-6 FPS drop -> IDR -> drop spiral.
+            if let Some(control) = &self.egress {
+                control.state.lock().await.on_queue_reject();
+            }
             warn!(
                 "[Stream]: {} sample queue full; dropping non-important sample",
                 self.label
             );
         }
         accepted
+    }
+
+    /// Requested output rate for the egress control window.
+    pub async fn set_target_fps(&self, redraw_rate: u32) {
+        if let Some(control) = &self.egress {
+            control.state.lock().await.set_target_fps(redraw_rate);
+        }
+    }
+
+    /// Total access units refused by the queue since the track started. Reported
+    /// alongside the window log so host-side blame has a cumulative counter too.
+    #[allow(dead_code)]
+    pub async fn egress_queue_rejects(&self) -> u64 {
+        match &self.egress {
+            Some(control) => control.state.lock().await.total_queue_rejects(),
+            None => 0,
+        }
     }
 
     pub async fn clear_queue(&self, clear_important: bool) {
@@ -276,6 +333,7 @@ async fn sample_sender<Track>(
     track: Arc<Track>,
     new_samples_notify: &Notify,
     queue: Weak<FrameQueue<Track::Sample>>,
+    egress: Option<Arc<EgressControl>>,
 ) where
     Track: TrackLike,
 {
@@ -294,6 +352,13 @@ async fn sample_sender<Track>(
         };
         let queue_age_us = frame.enqueued_at.elapsed().as_micros() as u64;
         queue_max_us = queue_max_us.max(queue_age_us);
+        if label == "video" {
+            if let Some(control) = &egress {
+                let mut state = control.state.lock().await;
+                state.on_frame_queued();
+                state.on_backlog(frame.enqueued_at.elapsed());
+            }
+        }
         frames_dequeued += 1;
         let send_started = Instant::now();
         let should_micro_pace = frame.samples.len() >= VIDEO_PACKET_PACING_BATCH * 2;
@@ -358,6 +423,14 @@ async fn sample_sender<Track>(
             }
         }
         frame_send_max_us = frame_send_max_us.max(send_started.elapsed().as_micros() as u64);
+        if label == "video" {
+            if let Some(control) = &egress {
+                control.state.lock().await.on_frame_sent();
+            }
+        }
+        if let Some(control) = &egress {
+            maybe_apply_egress_control(label, control).await;
+        }
         if last_stats_log_at.elapsed() >= Duration::from_secs(5) {
             info!(
                 "[Stream]: pace {label} q_us={queue_max_us} send_us={frame_send_max_us} frames={frames_dequeued} zero={zero_writes}"
@@ -369,6 +442,44 @@ async fn sample_sender<Track>(
             frame_send_max_us = 0;
             last_stats_log_at = Instant::now();
         }
+    }
+}
+
+/// Close the egress window (video only) and act on the verdict. A keyframe is
+/// requested only after sustained encoder stall evidence, never on queue overflow.
+async fn maybe_apply_egress_control(label: &'static str, control: &EgressControl) {
+    if label != "video" {
+        return;
+    }
+    let now = Instant::now();
+    let keyframe_in_flight = {
+        let last = *control.keyframe_requested_at.lock().await;
+        last.is_some_and(|at| now.saturating_duration_since(at) < EXTERNAL_KEYFRAME_GRACE)
+    };
+    let assessment = {
+        let mut state = control.state.lock().await;
+        let assessment = state.finish_window(now, keyframe_in_flight);
+        if assessment.is_some_and(|a| {
+            !matches!(a.verdict, video_egress_control::EgressVerdict::EncoderStall)
+                && !matches!(a.verdict, video_egress_control::EgressVerdict::Backpressure)
+        }) {
+            state.on_recovered();
+        }
+        assessment
+    };
+    let Some(assessment) = assessment else {
+        return;
+    };
+    log_assessment(label, &assessment);
+    if assessment.keyframe == KeyframeDecision::RequestIdr {
+        *control.keyframe_requested_at.lock().await = Some(now);
+        control.needs_idr.store(true, Ordering::Release);
+        warn!(
+            "[Stream]: egress recovery requested one keyframe (fps={:.1} target={:?} backlog_ms={})",
+            assessment.egress_fps,
+            assessment.target_fps,
+            assessment.max_backlog.as_millis()
+        );
     }
 }
 

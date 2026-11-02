@@ -55,3 +55,22 @@ A full Windows Sunshine candidate was built from the locked source and UCRT tool
 All diagnostic monitoring pauses completed with verified resume and tasks removed. No third-party service was permanently disabled. PC-02 is the validation target only; production code has no machine-name, PC-ID, IP, or specific-GPU exception.
 
 All modified upstream code and new patch code are GPL-3.0-only; distribute upstream license/notices and corresponding source with any modified binary.
+
+## Build fixes required for MSYS2 UCRT64 (GCC 16) — 1 November 2026
+
+`apply-cg-build-fixes.mjs` adds the four source fixes the upstream tree needs when
+compiled with MSYS2 UCRT64 GCC 16 against the LizardByte `build-deps` FFmpeg
+bundle. It is idempotent and must be run between `apply-toolchain-compat.mjs` and
+the CMake configure step; `tools/build-sunshine-capture.ps1` already does this.
+
+| Fix | Reason |
+|---|---|
+| `display_device::PlainStringSet` converter (`json.h`/`json.cpp`) | GCC 16 treats `std::set<std::string>` as a distinct type from `StringSet` (`std::less<>`), so `toJson(available_devices)` no longer resolves. |
+| `DATA_SHARDS_MAX` + full `_reed_solomon` layout in `src/rswrapper.h` | The wrapper replaced `nanors/rs.h`, which used to leak both the constant and the struct body that `stream.cpp` writes into. |
+| NVENC headers pinned to API 12.0 | The FFmpeg bundle ships 13.1, which removed `pixelBitDepthMinus8`/`inputPixelBitDepthMinus8`; Sunshine at 86188d4 still uses them. |
+| `libdav1d`, `libopus`, `libswresample`, `libvpl`, `strmiids` in `common.cmake` | `libavcodec.a` links those backends statically; without them the final link fails on `dav1d_*`, `swr_*`, `MFX*` and `IID_ICodecAPI`. |
+
+Required submodules are not fetched automatically: `parse` warns and the build
+script refuses a tree missing `nanors`, `nv-codec-headers`, `nvapi-open-source-sdk`,
+`tray`, `libdisplaydevice` or `moonlight-common-c`, because a partial tree produces
+silent ABI drift.

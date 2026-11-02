@@ -8110,7 +8110,19 @@ pub async fn start_host(
                 clear_shared_player2_joiner(owner, None).await;
                 clear_shared_player2_bridge(owner).await;
             }
-            return; // no READY claim, global display restore or bundle scan
+            // A native-scope session also leaves the host display in stream mode. This early
+            // return used to skip every display restore path, so the desktop stayed at the
+            // renter's resolution until the next session. Restore here too, but keep the
+            // generation guard so a newer stream can never be rolled back by this cleanup.
+            if !should_skip_prepared_stream_restore_after_session_cleanup() {
+                restore_prepared_stream_display_best_effort_for_generation(
+                    &dynamic_display_session_token,
+                    "native_scope_completed",
+                    stream_generation,
+                )
+                .await;
+            }
+            return; // no READY claim or bundle scan; display restore handled above
         }
         if !ws_close_logged {
             append_host_stream_trace(&format!(

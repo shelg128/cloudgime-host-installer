@@ -81,6 +81,9 @@ pub struct WebRtcVideo {
     supported_video_formats: SupportedVideoFormats,
     sender: TrackLocalSender<SequencedTrackLocalStaticRTP>,
     needs_idr: Arc<AtomicBool>,
+    /// When the reliability path last asked for a keyframe. Shared with the
+    /// egress control so host-initiated recovery never stacks on top of it.
+    keyframe_requested_at: Arc<tokio::sync::Mutex<Option<std::time::Instant>>>,
     clock_rate: u32,
     active_format: Option<VideoFormat>,
     codec: Option<VideoCodec>,
@@ -98,11 +101,16 @@ impl WebRtcVideo {
         frame_queue_size: usize,
         recovery: Option<Arc<super::scoped_video_recovery::Recovery>>,
     ) -> Self {
+        let needs_idr = Arc::new(AtomicBool::new(false));
+        let keyframe_requested_at = Arc::new(tokio::sync::Mutex::new(None));
+        let sender = TrackLocalSender::new("video", runtime, peer, frame_queue_size)
+            .with_egress_control(needs_idr.clone(), keyframe_requested_at.clone())
+            .with_recovery(recovery);
         Self {
             clock_rate: 0,
-            needs_idr: Default::default(),
-            sender: TrackLocalSender::new("video", runtime, peer, frame_queue_size)
-                .with_recovery(recovery),
+            needs_idr,
+            keyframe_requested_at,
+            sender,
             active_format: None,
             codec: None,
             supported_video_formats: SupportedVideoFormats::empty(),
@@ -124,6 +132,7 @@ impl WebRtcVideo {
         };
 
         let needs_idr = self.needs_idr.clone();
+        let keyframe_requested_at = self.keyframe_requested_at.clone();
         #[cfg(feature = "cloudgime-frame-correlation-qa")]
         let frame_probe = self.frame_probe.clone();
         self.sender
@@ -144,6 +153,9 @@ impl WebRtcVideo {
                             #[cfg(feature = "cloudgime-frame-correlation-qa")]
                             frame_probe.pli();
                             needs_idr.store(true, Ordering::Release);
+                            crate::transport::webrtc::video::mark_keyframe_requested(
+                                &keyframe_requested_at,
+                            );
                         }
                         if let Some(_max_bitrate) =
                             packet.downcast_ref::<ReceiverEstimatedMaximumBitrate>()
@@ -219,6 +231,7 @@ impl WebRtcVideo {
 
         if !same_format_reconfigure {
             let needs_idr = self.needs_idr.clone();
+            let keyframe_requested_at = self.keyframe_requested_at.clone();
             #[cfg(feature = "cloudgime-frame-correlation-qa")]
             let frame_probe = self.frame_probe.clone();
             if let Err(err) = self
@@ -240,6 +253,9 @@ impl WebRtcVideo {
                                 #[cfg(feature = "cloudgime-frame-correlation-qa")]
                                 frame_probe.pli();
                                 needs_idr.store(true, Ordering::Release);
+                                crate::transport::webrtc::video::mark_keyframe_requested(
+                                    &keyframe_requested_at,
+                                );
                             }
                             if let Some(_max_bitrate) =
                                 packet.downcast_ref::<ReceiverEstimatedMaximumBitrate>()
@@ -273,6 +289,9 @@ impl WebRtcVideo {
         }
 
         self.clock_rate = codec.capability.clock_rate;
+        // Requested output rate: the egress control uses it only to detect that
+        // the encoder is not delivering, never to force a codec/route change.
+        self.sender.set_target_fps(redraw_rate).await;
 
         self.codec = match format {
             // -- H264
@@ -451,8 +470,17 @@ impl WebRtcVideo {
     }
 }
 
-pub fn register_video_codecs(media_engine: &mut MediaEngine) -> Result<(), webrtc::Error> {
-    for format in VideoFormat::all() {
+/// Records that the reliability path (PLI from the receiver) asked for a keyframe,
+/// so the egress control does not stack a second, redundant request on top.
+fn mark_keyframe_requested(at: &tokio::sync::Mutex<Option<std::time::Instant>>) {
+    // Try-lock keeps the RTCP packet path non-blocking: an unbounded await here
+    // would stall NACK/PLI processing behind the sender task.
+    if let Ok(mut slot) = at.try_lock() {
+        *slot = Some(std::time::Instant::now());
+    }
+}
+
+pub fn register_video_codecs(media_engine: &mut MediaEngine) -> Result<(), webrtc::Error> {    for format in VideoFormat::all() {
         let Some(codec) = video_format_to_codec(format) else {
             continue;
         };
@@ -521,10 +549,12 @@ async fn send_single_frame(
         );
     }
     if !accepted {
-        sender.clear_queue(true).await;
-
-        // We've dropped a frame (likely due to buffering)
-        needs_idr.store(true, Ordering::Release);
+        // A refused access unit only means the RTP egress is behind. Asking for a
+        // fresh IDR here used to make things worse: the keyframe competes with the
+        // frames already queued and can be refused too, so the client saw one IDR
+        // every ~1.5 s instead of a stable picture. The egress control now owns
+        // this decision (sustained encoder-stall evidence only).
+        warn!("[Stream]: video access unit refused by egress queue; awaiting egress control verdict");
     }
 }
 
