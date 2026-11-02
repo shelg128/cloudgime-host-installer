@@ -7154,7 +7154,10 @@ pub async fn start_host(
                                                     prepared_fps,
                                                     exact_prepared_surface
                                                 ));
-                                                if requested_height > requested_width {
+                                                // Only re-assert when the prepared surface was not an exact
+                                                // match. A portrait stream whose prepare already applied the
+                                                // requested mode needs no second resize.
+                                                if requested_height > requested_width && !exact_prepared_surface {
                                                     match reassert_stream_display_after_capture_refresh(
                                                         &dynamic_display_session_token,
                                                         requested_width,

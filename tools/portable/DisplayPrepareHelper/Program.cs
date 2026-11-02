@@ -1,4 +1,4 @@
-﻿using System.ComponentModel;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
@@ -7694,6 +7694,15 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
         if (isElevated)
         {
             EnsureVddRegistryPath();
+        }
+
+        // Fast path: the managed VDD is already active. Re-running device maintenance
+        // (pnp scan, driver restart, registry rewrite) costs seconds and cannot make an
+        // online display more online. Full preparation still runs for an absent or
+        // inactive VDD, so a new device mode never loses its registration.
+        if (preferredVdd is not null && preferredVdd.Active)
+        {
+            return initialDisplays;
         }
 
         var settingsChanged = isElevated && EnsureConfiguredVddMode(requestedMode?.Width ?? 0, requestedMode?.Height ?? 0, requestedFps);
