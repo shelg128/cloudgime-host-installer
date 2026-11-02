@@ -3169,12 +3169,18 @@ async fn restart_sunshine_capture_with_fallback(
     Err("Sunshine refresh fallback is only supported on Windows hosts".to_string())
 }
 
+fn is_fast_connect_enabled() -> bool {
+    // Enabled by default to eliminate the ~35s Sunshine restart penalty on every launch.
+    // Can be explicitly disabled for debugging with CLOUDGIME_FAST_CONNECT=0.
+    std::env::var("CLOUDGIME_FAST_CONNECT").unwrap_or_default() != "0"
+}
+
 async fn refresh_legacy_runtime_before_session(
     session_token: &str,
     address: &str,
     http_port: u16,
 ) -> Result<(), String> {
-    if std::env::var("CLOUDGIME_FAST_CONNECT").unwrap_or_default() == "1" {
+    if is_fast_connect_enabled() {
         append_host_stream_trace(&format!(
             "LEGACY_RUNTIME_REFRESH_SKIPPED token={} reason=fast_connect",
             session_token
@@ -7052,8 +7058,7 @@ pub async fn start_host(
                                     && prepared_vdd_capture_ready
                                     && ddx_nvenc_session
                                     && (result.changed || result.sunshine_capture_changed)
-                                    && std::env::var("CLOUDGIME_FAST_CONNECT").unwrap_or_default()
-                                        != "1";
+                                    && !is_fast_connect_enabled();
                                 let mut proactive_capture_refresh_completed = false;
 
                                 if should_proactively_refresh_prepared_vdd_capture {
