@@ -2909,6 +2909,26 @@ async fn restart_sunshine_capture_service_only(
     address: &str,
     http_port: u16,
 ) -> Result<(), String> {
+    // Fast connect: the patched capture engine follows the composed desktop
+    // without a stop/start cycle, so a running service must not be restarted
+    // here. Skipping it is what removes the ~35s launch penalty.
+    if is_fast_connect_enabled() {
+        append_host_stream_trace(&format!(
+            "SUNSHINE_CAPTURE_SERVICE_ONLY_REFRESH_SKIPPED token={} reason=fast_connect",
+            session_token
+        ));
+        if let Some(requested_mode) = requested_mode {
+            let _ = apply_dynamic_display_match(
+                session_token,
+                requested_mode.0,
+                requested_mode.1,
+                requested_mode.2,
+            )
+            .await;
+        }
+        return Ok(());
+    }
+
     let control_address = legacy_runtime_control_address(address);
     append_host_stream_trace(&format!(
         "SUNSHINE_CAPTURE_SERVICE_ONLY_REFRESH token={} stage=begin address={} port={}",
@@ -2984,6 +3004,13 @@ async fn restart_capture_runtime_for_output_change(
     address: &str,
     http_port: u16,
 ) -> Result<(), String> {
+    if is_fast_connect_enabled() {
+        append_host_stream_trace(&format!(
+            "SUNSHINE_CAPTURE_OUTPUT_REFRESH_SKIPPED token={} reason=fast_connect",
+            session_token
+        ));
+        return Ok(());
+    }
     let control_address = legacy_runtime_control_address(address);
     let bundle_root =
         current_bundle_root().ok_or_else(|| "failed to determine bundle root".to_string())?;
@@ -6830,7 +6857,7 @@ pub async fn start_host(
                                     ));
                                 }
 
-                                if result.sunshine_capture_target_changed {
+                                if result.sunshine_capture_target_changed && !is_fast_connect_enabled() {
                                     let capture_display = result
                                         .sunshine_capture_display
                                         .as_deref()
