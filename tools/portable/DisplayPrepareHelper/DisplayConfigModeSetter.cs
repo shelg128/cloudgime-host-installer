@@ -143,7 +143,7 @@ internal static class DisplayConfigModeSetter
         }
         return true;
     }
-    internal static bool ApplyExact(string deviceName, int width, int height, int fps, bool persistToDatabase = false)
+    internal static bool ApplyExact(string deviceName, int width, int height, int fps)
     {
         var before = Read();
         var candidates = before.Paths.Select((p, i) => (Name: ReadName(p), Index: i))
@@ -155,11 +155,10 @@ internal static class DisplayConfigModeSetter
         int code = SetDisplayConfig((uint)plan.Desired.Paths.Length, plan.Desired.Paths, (uint)plan.Desired.Modes.Length, plan.Desired.Modes, flags | Validate);
         if (code != 0) return false; // no mutation, no transient fallback reported as success
         bool accepted = false;
-        uint applyFlags = flags | Apply | (persistToDatabase ? SaveToDatabase : 0);
         try {
-            code = SetDisplayConfig((uint)plan.Desired.Paths.Length, plan.Desired.Paths, (uint)plan.Desired.Modes.Length, plan.Desired.Modes, applyFlags);
+            code = SetDisplayConfig((uint)plan.Desired.Paths.Length, plan.Desired.Paths, (uint)plan.Desired.Modes.Length, plan.Desired.Modes, flags | Apply | SaveToDatabase);
             if (code != 0) return false;
-            Thread.Sleep(30);
+            Thread.Sleep(80);
             accepted = Matches(plan, Read());
             return accepted;
         } finally {
