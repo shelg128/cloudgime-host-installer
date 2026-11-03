@@ -5139,7 +5139,7 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
     private static bool ShouldAllowRequestedStreamFallback(StreamDisplayPreference displayPreference) =>
         NormalizeStreamDisplayMode(displayPreference.Mode) is "auto";
 
-    private static HelperResult? VerifyAppliedDisplayStability(DisplaySnapshot display)
+    private static HelperResult? VerifyAppliedDisplayStability(DisplaySnapshot display, int durationMs = 6000)
     {
         var clock = Stopwatch.StartNew();
         var stable = DisplayModeStability.Verify(display.Width, display.Height, () => {
@@ -5147,7 +5147,7 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
                 var mode = GetCurrentMode(display.DeviceName, allowRegistryFallback: false);
                 return ((int)mode.dmPelsWidth, (int)mode.dmPelsHeight);
             } catch { return null; }
-        }, Thread.Sleep, () => clock.ElapsedMilliseconds);
+        }, Thread.Sleep, () => clock.ElapsedMilliseconds, durationMs);
         return stable ? null : Failure("display_mode_changed_after_apply");
     }
 
@@ -5641,7 +5641,9 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
             state.AppliedVdd = streamDisplay.ToSavedState();
         }
         WriteState(state);
-        if (changed && VerifyAppliedDisplayStability(streamDisplay) is { } unstable) return unstable;
+        // Runtime resize: the virtual display is already online and CCD mode was applied.
+        // A 200ms verification is sufficient, eliminating the 6-second sleep penalty.
+        if (changed && VerifyAppliedDisplayStability(streamDisplay, durationMs: 200) is { } unstable) return unstable;
         var reportedAppliedMode = BuildReportedAppliedMode(streamDisplay, requested, exactModeFallback);
 
         return new HelperResult
