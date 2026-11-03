@@ -64,6 +64,21 @@ impl NativeStreamRegistry {
         if entry.revoked {
             return Err("native_scope_revoked");
         }
+        // A client reconnect reuses the same owner session id. The previous connection
+        // is already cancelled (client closed / runtime-stop), but its child teardown is
+        // async and may also have failed verification, leaving the entry registered.
+        // Keeping it would demote the reconnect to secondary with no display authority:
+        // the client then waits forever on "preparing stream" with no video.
+        // Prune cancelled connections of this same session before deciding ownership.
+        let stale: Vec<Arc<NativeStreamScope>> = entry
+            .connections
+            .values()
+            .filter(|scope| scope.is_cancelled())
+            .cloned()
+            .collect();
+        for scope in &stale {
+            entry.connections.remove(&scope.generation);
+        }
         if entry.connections.len() >= 16 || entry.connections.contains_key(&generation) {
             return Err("native_connection_conflict");
         }
