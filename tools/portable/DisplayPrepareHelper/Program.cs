@@ -3641,7 +3641,9 @@ internal static partial class Program
             || text.Contains("Duet", StringComparison.OrdinalIgnoreCase)
             || text.Contains("QEMU", StringComparison.OrdinalIgnoreCase)
             || text.Contains("VirtIO", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("Red Hat", StringComparison.OrdinalIgnoreCase);
+            || text.Contains("Red Hat", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("StarDesk", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("WinDisc", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool TextLooksLikeCloudgimeVirtualDisplay(string? text)
@@ -4987,7 +4989,9 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
                text.Contains("PSCCDD", StringComparison.OrdinalIgnoreCase) ||
                text.Contains("QEMU", StringComparison.OrdinalIgnoreCase) ||
                text.Contains("VirtIO", StringComparison.OrdinalIgnoreCase) ||
-               text.Contains("Red Hat", StringComparison.OrdinalIgnoreCase);
+               text.Contains("Red Hat", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("StarDesk", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("WinDisc", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool DisplayLooksLikeCloudgimeVdd(DisplaySnapshot display)
@@ -8740,10 +8744,52 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
         if (DisplayLooksLikeMttVdd(display)) {
             int refresh = requestedMode.Frequency >= 30 ? (int)Math.Round(requestedMode.Frequency)
                 : display.Frequency >= 30 ? display.Frequency : 60;
-            if (!DisplayConfigModeSetter.ApplyExact(display.DeviceName, requestedMode.Width, requestedMode.Height, refresh))
-                throw new InvalidOperationException("managed_display_exact_mode_rejected");
-            return new DisplayModeApplyResult(true, false, false);
+            try {
+                if (DisplayConfigModeSetter.ApplyExact(display.DeviceName, requestedMode.Width, requestedMode.Height, refresh))
+                    return new DisplayModeApplyResult(true, false, false);
+            } catch (Exception ex) {
+                Console.Error.WriteLine($"Warning: DisplayConfigModeSetter rejected {requestedMode.Width}x{requestedMode.Height}@{refresh}: {ex.Message}. Falling back to smart aspect-snap.");
+            }
+
+            // SMART ASPECT-SNAP FOR MTT VDD:
+            // 1. Try direct DEVMODE ChangeDisplaySettingsEx for the exact requested mode
+            var mttCurrentMode = GetCurrentMode(display.DeviceName, allowRegistryFallback: true);
+            var directAttempt = TryApplyDisplayMode(display, requestedMode, mttCurrentMode);
+            if (directAttempt.Result == DispChangeSuccessful) {
+                return new DisplayModeApplyResult(true, false, directAttempt.RequiresApply);
+            }
+
+            // 2. Search for the nearest compatible mode by aspect ratio & orientation in VDD EDID
+            foreach (var compatibleMode in SelectCompatibleFallbackDisplayModes(display.DeviceName, requestedMode)) {
+                int compRefresh = compatibleMode.Frequency >= 30 ? (int)Math.Round(compatibleMode.Frequency) : refresh;
+                try {
+                    if (DisplayConfigModeSetter.ApplyExact(display.DeviceName, compatibleMode.Width, compatibleMode.Height, compRefresh)) {
+                        Console.Error.WriteLine($"Smart aspect-snap applied CCD mode {compatibleMode.Width}x{compatibleMode.Height}@{compRefresh} for requested {requestedMode.Width}x{requestedMode.Height}");
+                        return new DisplayModeApplyResult(true, true, false);
+                    }
+                } catch { }
+
+                var compAttempt = TryApplyDisplayMode(display, compatibleMode, mttCurrentMode);
+                if (compAttempt.Result == DispChangeSuccessful) {
+                    Console.Error.WriteLine($"Smart aspect-snap applied DEVMODE {compatibleMode.Width}x{compatibleMode.Height}@{compRefresh} for requested {requestedMode.Width}x{requestedMode.Height}");
+                    return new DisplayModeApplyResult(true, true, compAttempt.RequiresApply);
+                }
+            }
+
+            // 3. If display is already active at a valid resolution, retain it without failing
+            if (display.Width > 0 && display.Height > 0 && display.Active) {
+                Console.Error.WriteLine($"Smart aspect-snap: keeping current VDD mode {display.Width}x{display.Height}@{display.Frequency}");
+                return new DisplayModeApplyResult(true, true, false);
+            }
+
+            throw new InvalidOperationException($"managed_display_exact_mode_rejected: {requestedMode.Width}x{requestedMode.Height}@{refresh}");
         }
+
+
+
+
+
+
         var mode = GetCurrentMode(display.DeviceName, allowRegistryFallback: true);
         var preferNativeSurfaceFallback = ShouldPreferNativeSurfaceFallback(display, requestedMode);
 
@@ -9533,7 +9579,9 @@ private sealed record DisplayModeApplyResult(bool Applied, bool Fallback, bool R
             }
         }
 
-        return FindPreferredStreamDisplay(displays, preference, requireActive: true)
+        return FindVddDisplay(displays, requireActive: true)
+            ?? FindPreferredStreamDisplay(displays, preference, requireActive: true)
+            ?? FindVddDisplay(displays, requireActive: false)
             ?? FindPrimaryDisplay(displays);
     }
 
@@ -10075,7 +10123,6 @@ internal static class NativeMethods
         dmSize = (short)Marshal.SizeOf<DEVMODE>(),
     };
 }
-
 
 
 
