@@ -206,13 +206,34 @@ fn rewrite_sps_nal(nal: &Bytes) -> Bytes {
         return nal.clone();
     }
     let header_byte = nal[0];
+    // One-shot hex dump of the first real SPS so the parser can be corrected against the
+    // actual NVENC output instead of a synthetic sample.
+    {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static DUMPED: AtomicBool = AtomicBool::new(false);
+        if !DUMPED.swap(true, Ordering::Relaxed) {
+            let mut hex = String::new();
+            for b in nal.iter().take(64) {
+                hex.push_str(&format!("{:02x}", b));
+            }
+            eprintln!("SPS_RAW len={} hex={} engine=first-capture", nal.len(), hex);
+        }
+    }
     match rewrite_sps_payload(&nal[NalHeader::SIZE..]) {
         SpsRewrite::Changed(payload) => {
+            eprintln!(
+                "SPS_REWRITE applied original_len={} new_len={}",
+                nal.len() - NalHeader::SIZE,
+                payload.len()
+            );
             let mut out = BytesMut::with_capacity(NalHeader::SIZE + payload.len());
             out.put_u8(header_byte);
             out.extend_from_slice(&payload);
             out.freeze()
         }
-        SpsRewrite::Unchanged => nal.clone(),
+        SpsRewrite::Unchanged => {
+            eprintln!("SPS_REWRITE skipped original_len={}", nal.len() - NalHeader::SIZE);
+            nal.clone()
+        }
     }
 }
