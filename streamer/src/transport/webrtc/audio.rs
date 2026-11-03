@@ -114,7 +114,7 @@ impl WebRtcAudio {
                         rtcp_feedback: vec![],
                     },
                     "audio".to_string(),
-                    "moonlight".to_string(),
+                    "moonlight-audio".to_string(),
                 )
                 .into(),
                 |_| {},
