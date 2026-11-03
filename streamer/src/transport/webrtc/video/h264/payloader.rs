@@ -3,6 +3,7 @@ use num::FromPrimitive;
 use webrtc::rtp::{self, packetizer::Payloader};
 
 use crate::transport::webrtc::video::h264::{NalHeader, NalUnitType};
+use crate::transport::webrtc::video::h264::sps_rewriter::{rewrite_sps_payload, SpsRewrite};
 
 #[derive(Debug, Clone, Default)]
 pub struct H264Payloader {
@@ -157,7 +158,12 @@ impl Payloader for H264Payloader {
                 return Ok(vec![]);
             }
             NalUnitType::Sps => {
-                self.sps_nalu = Some(b.clone());
+                // Rewrite the SPS so the decoder is told max_num_reorder_frames=0 and
+                // max_dec_frame_buffering=1. Without it, Android hardware decoders such as
+                // c2.unisoc.avc.decoder hold one frame in the DPB until the next frame
+                // arrives, which is a fixed 33 ms at 30 fps (measured: decode 42 ms).
+                // A failed or rejected rewrite keeps the original NAL untouched.
+                self.sps_nalu = Some(rewrite_sps_nal(b));
                 return Ok(vec![]);
             }
             _ => {}
@@ -189,5 +195,24 @@ impl Payloader for H264Payloader {
 
     fn clone_to(&self) -> Box<dyn Payloader + Send + Sync> {
         Box::new(self.clone())
+    }
+}
+
+
+/// Applies the SPS VUI rewrite, returning the original bytes whenever the rewrite is not
+/// certain. The NAL header byte is preserved so the unit type never changes.
+fn rewrite_sps_nal(nal: &Bytes) -> Bytes {
+    if nal.len() <= NalHeader::SIZE {
+        return nal.clone();
+    }
+    let header_byte = nal[0];
+    match rewrite_sps_payload(&nal[NalHeader::SIZE..]) {
+        SpsRewrite::Changed(payload) => {
+            let mut out = BytesMut::with_capacity(NalHeader::SIZE + payload.len());
+            out.put_u8(header_byte);
+            out.extend_from_slice(&payload);
+            out.freeze()
+        }
+        SpsRewrite::Unchanged => nal.clone(),
     }
 }

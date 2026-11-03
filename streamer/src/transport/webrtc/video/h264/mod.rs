@@ -11,6 +11,8 @@ use crate::transport::webrtc::video::annexb::AnnexBStartCode;
 
 pub mod payloader;
 
+pub mod sps_rewriter;
+
 pub mod reader;
 
 #[allow(unused)]
